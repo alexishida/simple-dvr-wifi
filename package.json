@@ -30,7 +30,10 @@
     "verify:binaries": "node scripts/verify-media-binaries.mjs",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:installed": "node scripts/installed-smoke.mjs",
+    "device:test": "node scripts/device-test.mjs",
+    "soak": "node scripts/soak.mjs",
     "security:checklist": "node scripts/security-checklist.mjs",
+    "acceptance:report": "node scripts/acceptance.mjs",
     "release:assets": "node scripts/generate-release-assets.mjs",
     "release:gate": "node scripts/release-gate.mjs"
   },

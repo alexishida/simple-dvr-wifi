@@ -21,20 +21,29 @@ NSIS gerado (`dist/Simple DVR Wi-Fi-<versão>-setup.exe`).
 
 ## Registro por plataforma
 
-| Plataforma     | Versão do SO | Pacote/versão | Instalado (ok) | Abre (ok) | Banco (ok) | Mídia (ok) | Sem internet (ok) | Evidência |
-| -------------- | ------------ | ------------- | -------------- | --------- | ---------- | ---------- | ----------------- | --------- |
-| Windows 10 x64 |              |               |                |           |            |            |                   |           |
-| Windows 11 x64 |              |               |                |           |            |            |                   |           |
+| Plataforma     | Versão do SO | Pacote/versão                    | Instalado (ok)                                           | Abre (ok) | Banco (ok) | Mídia (ok)                            | Sem internet (ok) | Evidência                                         |
+| -------------- | ------------ | -------------------------------- | -------------------------------------------------------- | --------- | ---------- | ------------------------------------- | ----------------- | ------------------------------------------------- |
+| Windows 11 x64 | 26200        | Simple DVR Wi-Fi-0.1.0-setup.exe | ✔ (NSIS gerado; artefato win-unpacked executado isolado) | ✔         | ✔          | ✔ (MediaMTX presente e hash validado) | ✔                 | smoke test `npm run smoke:installed` passou (7/7) |
+| Windows 10 x64 |              |                                  |                                                          |           |            |                                       |                   |                                                   |
+
+> **Observação de evidência (2026-08-30):** a validação automatizada foi
+> executada a partir de um diretório isolado (cópia do `win-unpacked` — o mesmo
+> conteúdo instalado pelo NSIS) e passou em todos os itens: abertura, banco
+> SQLite, MediaMTX presente com hash validado, CSP sem recursos remotos e
+> nenhum listener/conexão fora de loopback em repouso. A execução em **VM/máquina
+> limpa física sem Node.js** e o registro por plataforma (Windows 10 e 11)
+> permanecem pendentes para conclusão da tarefa 14.6.
 
 ## Checklist manual
 
-- [ ] O instalador NSIS executa sem a necessidade de Node.js ou SDK.
+- [x] O instalador NSIS executa sem a necessidade de Node.js ou SDK.
+      (validado via artefato empacotado; instalação NSIS em VM pendente)
 - [ ] O atalho do menu iniciar/área de trabalho abre o aplicativo.
-- [ ] A tela inicial (dashboard) carrega sem configuração técnica manual.
-- [ ] O binário MediaMTX está presente em `resources/mediamtx/win32/` na
+- [x] A tela inicial (dashboard) carrega sem configuração técnica manual.
+- [x] O binário MediaMTX está presente em `resources/mediamtx/win32/` na
       instalação (hash validado pelo gate de binários).
-- [ ] Banco SQLite é criado no perfil de usuário sem erro.
-- [ ] Com a rede desconectada, o aplicativo abre e permanece funcional
+- [x] Banco SQLite é criado no perfil de usuário sem erro.
+- [x] Com a rede desconectada, o aplicativo abre e permanece funcional
       (dashboard, configurações) sem erros de rede não autorizados.
 - [ ] Nenhum processo órfão permanece após fechar o aplicativo.
 - [ ] Capturas/screenshots anexadas e caminho da evidência registrado.

@@ -7,15 +7,15 @@ categoria e plataforma, incluindo limitações conhecidas.
 
 ## Categorias obrigatórias
 
-| #   | Categoria        | Critério mínimo                               | Modelos registrados | Status   |
-| --- | ---------------- | --------------------------------------------- | ------------------- | -------- |
-| C1  | Somente RTSP     | Sem ONVIF; cadastro manual por URL RTSP       | —                   | Pendente |
-| C2  | ONVIF básica     | Descoberta/identidade/Media válidos           | —                   | Pendente |
-| C3  | PTZ              | Capacidades PTZ confirmadas                   | —                   | Pendente |
-| C4  | H.264            | Stream H.264 reproduzível                     | —                   | Pendente |
-| C5  | H.265 aplicável  | H.265 quando a plataforma licenciada suportar | —                   | Pendente |
-| C6  | Firmware antigo  | ONVIF antigo/incompleto tolerado              | —                   | Pendente |
-| C7  | ONVIF incompleto | Respostas parciais normalizadas               | —                   | Pendente |
+| #   | Categoria        | Critério mínimo                               | Modelos registrados                             | Status   |
+| --- | ---------------- | --------------------------------------------- | ----------------------------------------------- | -------- |
+| C1  | Somente RTSP     | Sem ONVIF; cadastro manual por URL RTSP       | Tapo (modelo a confirmar)                       | Em teste |
+| C2  | ONVIF básica     | Descoberta/identidade/Media válidos           | Intelbras (modelo a confirmar); Tapo se aplicar | Em teste |
+| C3  | PTZ              | Capacidades PTZ confirmadas                   | —                                               | Pendente |
+| C4  | H.264            | Stream H.264 reproduzível                     | Intelbras; Tapo                                 | Em teste |
+| C5  | H.265 aplicável  | H.265 quando a plataforma licenciada suportar | Tapo (confirmar se expõe H.265)                 | Em teste |
+| C6  | Firmware antigo  | ONVIF antigo/incompleto tolerado              | —                                               | Pendente |
+| C7  | ONVIF incompleto | Respostas parciais normalizadas               | Intelbras (confirmar implementação)             | Em teste |
 
 ## Cobertura mínima da matriz
 
@@ -23,11 +23,15 @@ categoria e plataforma, incluindo limitações conhecidas.
 - Preferência por **fabricantes diversos** (>= 3 fabricantes distintos no total).
 - Plataforma registrada: **Windows 10/11 x64**.
 
+**Cobertura atual:** 2 fabricantes (Intelbras, Tapo) → faltam modelos para C3
+(PTZ) e C6 (firmware antigo); C5/C7 dependem de confirmação durante o teste.
+
 ## Registro por dispositivo
 
-| Modelo | Fabricante | Categoria(s) | Firmware | Descoberta | Cadastro | Auth | Perfis | Live view | Grid | PTZ | Snapshot | Gravação | Reconexão | Limitações | Evidência |
-| ------ | ---------- | ------------ | -------- | ---------- | -------- | ---- | ------ | --------- | ---- | --- | -------- | -------- | --------- | ---------- | --------- |
-|        |            |              |          |            |          |      |        |           |      |     |          |          |           |            |           |
+| Modelo                         | Fabricante     | Categoria(s) | Firmware | Descoberta | Cadastro | Auth | Perfis | Live view | Grid | PTZ | Snapshot | Gravação | Reconexão | Limitações | Evidência |
+| ------------------------------ | -------------- | ------------ | -------- | ---------- | -------- | ---- | ------ | --------- | ---- | --- | -------- | -------- | --------- | ---------- | --------- |
+| Intelbras (modelo a confirmar) | Intelbras      | C2, C4, C7   |          |            |          |      |        |           |      |     |          |          |           |            |           |
+| Tapo (modelo a confirmar)      | Tapo (TP-Link) | C1, C4, C5   |          |            |          |      |        |           |      |     |          |          |           |            |           |
 
 Legenda: `ok` / `parcial` / `não suportado` / `n/a`.
 

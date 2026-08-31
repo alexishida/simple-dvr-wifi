@@ -1,0 +1,20 @@
+{
+  "platform": "win32",
+  "arch": "x64",
+  "node": "v25.4.0",
+  "generatedAt": "2026-08-31T00:35:50.683Z",
+  "metrics": {
+    "cycles": 40,
+    "cameras": 16,
+    "startRss": 61517824,
+    "endRss": 96235520,
+    "rssDeltaBytes": 34717696,
+    "peakHeapDeltaBytes": 9681408,
+    "cpuUserMs": 390,
+    "cpuSystemMs": 1063,
+    "sessionsAfterShutdown": 0,
+    "processesAfterShutdown": 0,
+    "configFilesAfterShutdown": 0,
+    "loopbackOnly": true
+  }
+}

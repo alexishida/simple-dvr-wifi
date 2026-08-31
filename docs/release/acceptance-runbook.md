@@ -5,6 +5,21 @@ quando **todos os itens obrigatórios** passarem no Windows ou tiverem limitaç�
 explicitamente permitida pelas specs. Evidência (screenshots, vídeos curtos,
 diagnóstico sanitizado) deve ser anexada ou referenciada por caminho.
 
+## Harness automatizado de aceite
+
+Execute o harness que roda automaticamente os critérios automatizáveis e gera
+`dist/release/acceptance-report.json`:
+
+```powershell
+npm run acceptance:report
+```
+
+O harness executa (e registra resultado): checklist de segurança/privacidade
+(A12), sem internet/loopback-only no pacote (A13), reinício via e2e (A5), build
+do candidato, fuses de segurança e binários com hash válido. Os itens que exigem
+hardware (A1, A2, A3, A6–A11) ficam marcados como pendentes para preenchimento
+manual abaixo.
+
 ## Preparação
 
 - Build candidato empacotado (NSIS) e instalado em Windows 10/11 x64.
