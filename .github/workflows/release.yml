@@ -1,0 +1,80 @@
+name: Release Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: "Dry run (não publica release)"
+        required: false
+        default: "false"
+
+jobs:
+  release:
+    name: Empacotamento e gate de release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalação limpa
+        run: npm ci
+
+      - name: Rebuild nativo para ABI Electron
+        run: npm run rebuild:native
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Testes
+        run: npm test
+
+      - name: Gate de binários (hash e presença)
+        run: npm run verify:binaries
+
+      - name: Gate de release (componente aprovado)
+        run: npm run release:gate
+
+      - name: Gerar SBOM, licenças e NOTICE
+        run: npm run release:assets
+
+      - name: Build e empacotamento Windows
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: npm run build:win
+
+      - name: Smoke test do pacote
+        run: npm run smoke:package
+
+      - name: Verificação de fuses no artefato
+        shell: powershell
+        run: |
+          $exe = Get-ChildItem -Recurse -Path dist -Filter "*.exe" | Where-Object { $_.Name -match "Simple DVR Wi-Fi" } | Select-Object -First 1
+          node scripts/verify-fuses.mjs $exe.FullName
+
+      - name: Upload de artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/release/*
+          if-no-files-found: error
+
+      - name: Publish release (opcional)
+        if: github.event.inputs.dryRun != 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.exe dist/*.blockmap --title "Simple DVR Wi-Fi ${{ github.ref_name }}" --notes "Ver assets de release em dist/release (SBOM, licenças, NOTICE)."

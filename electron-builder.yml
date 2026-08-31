@@ -1,0 +1,70 @@
+# appId/productName/ícone são metadados neutros até a definição final de nome
+# comercial e identidade visual (ver Open Questions do design).
+appId: com.simpledvrwifi.desktop
+productName: Simple DVR Wi-Fi
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!tests/*'
+  - '!e2e/*'
+  - '!docs/*'
+  - '!openspec/*'
+  - '!scripts/*'
+  - '!resources/*'
+  - '!build/*'
+  - '!electron-builder.yml'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintrc,.prettierrc,tsconfig*.json}'
+  - '!playwright.config.ts'
+asar: true
+asarUnpack:
+  - '**/node_modules/better-sqlite3/**'
+  - '**/*.node'
+extraResources:
+  - from: resources/mediamtx
+    to: mediamtx
+    filter:
+      - '**/*'
+  - from: resources/ffmpeg
+    to: ffmpeg
+    filter:
+      - '**/*'
+  - from: resources/media-binaries.json
+    to: media-binaries.json
+afterPack: scripts/apply-fuses.mjs
+npmRebuild: true
+# Assinatura de código Windows é parametrizada por variáveis de ambiente do CI
+# e NUNCA armazenada no repositório. O electron-builder assina automaticamente
+# quando CSC_LINK/CSC_KEY_PASSWORD (ou WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD) estão
+# definidos; sem esses segredos o build permanece sem assinatura. O job de
+# release (release.yml) injeta os segredos apenas quando existirem no runner.
+# win:
+#   signAndEditExecutable: true
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-setup.${ext}
+linux:
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+  category: Utility
+  artifactName: ${productName}-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Simple DVR Wi-Fi
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico

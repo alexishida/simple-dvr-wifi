@@ -1,0 +1,148 @@
+import { randomUUID } from 'node:crypto'
+import { writeFile, mkdir } from 'node:fs/promises'
+import { extname, join, resolve, relative } from 'node:path'
+
+export const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
+const ALLOWED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png'])
+const JPEG_MAGIC = Buffer.from([0xff, 0xd8, 0xff])
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+
+export class SnapshotError extends Error {
+  constructor(
+    message: string,
+    public readonly code:
+      | 'FETCH_FAILED'
+      | 'AUTH_FAILED'
+      | 'INVALID_TYPE'
+      | 'TOO_LARGE'
+      | 'WRITE_FAILED'
+      | 'NOT_ALLOWED',
+  ) {
+    super(message)
+  }
+}
+
+export interface SnapshotFetchOptions {
+  url: string
+  username?: string | null
+  password?: string | null
+  timeoutMs?: number
+  fetchImpl?: (
+    url: string,
+    init: RequestInit,
+  ) => Promise<{ status: number; ok: boolean; arrayBuffer(): Promise<ArrayBuffer> }>
+}
+
+export interface SnapshotSaveOptions {
+  cameraId: string
+  libraryRoot: string
+  capturedAt?: string
+}
+
+export interface SnapshotSaveResult {
+  path: string
+  relativePath: string
+  bytes: number
+  capturedAt: string
+}
+
+export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buffer> {
+  const fetchImpl =
+    options.fetchImpl ??
+    (async (url, init) => {
+      const response = await fetch(url, init)
+      return {
+        status: response.status,
+        ok: response.ok,
+        arrayBuffer: () => response.arrayBuffer(),
+      }
+    })
+
+  const headers: Record<string, string> = {}
+  if (options.username) {
+    headers.Authorization = `Basic ${Buffer.from(`${options.username}:${options.password ?? ''}`).toString('base64')}`
+  }
+
+  let response
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 8_000)
+    try {
+      response = await fetchImpl(options.url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch {
+    throw new SnapshotError('Falha ao acessar o endpoint de snapshot.', 'FETCH_FAILED')
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw new SnapshotError('Autenticação rejeitada.', 'AUTH_FAILED')
+  }
+  if (!response.ok) {
+    throw new SnapshotError(`Endpoint respondeu com status ${response.status}.`, 'FETCH_FAILED')
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer())
+
+  const magic = buffer.subarray(0, 4)
+  const isJpeg = JPEG_MAGIC.equals(magic.subarray(0, 3))
+  const isPng = PNG_MAGIC.equals(magic)
+  if (!isJpeg && !isPng) {
+    throw new SnapshotError('Tipo de imagem não permitido.', 'INVALID_TYPE')
+  }
+  if (buffer.byteLength > MAX_SNAPSHOT_BYTES) {
+    throw new SnapshotError('Snapshot acima do limite de tamanho.', 'TOO_LARGE')
+  }
+
+  return buffer
+}
+
+function extensionFor(buffer: Buffer): string {
+  return PNG_MAGIC.equals(buffer.subarray(0, 4)) ? '.png' : '.jpg'
+}
+
+export function isPathInsideLibrary(libraryRoot: string, candidate: string): boolean {
+  const fromRoot = relative(resolve(libraryRoot), resolve(candidate))
+  return fromRoot !== '' && !fromRoot.startsWith('..') && !fromRoot.includes(':')
+}
+
+export async function saveSnapshot(
+  buffer: Buffer,
+  options: SnapshotSaveOptions,
+): Promise<SnapshotSaveResult> {
+  const ext = extensionFor(buffer)
+  const capturedAt = options.capturedAt ?? new Date().toISOString()
+  const date = capturedAt.slice(0, 10)
+  const relativePath = join(options.cameraId, date, `${randomUUID()}${ext}`)
+  const absolutePath = resolve(options.libraryRoot, relativePath)
+
+  if (!isPathInsideLibrary(options.libraryRoot, absolutePath)) {
+    throw new SnapshotError('Caminho fora da biblioteca.', 'NOT_ALLOWED')
+  }
+
+  await mkdir(resolve(options.libraryRoot, options.cameraId, date), { recursive: true })
+  try {
+    await writeFile(absolutePath, buffer)
+  } catch {
+    throw new SnapshotError('Não foi possível gravar o snapshot.', 'WRITE_FAILED')
+  }
+
+  return {
+    path: absolutePath,
+    relativePath: relativePath.replaceAll('\\', '/'),
+    bytes: buffer.byteLength,
+    capturedAt,
+  }
+}
+
+export function validateExtension(rawPath: string): void {
+  const ext = extname(rawPath).toLowerCase()
+  if (!ALLOWED_EXTENSIONS.has(ext)) {
+    throw new SnapshotError('Extensão de arquivo não permitida.', 'INVALID_TYPE')
+  }
+}

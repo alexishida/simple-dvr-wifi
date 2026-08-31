@@ -1,0 +1,90 @@
+import type { CameraSummary } from '../../shared/contracts.js'
+import { useAppStore, type FullscreenProfile } from '../store/appStore.js'
+import { StatusBadge } from '../components/StatusBadge.js'
+import { CameraIcon, RecIcon, KeyIcon, BoltIcon } from '../icons.js'
+import { recordingStatusLabel } from '../status.js'
+
+interface FullscreenViewProps {
+  camera: CameraSummary
+}
+
+export function FullscreenView({ camera }: FullscreenViewProps): React.JSX.Element {
+  const profile = useAppStore((state) => state.fullscreenProfile)
+  const closeFullscreen = useAppStore((state) => state.closeFullscreen)
+  const setProfile = useAppStore((state) => state.setFullscreenProfile)
+  const recording = camera.recordingStatus === 'recording' || camera.recordingStatus === 'starting'
+
+  const switchProfile = (next: FullscreenProfile): void => {
+    setProfile(next)
+  }
+
+  return (
+    <div
+      className="fullscreen-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${camera.name} em tela cheia`}
+    >
+      <div className="fullscreen-header">
+        <div className="fullscreen-title">
+          <h2>{camera.name}</h2>
+          <StatusBadge status={camera.status} />
+        </div>
+        <div className="fullscreen-actions">
+          <div className="layout-switcher" role="group" aria-label="Perfil do stream">
+            <button
+              type="button"
+              className={`layout-btn${profile === 'main' ? ' layout-btn-active' : ''}`}
+              aria-pressed={profile === 'main'}
+              onClick={() => switchProfile('main')}
+            >
+              Main
+            </button>
+            <button
+              type="button"
+              className={`layout-btn${profile === 'sub' ? ' layout-btn-active' : ''}`}
+              aria-pressed={profile === 'sub'}
+              onClick={() => switchProfile('sub')}
+            >
+              Sub
+            </button>
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={closeFullscreen}>
+            Sair da tela cheia
+          </button>
+        </div>
+      </div>
+
+      <div className="fullscreen-video">
+        <div className="camera-video-placeholder">
+          <CameraIcon size={64} />
+          <span>{profile === 'main' ? 'Main stream' : 'Substream'} — pré-visualização</span>
+        </div>
+        {recording && (
+          <span className="rec-indicator" role="status">
+            <RecIcon size={16} />
+            {recordingStatusLabel(camera.recordingStatus)}
+          </span>
+        )}
+      </div>
+
+      <div className="fullscreen-meta">
+        <div className="camera-meta">
+          {camera.hasCredential && (
+            <span className="meta-chip">
+              <KeyIcon size={14} />
+              Credencial
+            </span>
+          )}
+          {camera.supportsPtz && (
+            <span className="meta-chip">
+              <BoltIcon size={14} />
+              PTZ
+            </span>
+          )}
+        </div>
+        <span className="fullscreen-host">{camera.host}</span>
+      </div>
+    </div>
+  )
+}

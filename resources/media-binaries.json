@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "purpose": "Manifesto de binários de mídia redistribuídos por plataforma. Todo componente adicionado ao pacote deve estar listado aqui com status aprovado, origem, licença e SHA-256 do arquivo efetivo. O job de release bloqueia qualquer componente ausente, não aprovado ou com hash divergente.",
+  "components": [
+    {
+      "id": "mediamtx",
+      "platform": "win32",
+      "fileName": "mediamtx.exe",
+      "version": "v1.20.0",
+      "origin": "https://github.com/bluenviron/mediamtx/releases/tag/v1.20.0",
+      "license": "MIT",
+      "buildConfig": "release oficial multiplataforma sem dependências",
+      "archiveSha256": "7364E7672E6B4420E986EC4B56E2CC32EC7B4085F69B56EC224D596D0FA8B19F",
+      "fileSha256": "6149B1854800295CC2578BCFC20DFB965F4B2FD5ACFE7B3D3D41FE2F5CBD38DF",
+      "status": "approved",
+      "notes": "Aprovado no spike docs/decisions/dependency-spike-windows.md. Arquivo efetivo validado: mediamtx_v1.20.0_windows_amd64.zip extraído, SHA-256 do mediamtx.exe fixado para validação em runtime."
+    },
+    {
+      "id": "ffmpeg",
+      "platform": "win32",
+      "fileName": "ffmpeg.exe",
+      "version": null,
+      "origin": null,
+      "license": "LGPL-2.1-or-later (pendente de aprovação)",
+      "buildConfig": "Somente build LGPL sem --enable-gpl ou --enable-nonfree; configuração exata e fontes correspondentes devem ser aprovadas antes da redistribuição",
+      "codecPolicy": {
+        "allowsGpl": false,
+        "allowsNonfree": false
+      },
+      "archiveSha256": null,
+      "fileSha256": null,
+      "status": "pending",
+      "notes": "Redistribuição bloqueada até aprovação de licença e fixação de versão/origem/hash. Não adicionar ao pacote enquanto status for pending."
+    }
+  ]
+}

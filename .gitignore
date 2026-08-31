@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+coverage/
+.env
+*.log
+data/
+recordings/
+snapshots/
+*.sqlite
+*.sqlite-*
+test-results/
+playwright-report/

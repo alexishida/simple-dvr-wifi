@@ -1,0 +1,1 @@
+Considere `.ai-framework\RULES.md` como a fonte oficial das regras do sistema.
