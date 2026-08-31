@@ -2,6 +2,7 @@
   "name": "simple-dvr-wifi",
   "version": "0.1.0",
   "description": "Monitoramento local e controle seguro de câmeras IP/Wi-Fi.",
+  "license": "MIT",
   "main": "./out/main/index.js",
   "type": "module",
   "engines": {
