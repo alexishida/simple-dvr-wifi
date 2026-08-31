@@ -1,123 +1,112 @@
-export type ProbeResult = 'ok' | 'unreachable' | 'timeout' | 'auth_error' | 'unsupported'
+import { createHash } from "node:crypto";
+import { createConnection } from "node:net";
+
+export type ProbeResult =
+  "ok" | "unreachable" | "timeout" | "auth_error" | "unsupported";
 
 export interface HttpProbeOptions {
-  url: string
-  username?: string | null
-  password?: string | null
-  timeoutMs?: number
-  signal?: AbortSignal
-  fetchImpl?: (url: string, init: RequestInit) => Promise<{ status: number }>
+  url: string;
+  username?: string | null;
+  password?: string | null;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  fetchImpl?: (url: string, init: RequestInit) => Promise<{ status: number }>;
 }
 
 export interface RtspProbeOptions {
-  url: string
-  username?: string | null
-  password?: string | null
-  timeoutMs?: number
-  signal?: AbortSignal
-  checkImpl?: (options: RtspCheckOptions) => Promise<ProbeResult>
+  url: string;
+  username?: string | null;
+  password?: string | null;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  checkImpl?: (options: RtspCheckOptions) => Promise<ProbeResult>;
 }
 
 export interface RtspCheckOptions {
-  url: string
-  username?: string | null
-  password?: string | null
-  timeoutMs: number
-  signal?: AbortSignal
+  url: string;
+  username?: string | null;
+  password?: string | null;
+  timeoutMs: number;
+  signal?: AbortSignal;
 }
 
 function parseUrl(raw: string): URL {
-  const url = new URL(raw)
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('URL de probe deve ser HTTP(S).')
+  const url = new URL(raw);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("URL de probe deve ser HTTP(S).");
   }
-  return url
+  return url;
 }
 
 function buildAuthorization(username: string, password: string): string {
-  return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`
+  return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
 }
 
-export async function probeHttp(options: HttpProbeOptions): Promise<ProbeResult> {
-  const url = parseUrl(options.url)
-  const timeoutMs = options.timeoutMs ?? 5_000
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+export async function probeHttp(
+  options: HttpProbeOptions,
+): Promise<ProbeResult> {
+  const url = parseUrl(options.url);
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   const signal = options.signal
     ? AbortSignal.any([options.signal, controller.signal])
-    : controller.signal
-  const headers: Record<string, string> = { Accept: '*/*' }
+    : controller.signal;
+  const headers: Record<string, string> = { Accept: "*/*" };
   if (options.username) {
-    headers.Authorization = buildAuthorization(options.username, options.password ?? '')
+    headers.Authorization = buildAuthorization(
+      options.username,
+      options.password ?? "",
+    );
   }
 
   try {
-    const fetchImpl = options.fetchImpl ?? ((u, init) => fetch(u, init))
-    const response = await fetchImpl(url.toString(), { method: 'GET', headers, signal })
-    if (controller.signal.aborted) return 'timeout'
+    const fetchImpl = options.fetchImpl ?? ((u, init) => fetch(u, init));
+    const response = await fetchImpl(url.toString(), {
+      method: "GET",
+      headers,
+      signal,
+    });
+    if (controller.signal.aborted) return "timeout";
     if (response.status === 401 || response.status === 403) {
-      return options.username ? 'auth_error' : 'unsupported'
+      return options.username ? "auth_error" : "unsupported";
     }
-    return response.status < 500 ? 'ok' : 'unreachable'
+    return response.status < 500 ? "ok" : "unreachable";
   } catch (error) {
-    if (options.signal?.aborted || controller.signal.aborted) return 'timeout'
-    if (error instanceof Error && error.name === 'AbortError') return 'timeout'
-    return 'unreachable'
+    if (options.signal?.aborted || controller.signal.aborted) return "timeout";
+    if (error instanceof Error && error.name === "AbortError") return "timeout";
+    return "unreachable";
   } finally {
-    clearTimeout(timer)
+    clearTimeout(timer);
   }
 }
 
-export async function probeRtsp(options: RtspProbeOptions): Promise<ProbeResult> {
-  const url = new URL(options.url)
-  if (url.protocol !== 'rtsp:' && url.protocol !== 'rtsps:') {
-    return 'unsupported'
+export async function probeRtsp(
+  options: RtspProbeOptions,
+): Promise<ProbeResult> {
+  const url = new URL(options.url);
+  if (url.protocol !== "rtsp:" && url.protocol !== "rtsps:") {
+    return "unsupported";
   }
-  const timeoutMs = options.timeoutMs ?? 5_000
+  const timeoutMs = options.timeoutMs ?? 5_000;
   const checkImpl =
     options.checkImpl ??
     (async (checkOptions: RtspCheckOptions): Promise<ProbeResult> => {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), checkOptions.timeoutMs)
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        checkOptions.timeoutMs,
+      );
       try {
-        const { createConnection } = await import('node:net')
-        const connection = await new Promise<'ok' | 'auth_error' | 'timeout'>((resolve) => {
-          const socket = createConnection({
-            host: checkOptions.url.hostname,
-            port: Number(checkOptions.url.port || 554),
-          })
-          socket.setTimeout(checkOptions.timeoutMs)
-          socket.once('connect', () => {
-            socket.write(
-              `DESCRIBE ${checkOptions.url.pathname} RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: SimpleDvrWifi\r\nAccept: application/sdp\r\n\r\n`,
-            )
-          })
-          socket.once('data', (data: Buffer) => {
-            const text = data.toString('utf8')
-            socket.destroy()
-            if (text.startsWith('RTSP/1.0 401')) resolve('auth_error')
-            else if (/^RTSP\/1\.0 2\d\d/.test(text)) resolve('ok')
-            else resolve('timeout')
-          })
-          socket.once('timeout', () => {
-            socket.destroy()
-            resolve('timeout')
-          })
-          socket.once('error', () => {
-            socket.destroy()
-            resolve('unreachable')
-          })
-          socket.once('close', () => {
-            resolve('unreachable')
-          })
-        })
-        clearTimeout(timer)
-        return connection
+        const connection = await probeRtspTcp(checkOptions, controller.signal);
+        clearTimeout(timer);
+        return connection;
       } catch {
-        return 'unreachable'
+        clearTimeout(timer);
+        return "unreachable";
       }
-    })
+    });
 
   return checkImpl({
     url,
@@ -125,5 +114,122 @@ export async function probeRtsp(options: RtspProbeOptions): Promise<ProbeResult>
     password: options.password,
     timeoutMs,
     signal: options.signal,
-  })
+  });
+}
+
+async function probeRtspTcp(
+  options: RtspCheckOptions,
+  signal: AbortSignal,
+): Promise<ProbeResult> {
+  const url = options.url;
+  const path = `${url.pathname}${url.search}`;
+  const uri = `${url.protocol}//${url.host}${path}`;
+  const username = (options.username ?? url.username) || null;
+  const password = (options.password ?? url.password) || null;
+
+  const socket = await new Promise<import("node:net").Socket>(
+    (resolve, reject) => {
+      const sock = createConnection({
+        host: url.hostname,
+        port: Number(url.port || 554),
+      });
+      sock.setTimeout(options.timeoutMs);
+      sock.once("connect", () => {
+        sock.removeListener("error", reject);
+        resolve(sock);
+      });
+      sock.once("error", reject);
+      signal.addEventListener("abort", () => sock.destroy(), { once: true });
+    },
+  );
+
+  try {
+    const describe = (
+      authorization: string | null,
+    ): Promise<{ status: number; text: string }> =>
+      new Promise((resolve, reject) => {
+        const headers = [
+          `DESCRIBE ${uri} RTSP/1.0`,
+          "CSeq: 1",
+          "User-Agent: SimpleDvrWifi",
+          "Accept: application/sdp",
+        ];
+        if (authorization) headers.push(`Authorization: ${authorization}`);
+        socket.write(headers.join("\r\n") + "\r\n\r\n");
+        const onData = (data: Buffer): void => {
+          const text = data.toString("utf8");
+          cleanup();
+          const statusMatch = /^RTSP\/1\.0 (\d{3})/.exec(text);
+          resolve({ status: statusMatch ? Number(statusMatch[1]) : 0, text });
+        };
+        const onError = (): void => {
+          cleanup();
+          reject(new Error("socket error"));
+        };
+        const onTimeout = (): void => {
+          cleanup();
+          reject(new Error("timeout"));
+        };
+        const onClose = (): void => {
+          cleanup();
+          reject(new Error("closed"));
+        };
+        const cleanup = (): void => {
+          socket.removeListener("data", onData);
+          socket.removeListener("error", onError);
+          socket.removeListener("timeout", onTimeout);
+          socket.removeListener("close", onClose);
+        };
+        socket.on("data", onData);
+        socket.once("error", onError);
+        socket.once("timeout", onTimeout);
+        socket.once("close", onClose);
+      });
+
+    const first = await describe(null);
+    if (/^RTSP\/1\.0 2\d\d/.test(first.text)) return "ok";
+
+    if (first.status === 401) {
+      if (!username) return "auth_error";
+      const challenge =
+        /WWW-Authenticate:\s*([^\r\n]+)/i.exec(first.text)?.[1] ?? "";
+      if (/^Digest/i.test(challenge)) {
+        const response = digestChallenge(
+          challenge,
+          "DESCRIBE",
+          uri,
+          username,
+          password ?? "",
+        );
+        if (!response) return "auth_error";
+        const second = await describe(`Digest ${response}`);
+        return /^RTSP\/1\.0 2\d\d/.test(second.text) ? "ok" : "auth_error";
+      }
+      return "auth_error";
+    }
+
+    return /^RTSP\/1\.0 2\d\d/.test(first.text) ? "ok" : "timeout";
+  } finally {
+    socket.destroy();
+  }
+}
+
+function digestChallenge(
+  header: string,
+  method: string,
+  uri: string,
+  username: string,
+  password: string,
+): string | null {
+  const realm = /realm="([^"]+)"/i.exec(header)?.[1];
+  const nonce = /nonce="([^"]+)"/i.exec(header)?.[1];
+  if (!realm || !nonce) return null;
+  const ha1 = createHash("md5")
+    .update(`${username}:${realm}:${password}`)
+    .digest("hex");
+  const ha2 = createHash("md5").update(`${method}:${uri}`).digest("hex");
+  const response = createHash("md5")
+    .update(`${ha1}:${nonce}:${ha2}`)
+    .digest("hex");
+  return `username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${response}"`;
 }

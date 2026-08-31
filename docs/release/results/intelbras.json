@@ -1,0 +1,57 @@
+{
+  "device": {
+    "onvifUrl": "http://192.168.0.108/onvif/device_service",
+    "rtspUrl": "rtsp://192.168.0.108:554/cam/realmonitor?channel=1&subtype=1",
+    "snapshotUri": null,
+    "hasPtz": "a confirmar"
+  },
+  "segments": [
+    {
+      "segment": "reachability",
+      "status": "ok",
+      "detail": "Endpoint ONVIF acessível."
+    },
+    {
+      "segment": "authentication",
+      "status": "ok",
+      "detail": "Autenticação ONVIF validada (WS-Security)."
+    },
+    {
+      "segment": "onvif",
+      "status": "ok",
+      "detail": "Identidade e 2 perfil(is) detectados."
+    },
+    {
+      "segment": "media",
+      "status": "warn",
+      "detail": "Serviço de mídia não declarado."
+    },
+    {
+      "segment": "rtsp",
+      "status": "ok",
+      "detail": "Stream RTSP acessível."
+    },
+    {
+      "segment": "snapshot",
+      "status": "warn",
+      "detail": "Snapshot não declarado."
+    },
+    {
+      "segment": "ptz",
+      "status": "ok",
+      "detail": "PTZ configurado."
+    },
+    {
+      "segment": "codec",
+      "status": "ok",
+      "detail": "Codecs: H264."
+    }
+  ],
+  "summary": {
+    "ok": 6,
+    "warn": 2,
+    "error": 0,
+    "skipped": 0
+  },
+  "executedAt": "2026-08-31T01:14:36.120Z"
+}
