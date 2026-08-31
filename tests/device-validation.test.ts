@@ -52,7 +52,22 @@ describe.skipIf(!enabled)("validação por dispositivo (hardware real)", () => {
 
     const output = await runSegmentedTest(
       { onvifUrl, rtspUrl, snapshotUri, username, password },
-      { onvifAdapter: adapter, probeHttp, probeRtsp, concurrency: 2 },
+      {
+        onvifAdapter: adapter,
+        probeHttp: (url, credentials) =>
+          probeHttp({
+            url,
+            username: credentials?.username,
+            password: credentials?.password,
+          }),
+        probeRtsp: (url, credentials) =>
+          probeRtsp({
+            url,
+            username: credentials?.username,
+            password: credentials?.password,
+          }),
+        concurrency: 2,
+      },
     );
 
     const result = {

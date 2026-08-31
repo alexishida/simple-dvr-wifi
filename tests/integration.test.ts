@@ -6,7 +6,7 @@ import {
   OnvifAdapter,
   type OnvifTransport,
 } from "../src/workers/camera/onvif-adapter.js";
-import { probeRtsp } from "../src/workers/camera/probes.js";
+import { probeHttp, probeRtsp } from "../src/workers/camera/probes.js";
 import {
   createInMemoryTransport,
   DatabaseSupervisor,
@@ -156,5 +156,95 @@ describe("end-to-end integration without physical hardware", () => {
       });
     });
     expect(true).toBe(true);
+  });
+
+  it("executes the device-test harness flow against the ONVIF simulator", async () => {
+    const onvif = new OnvifSimulator({
+      username: "admin",
+      password: "admin",
+      ptz: true,
+    });
+    await onvif.start();
+    cleanup.push(() => onvif.stop());
+
+    const transport: OnvifTransport = {
+      post: async (url, body, options = {}) => {
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          options.timeoutMs ?? 5_000,
+        );
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/soap+xml" },
+            body,
+            signal: controller.signal,
+          });
+          return { status: response.status, body: await response.text() };
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    };
+
+    const adapter = new OnvifAdapter({
+      deviceServiceUrl: onvif.url,
+      username: "admin",
+      password: "admin",
+      transport,
+      timeoutMs: 5_000,
+    });
+
+    const { runSegmentedTest } =
+      await import("../src/workers/camera/segmented-test.js");
+    const output = await runSegmentedTest(
+      {
+        onvifUrl: onvif.url,
+        rtspUrl: null,
+        snapshotUri: null,
+        username: "admin",
+        password: "admin",
+      },
+      {
+        onvifAdapter: adapter,
+        probeHttp: (url, credentials) =>
+          probeHttp({
+            url,
+            username: credentials?.username,
+            password: credentials?.password,
+          }),
+        probeRtsp: (url, credentials) =>
+          probeRtsp({
+            url,
+            username: credentials?.username,
+            password: credentials?.password,
+          }),
+        concurrency: 2,
+      },
+    );
+
+    const segments = new Map(output.segments.map((s) => [s.segment, s.status]));
+    expect(segments.get("reachability")).toBe("ok");
+    expect(segments.get("authentication")).toBe("ok");
+    expect(segments.get("onvif")).toBe("ok");
+    expect(segments.get("ptz")).toBe("ok");
+    expect(segments.get("media")).toBe("ok");
+    expect(segments.get("rtsp")).toBe("skipped");
+
+    // Formato do harness device:test (JSON por dispositivo)
+    const result = {
+      device: { onvifUrl: onvif.url, rtspUrl: null, hasPtz: "a confirmar" },
+      segments: output.segments.map((s) => ({
+        segment: s.segment,
+        status: s.status,
+        detail: s.detail,
+      })),
+      summary: output.summary,
+    };
+    expect(Array.isArray(result.segments)).toBe(true);
+    expect(result.segments).toHaveLength(8);
+    expect(result.summary).toMatchObject({ ok: expect.any(Number) });
+    expect(JSON.parse(JSON.stringify(result)).device.onvifUrl).toBe(onvif.url);
   });
 });
