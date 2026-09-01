@@ -1,8 +1,10 @@
 import type { CameraSummary } from '../../shared/contracts.js'
 import { useAppStore, type FullscreenProfile } from '../store/appStore.js'
 import { StatusBadge } from '../components/StatusBadge.js'
-import { CameraIcon, RecIcon, KeyIcon, BoltIcon } from '../icons.js'
+import { RecIcon, KeyIcon, BoltIcon } from '../icons.js'
 import { recordingStatusLabel } from '../status.js'
+import { LiveVideo } from '../components/LiveVideo.js'
+import { PtzPanel } from '../components/PtzPanel.js'
 
 interface FullscreenViewProps {
   camera: CameraSummary
@@ -56,10 +58,7 @@ export function FullscreenView({ camera }: FullscreenViewProps): React.JSX.Eleme
       </div>
 
       <div className="fullscreen-video">
-        <div className="camera-video-placeholder">
-          <CameraIcon size={64} />
-          <span>{profile === 'main' ? 'Main stream' : 'Substream'} — pré-visualização</span>
-        </div>
+        <LiveVideo cameraId={camera.id} cameraName={camera.name} profile={profile} />
         {recording && (
           <span className="rec-indicator" role="status">
             <RecIcon size={16} />
@@ -67,6 +66,15 @@ export function FullscreenView({ camera }: FullscreenViewProps): React.JSX.Eleme
           </span>
         )}
       </div>
+
+      {camera.supportsPtz && (
+        <PtzPanel
+          cameraId={camera.id}
+          supported
+          zoomSupported
+          presetsSupported={false}
+        />
+      )}
 
       <div className="fullscreen-meta">
         <div className="camera-meta">

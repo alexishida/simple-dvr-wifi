@@ -48,7 +48,9 @@ export class MediaSession {
   private healthTimer: NodeJS.Timeout | null = null
   private restartTimer: NodeJS.Timeout | null = null
   private configResult: ReturnType<typeof generateMediaMtxConfig> | null = null
+  private startPromise: Promise<MediaSessionStatus> | null = null
   private stopped = false
+  private exited = false
   private readonly factory: MediaProcessFactory
 
   constructor(private readonly options: MediaSessionOptions) {
@@ -82,11 +84,22 @@ export class MediaSession {
   whepEndpointFor(profile: 'main' | 'sub'): string | null {
     if (!this.configResult) return null
     const path = this.options.path
-    const profileSuffix = profile === 'sub' ? '_sub' : ''
-    return `http://127.0.0.1:${this.configResult.httpPort}/${path}${profileSuffix}/whep`
+    void profile
+    return `http://127.0.0.1:${this.configResult.httpPort}/${path}/whep`
   }
 
   async start(): Promise<MediaSessionStatus> {
+    if (this.startPromise) return this.startPromise
+    const attempt = this.startInternal()
+    this.startPromise = attempt
+    try {
+      return await attempt
+    } finally {
+      if (this.startPromise === attempt) this.startPromise = null
+    }
+  }
+
+  private async startInternal(): Promise<MediaSessionStatus> {
     if (this.stopped) return this.status
     if (this.status.state === 'running' && this.process) {
       return this.status
@@ -111,7 +124,10 @@ export class MediaSession {
       return this.status
     }
 
-    if (this.options.expectedHash && sha256OfFile(binaryBuffer) !== this.options.expectedHash) {
+    if (
+      this.options.expectedHash &&
+      sha256OfFile(binaryBuffer).toLowerCase() !== this.options.expectedHash.toLowerCase()
+    ) {
       this.status = {
         state: 'crashed',
         restarts: this.status.restarts,
@@ -121,6 +137,7 @@ export class MediaSession {
     }
 
     const tokens = generateSessionTokens()
+    const httpPort = await availablePortBlock()
     this.configResult = generateMediaMtxConfig({
       rtspUrl: this.options.rtspUrl,
       path: this.options.path,
@@ -128,21 +145,73 @@ export class MediaSession {
       webrtcToken: tokens.webrtcToken,
       rtmpToken: tokens.rtmpToken,
       srtToken: tokens.srtToken,
-      httpPort: randomPort(),
-      rtspPort: randomPort(),
-      rtmpPort: randomPort(),
+      httpPort,
+      rtspPort: httpPort + 3,
+      rtmpPort: httpPort + 4,
+      webrtcUdpPort: httpPort + 2,
       configDir: this.options.configDir,
       configFileName: this.options.configFileName,
     })
 
-    this.process = this.factory.spawn(this.options.binaryPath, [this.configResult.configPath])
-    this.process.onExit(() => {
+    this.exited = false
+    let processHandle: MediaProcessHandle
+    try {
+      processHandle = this.factory.spawn(this.options.binaryPath, [this.configResult.configPath])
+    } catch {
+      this.status = {
+        state: 'crashed',
+        restarts: this.status.restarts,
+        error: 'Não foi possível iniciar o processo MediaMTX.',
+      }
+      this.cleanupConfig()
+      return this.status
+    }
+    this.process = processHandle
+    processHandle.onExit(() => {
+      if (this.process !== processHandle) return
+      this.exited = true
       void this.handleCrash('Processo encerrado inesperadamente.')
     })
+
+    if (!this.options.processFactory) {
+      const ready = await waitForHttpListener(httpPort, () => this.exited)
+      if (!ready) {
+        await this.handleCrash(
+          'MediaMTX não iniciou; verifique a configuração e o log do sidecar.',
+        )
+        return this.status
+      }
+    }
 
     this.status = { state: 'running', restarts: this.status.restarts, error: null }
     this.startHealthCheck()
     return this.status
+  }
+
+  async setRecording(enabled: boolean, recordPath?: string): Promise<boolean> {
+    if (!this.configResult || this.status.state !== 'running') return false
+    const payload: Record<string, unknown> = { record: enabled }
+    if (enabled && recordPath) {
+      payload.recordPath = recordPath
+      payload.recordFormat = 'fmp4'
+      payload.recordPartDuration = '1s'
+      payload.recordSegmentDuration = '15m'
+      payload.recordDeleteAfter = '0s'
+    }
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${this.configResult.httpPort + 1}/v3/config/paths/patch/${encodeURIComponent(this.options.path)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(3_000),
+        },
+      )
+      return response.ok
+    } catch {
+      return false
+    }
   }
 
   private startHealthCheck(): void {
@@ -198,8 +267,9 @@ export class MediaSession {
       this.restartTimer = null
     }
     if (this.process) {
-      this.process.kill()
+      const processHandle = this.process
       this.process = null
+      processHandle.kill()
     }
   }
 
@@ -226,8 +296,54 @@ export class MediaSession {
   }
 }
 
-function randomPort(): number {
-  return 15_000 + Math.floor(Math.random() * 20_000)
+async function waitForHttpListener(port: number, exited: () => boolean): Promise<boolean> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline && !exited()) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port + 1}/v3/config/global/get`, {
+        signal: AbortSignal.timeout(250),
+      })
+      if (response.ok) return true
+    } catch {
+      // The sidecar can take a moment to bind its listeners.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 75))
+  }
+  return false
+}
+
+async function availablePortBlock(): Promise<number> {
+  const { createServer } = await import('node:net')
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const base = 15_000 + Math.floor(Math.random() * 35_000)
+    const ports = [base, base + 1, base + 3, base + 4]
+    const servers = ports.map(() => createServer())
+    try {
+      await Promise.all(
+        servers.map(
+          (server, index) =>
+            new Promise<void>((resolve, reject) => {
+              server.once('error', reject)
+              server.listen(ports[index], '127.0.0.1', resolve)
+            }),
+        ),
+      )
+      return base
+    } catch {
+      // retry another block
+    } finally {
+      await Promise.all(
+        servers.map(
+          (server) =>
+            new Promise<void>((resolve) => {
+              if (!server.listening) return resolve()
+              server.close(() => resolve())
+            }),
+        ),
+      )
+    }
+  }
+  throw new Error('Não foi possível reservar portas locais para o MediaMTX.')
 }
 
 export class MediaSessionSupervisor {
@@ -264,6 +380,11 @@ export class MediaSessionSupervisor {
     const token = session.whepToken
     if (!url || !token) return null
     return { url, token }
+  }
+
+  async setRecording(cameraId: string, enabled: boolean, recordPath?: string): Promise<boolean> {
+    const session = this.sessions.get(cameraId)
+    return session ? session.setRecording(enabled, recordPath) : false
   }
 
   async release(cameraId: string): Promise<void> {

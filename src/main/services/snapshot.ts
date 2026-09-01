@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { extname, join, resolve, relative } from 'node:path'
 
@@ -30,7 +30,12 @@ export interface SnapshotFetchOptions {
   fetchImpl?: (
     url: string,
     init: RequestInit,
-  ) => Promise<{ status: number; ok: boolean; arrayBuffer(): Promise<ArrayBuffer> }>
+  ) => Promise<{
+    status: number
+    ok: boolean
+    headers?: Record<string, string>
+    arrayBuffer(): Promise<ArrayBuffer>
+  }>
 }
 
 export interface SnapshotSaveOptions {
@@ -54,6 +59,7 @@ export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buff
       return {
         status: response.status,
         ok: response.ok,
+        headers: Object.fromEntries(response.headers.entries()),
         arrayBuffer: () => response.arrayBuffer(),
       }
     })
@@ -80,6 +86,26 @@ export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buff
     throw new SnapshotError('Falha ao acessar o endpoint de snapshot.', 'FETCH_FAILED')
   }
 
+  if (response.status === 401 && options.username) {
+    const challenge =
+      response.headers?.['www-authenticate'] ?? response.headers?.['WWW-Authenticate']
+    if (challenge && /^Digest/i.test(challenge)) {
+      const authorization = buildDigestAuthorization(
+        challenge,
+        new URL(options.url),
+        options.username,
+        options.password ?? '',
+      )
+      if (authorization) {
+        response = await fetchImpl(options.url, {
+          method: 'GET',
+          headers: { Authorization: `Digest ${authorization}` },
+          signal: AbortSignal.timeout(options.timeoutMs ?? 8_000),
+        })
+      }
+    }
+  }
+
   if (response.status === 401 || response.status === 403) {
     throw new SnapshotError('Autenticação rejeitada.', 'AUTH_FAILED')
   }
@@ -100,6 +126,38 @@ export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buff
   }
 
   return buffer
+}
+
+function buildDigestAuthorization(
+  challenge: string,
+  url: URL,
+  username: string,
+  password: string,
+): string | null {
+  const realm = /realm="([^"]+)"/i.exec(challenge)?.[1]
+  const nonce = /nonce="([^"]+)"/i.exec(challenge)?.[1]
+  const opaque = /opaque="([^"]+)"/i.exec(challenge)?.[1]
+  const qop = /qop="?([^",\s]+)/i.exec(challenge)?.[1]
+  if (!realm || !nonce) return null
+  const uri = `${url.pathname}${url.search}`
+  const cnonce = randomBytes(8).toString('hex')
+  const nc = '00000001'
+  const md5 = (value: string): string => createHash('md5').update(value).digest('hex')
+  const ha1 = md5(`${username}:${realm}:${password}`)
+  const ha2 = md5(`GET:${uri}`)
+  const response = qop
+    ? md5(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
+    : md5(`${ha1}:${nonce}:${ha2}`)
+  const parts = [
+    `username="${username}"`,
+    `realm="${realm}"`,
+    `nonce="${nonce}"`,
+    `uri="${uri}"`,
+    `response="${response}"`,
+  ]
+  if (qop) parts.push(`qop=${qop}`, `nc=${nc}`, `cnonce="${cnonce}"`)
+  if (opaque) parts.push(`opaque="${opaque}"`)
+  return parts.join(', ')
 }
 
 function extensionFor(buffer: Buffer): string {

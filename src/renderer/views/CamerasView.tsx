@@ -4,6 +4,7 @@ import { CameraTable } from "./CameraTable.js";
 import { CameraForm } from "./CameraForm.js";
 import { PlusIcon } from "../icons.js";
 import type { CameraDraft } from "./camera-types.js";
+import { runCameraMutation } from "../store/appStore.js";
 
 interface CamerasViewProps {
   cameras: CameraSummary[];
@@ -20,14 +21,44 @@ export function CamerasView({
   initialDraft,
   onDraftConsumed,
 }: CamerasViewProps): React.JSX.Element {
-  const [editing, setEditing] = useState<CameraSummary | null>(null);
+  const [editing, setEditing] = useState<{
+    id: string;
+    name: string;
+    draft: CameraDraft;
+  } | null>(null);
   const [creating, setCreating] = useState(false);
+  const [testMessage, setTestMessage] = useState<{
+    kind: "info" | "success" | "error";
+    text: string;
+  } | null>(null);
 
   const hasPendingDraft = initialDraft !== undefined && initialDraft !== null;
   const showForm = editing !== null || creating || hasPendingDraft;
 
   const handleEdit = (camera: CameraSummary): void => {
-    setEditing(camera);
+    void window.api.cameras.details(camera.id).then((result) => {
+      if (!result.ok) {
+        setTestMessage({ kind: "error", text: result.error.message });
+        return;
+      }
+      setEditing({
+        id: camera.id,
+        name: result.value.name,
+        draft: {
+          name: result.value.name,
+          host: result.value.host,
+          port: result.value.port,
+          onvifUrl: result.value.onvifUrl,
+          rtspUrl: result.value.rtspUrl,
+          rtspSubUrl: result.value.rtspSubUrl,
+          snapshotUrl: result.value.snapshotUrl,
+          username: result.value.username,
+          manufacturer: result.value.manufacturer,
+          model: result.value.model,
+          serialNumber: result.value.serialNumber,
+        },
+      });
+    });
   };
 
   const handleSaved = (): void => {
@@ -40,20 +71,13 @@ export function CamerasView({
   if (showForm) {
     const formDraft: CameraDraft | undefined =
       editing !== null
-        ? {
-            name: editing.name,
-            host: editing.host,
-            onvifUrl: null,
-            rtspUrl: null,
-            username: null,
-            password: "",
-          }
+        ? editing.draft
         : hasPendingDraft
           ? (initialDraft as CameraDraft)
           : undefined;
 
     return (
-      <div className="panel">
+      <div className="panel camera-editor-panel">
         <h2 className="panel-title">
           {editing !== null ? `Editar ${editing.name}` : "Nova câmera"}
         </h2>
@@ -113,20 +137,53 @@ export function CamerasView({
           </button>
         </div>
       ) : (
-        <CameraTable
-          cameras={cameras}
-          onEdit={handleEdit}
-          onToggle={async (camera) => {
-            if (camera.status === "disabled") {
-              await window.api.cameras.reactivate(camera.id);
-            } else {
-              await window.api.cameras.deactivate(camera.id);
-            }
-            onRefresh();
-          }}
-          onRemove={() => onRefresh()}
-          onTest={() => undefined}
-        />
+        <>
+          {testMessage && (
+            <p
+              className={`form-message form-${testMessage.kind}`}
+              role="status"
+            >
+              {testMessage.text}
+            </p>
+          )}
+          <CameraTable
+            cameras={cameras}
+            onEdit={handleEdit}
+            onToggle={async (camera) => {
+              if (!camera.active) {
+                await runCameraMutation({ kind: "reactivate", id: camera.id });
+              } else {
+                await runCameraMutation({ kind: "deactivate", id: camera.id });
+              }
+              onRefresh();
+            }}
+            onRemove={() => onRefresh()}
+            onTest={(camera) => {
+              setTestMessage({
+                kind: "info",
+                text: `Testando ${camera.name}…`,
+              });
+              void window.api.cameras.test(camera.id).then((result) => {
+                if (!result.ok) {
+                  setTestMessage({ kind: "error", text: result.error.message });
+                  return;
+                }
+                const details = result.value.segments
+                  .map(
+                    (segment) =>
+                      `${segment.name.toUpperCase()}: ${segment.detail}`,
+                  )
+                  .join(" ");
+                setTestMessage({
+                  kind:
+                    result.value.status === "connected" ? "success" : "error",
+                  text: details,
+                });
+                onRefresh();
+              });
+            }}
+          />
+        </>
       )}
     </>
   );

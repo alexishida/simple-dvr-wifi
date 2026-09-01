@@ -7,6 +7,7 @@ import type {
   DiagnosticRecord,
   EncryptedCredential,
   RecordingRecord,
+  RecordingSegmentRecord,
   SnapshotRecord,
 } from '../../shared/database.js'
 
@@ -140,6 +141,14 @@ export class CameraRepository {
       service: r.service as CameraEndpoint['service'],
       url: r.url as string,
     }))
+  }
+
+  setEndpoint(cameraId: string, endpoint: CameraEndpoint): void {
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO camera_endpoints (camera_id, service, url) VALUES (?, ?, ?)',
+      )
+      .run(cameraId, endpoint.service, endpoint.url)
   }
 
   list(includeInactive = false): CameraRecord[] {
@@ -463,6 +472,59 @@ export class RecordingRepository {
       .prepare('SELECT * FROM recordings WHERE camera_id = ? ORDER BY started_at DESC')
       .all(cameraId) as Row[]
     return rows.map(mapRecording)
+  }
+
+  addSegment(input: {
+    recordingId: string
+    path: string
+    startedAt: string
+    endedAt?: string | null
+    durationMs?: number | null
+    status?: RecordingSegmentRecord['status']
+  }): RecordingSegmentRecord {
+    const id = randomUUID()
+    this.db
+      .prepare(
+        `INSERT INTO recording_segments
+         (id, recording_id, path, started_at, ended_at, duration_ms, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.recordingId,
+        input.path,
+        input.startedAt,
+        input.endedAt ?? null,
+        input.durationMs ?? null,
+        input.status ?? 'completed',
+      )
+    return {
+      id,
+      recordingId: input.recordingId,
+      path: input.path,
+      startedAt: input.startedAt,
+      endedAt: input.endedAt ?? null,
+      durationMs: input.durationMs ?? null,
+      status: input.status ?? 'completed',
+    }
+  }
+
+  listSegments(recordingId: string): RecordingSegmentRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, recording_id, path, started_at, ended_at, duration_ms, status
+         FROM recording_segments WHERE recording_id = ? ORDER BY started_at`,
+      )
+      .all(recordingId) as Row[]
+    return rows.map((row) => ({
+      id: row.id as string,
+      recordingId: row.recording_id as string,
+      path: row.path as string,
+      startedAt: row.started_at as string,
+      endedAt: (row.ended_at as string) ?? null,
+      durationMs: (row.duration_ms as number) ?? null,
+      status: row.status as RecordingSegmentRecord['status'],
+    }))
   }
 }
 

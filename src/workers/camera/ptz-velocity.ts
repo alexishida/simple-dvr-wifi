@@ -24,7 +24,7 @@ export class PtzVelocityValidationError extends Error {
 const DEFAULT_LIMITS: PtzVelocityLimits = {
   pan: { min: -1, max: 1 },
   tilt: { min: -1, max: 1 },
-  zoom: { min: 0, max: 1 },
+  zoom: { min: -1, max: 1 },
 }
 
 function isFiniteNumber(value: unknown): value is number {

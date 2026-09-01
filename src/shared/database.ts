@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { CameraIdSchema, CameraStatusSchema, RecordingStatusSchema } from './contracts.js'
 
 export const DbRequestIdSchema = z.string().min(1).max(64)
-export const ServiceNameSchema = z.enum(['onvif', 'rtsp', 'snapshot', 'ptz'])
+export const ServiceNameSchema = z.enum(['onvif', 'rtsp', 'rtsp_sub', 'snapshot', 'ptz'])
 
 export const EncryptedCredentialSchema = z.object({
   keyVersion: z.number().int().positive(),
@@ -95,6 +95,18 @@ export const RecordingRecordSchema = z.object({
 })
 
 export type RecordingRecord = z.infer<typeof RecordingRecordSchema>
+
+export const RecordingSegmentRecordSchema = z.object({
+  id: z.string().uuid(),
+  recordingId: z.string().uuid(),
+  path: z.string().min(1).max(2048),
+  startedAt: z.string(),
+  endedAt: z.string().nullable(),
+  durationMs: z.number().nonnegative().nullable(),
+  status: RecordingStatusSchema,
+})
+
+export type RecordingSegmentRecord = z.infer<typeof RecordingSegmentRecordSchema>
 
 export const SnapshotRecordSchema = z.object({
   id: z.string().uuid(),

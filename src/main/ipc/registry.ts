@@ -1,6 +1,7 @@
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from 'electron'
 import { z } from 'zod'
 import { failure, success, type Result } from '../../shared/contracts.js'
+import { sanitizeSidecarOutput } from '../logging/sanitizer.js'
 
 export const MAX_IPC_PAYLOAD_BYTES = 16 * 1024
 
@@ -74,8 +75,12 @@ export class IpcRegistry {
     try {
       const value = await definition.handle(parsed.data as never)
       return success(value)
-    } catch {
-      return failure('INTERNAL_ERROR', 'Não foi possível concluir a solicitação.')
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? sanitizeSidecarOutput(error.message).slice(0, 500)
+          : 'Não foi possível concluir a solicitação.'
+      return failure('INTERNAL_ERROR', message || 'Não foi possível concluir a solicitação.')
     }
   }
 }

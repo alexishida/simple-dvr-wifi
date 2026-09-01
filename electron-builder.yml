@@ -11,8 +11,6 @@ files:
   - '!**/*.map'
   - '!**/.vscode/*'
   - '!src/*'
-  - '!tests/*'
-  - '!e2e/*'
   - '!docs/*'
   - '!openspec/*'
   - '!scripts/*'
@@ -21,7 +19,6 @@ files:
   - '!electron-builder.yml'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintrc,.prettierrc,tsconfig*.json}'
-  - '!playwright.config.ts'
 asar: true
 asarUnpack:
   - '**/node_modules/better-sqlite3/**'

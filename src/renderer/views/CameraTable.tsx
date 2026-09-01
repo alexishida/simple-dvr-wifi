@@ -1,15 +1,19 @@
-import { useState } from 'react'
-import type { CameraSummary } from '../../shared/contracts.js'
-import type { CameraDraft } from './camera-types.js'
-import { CameraIcon, KeyIcon, BoltIcon, RecIcon } from '../icons.js'
-import { cameraStatusLabel, cameraStatusTone, recordingStatusLabel } from '../status.js'
+import { useState } from "react";
+import type { CameraSummary } from "../../shared/contracts.js";
+import type { CameraDraft } from "./camera-types.js";
+import { CameraIcon, KeyIcon, BoltIcon, RecIcon } from "../icons.js";
+import {
+  cameraStatusLabel,
+  cameraStatusTone,
+  recordingStatusLabel,
+} from "../status.js";
 
 interface CameraRowProps {
-  camera: CameraSummary
-  onEdit: (camera: CameraSummary) => void
-  onToggle: (camera: CameraSummary) => void
-  onRemove: (camera: CameraSummary) => void
-  onTest: (camera: CameraSummary) => void
+  camera: CameraSummary;
+  onEdit: (camera: CameraSummary) => void;
+  onToggle: (camera: CameraSummary) => void;
+  onRemove: (camera: CameraSummary) => void;
+  onTest: (camera: CameraSummary) => void;
 }
 
 function CameraRow({
@@ -19,7 +23,7 @@ function CameraRow({
   onRemove,
   onTest,
 }: CameraRowProps): React.JSX.Element {
-  const active = camera.status !== 'disabled'
+  const active = camera.active;
   return (
     <tr>
       <td>
@@ -27,14 +31,16 @@ function CameraRow({
         <div className="camera-cell-host">{camera.host}</div>
       </td>
       <td>
-        <span className={`status-badge status-${cameraStatusTone(camera.status)}`}>
+        <span
+          className={`status-badge status-${cameraStatusTone(camera.status)}`}
+        >
           <span className="status-dot" aria-hidden="true" />
           {cameraStatusLabel(camera.status)}
         </span>
       </td>
       <td>
         <div className="camera-meta">
-          {camera.recordingStatus === 'recording' && (
+          {camera.recordingStatus === "recording" && (
             <span className="meta-chip">
               <RecIcon size={14} />
               {recordingStatusLabel(camera.recordingStatus)}
@@ -56,10 +62,18 @@ function CameraRow({
       </td>
       <td>
         <div className="row-actions">
-          <button type="button" className="btn btn-secondary btn-sm" onClick={() => onTest(camera)}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => onTest(camera)}
+          >
             Testar
           </button>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={() => onEdit(camera)}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => onEdit(camera)}
+          >
             Editar
           </button>
           <button
@@ -67,7 +81,7 @@ function CameraRow({
             className="btn btn-secondary btn-sm"
             onClick={() => onToggle(camera)}
           >
-            {active ? 'Desativar' : 'Ativar'}
+            {active ? "Desativar" : "Ativar"}
           </button>
           <button
             type="button"
@@ -79,15 +93,15 @@ function CameraRow({
         </div>
       </td>
     </tr>
-  )
+  );
 }
 
 interface CameraTableProps {
-  cameras: CameraSummary[]
-  onEdit: (camera: CameraSummary) => void
-  onToggle: (camera: CameraSummary) => void
-  onRemove: (camera: CameraSummary) => void
-  onTest: (camera: CameraSummary) => void
+  cameras: CameraSummary[];
+  onEdit: (camera: CameraSummary) => void;
+  onToggle: (camera: CameraSummary) => void;
+  onRemove: (camera: CameraSummary) => void;
+  onTest: (camera: CameraSummary) => void;
 }
 
 export function CameraTable({
@@ -97,18 +111,18 @@ export function CameraTable({
   onRemove,
   onTest,
 }: CameraTableProps): React.JSX.Element {
-  const [selected, setSelected] = useState<CameraSummary | null>(null)
+  const [selected, setSelected] = useState<CameraSummary | null>(null);
 
   const handleRemove = (camera: CameraSummary): void => {
-    setSelected(camera)
-  }
+    setSelected(camera);
+  };
 
   const confirmRemove = async (): Promise<void> => {
-    if (!selected) return
-    await window.api.cameras.remove(selected.id)
-    setSelected(null)
-    onRemove(selected)
-  }
+    if (!selected) return;
+    await window.api.cameras.remove(selected.id);
+    setSelected(null);
+    onRemove(selected);
+  };
 
   return (
     <>
@@ -139,7 +153,12 @@ export function CameraTable({
 
       {selected && (
         <div className="modal-backdrop" role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="remove-title">
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remove-title"
+          >
             <span className="empty-state-icon">
               <CameraIcon size={24} />
             </span>
@@ -147,11 +166,15 @@ export function CameraTable({
               Remover {selected.name}?
             </h3>
             <p className="empty-state-text">
-              O cadastro, credenciais e recursos ativos desta câmera serão encerrados. Outras
-              câmeras não serão afetadas.
+              O cadastro, credenciais e recursos ativos desta câmera serão
+              encerrados. Outras câmeras não serão afetadas.
             </p>
             <div className="modal-actions">
-              <button type="button" className="btn btn-secondary" onClick={() => setSelected(null)}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSelected(null)}
+              >
                 Cancelar
               </button>
               <button
@@ -166,7 +189,7 @@ export function CameraTable({
         </div>
       )}
     </>
-  )
+  );
 }
 
-export type { CameraDraft }
+export type { CameraDraft };

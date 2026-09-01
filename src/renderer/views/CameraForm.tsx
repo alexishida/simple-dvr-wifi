@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import type { CameraFormProps } from './camera-types.js'
+import { useState } from "react";
+import { parseHttpUrl, parseRtspUrl } from "../../shared/camera-urls.js";
+import type { CameraFormProps } from "./camera-types.js";
 
 export function CameraForm({
   initial,
@@ -7,70 +8,188 @@ export function CameraForm({
   onSaved,
   onCancel,
 }: CameraFormProps): React.JSX.Element {
-  const [name, setName] = useState(initial?.name ?? '')
-  const [host, setHost] = useState(initial?.host ?? '')
-  const [port, setPort] = useState(initial?.port?.toString() ?? '')
-  const [onvifUrl, setOnvifUrl] = useState(initial?.onvifUrl ?? '')
-  const [rtspUrl, setRtspUrl] = useState(initial?.rtspUrl ?? '')
-  const [username, setUsername] = useState(initial?.username ?? '')
-  const [password, setPassword] = useState('')
+  const [name, setName] = useState(initial?.name ?? "");
+  const [host, setHost] = useState(initial?.host ?? "");
+  const [port, setPort] = useState(initial?.port?.toString() ?? "");
+  const [onvifUrl, setOnvifUrl] = useState(initial?.onvifUrl ?? "");
+  const [rtspUrl, setRtspUrl] = useState(initial?.rtspUrl ?? "");
+  const [username, setUsername] = useState(initial?.username ?? "");
+  const [password, setPassword] = useState("");
   const [message, setMessage] = useState<{
-    kind: 'error' | 'info' | 'success'
-    text: string
-  } | null>(null)
-  const [duplicate, setDuplicate] = useState(false)
+    kind: "error" | "info" | "success";
+    text: string;
+  } | null>(null);
+  const [duplicate, setDuplicate] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
-  async function handleSubmit(event: React.FormEvent): Promise<void> {
-    event.preventDefault()
-    setMessage(null)
-
-    if (editingId) {
-      if (password) {
-        const result = await window.api.cameras.updateCredentials({
-          id: editingId,
-          password,
-          rtspPassword: password,
-        })
-        if (!result.ok) {
-          setMessage({ kind: 'error', text: 'Não foi possível atualizar a credencial.' })
-          return
-        }
-      }
-      onSaved()
-      return
-    }
-
-    const result = await window.api.cameras.create({
-      name,
-      host,
-      port: port ? Number(port) : null,
-      onvifUrl: onvifUrl || null,
-      rtspUrl: rtspUrl || null,
-      username: username || null,
-      password: password || null,
-      allowDuplicate: duplicate,
-    })
-
-    if (!result.ok) {
-      setMessage({ kind: 'error', text: 'Não foi possível cadastrar a câmera.' })
-      return
-    }
-
-    if (result.value.duplicate && !duplicate) {
-      setDuplicate(true)
-      setMessage({
-        kind: 'info',
-        text: 'Uma câmera similar já existe. Confirme para salvar como cadastro separado.',
-      })
-      return
-    }
-
-    setMessage({ kind: 'success', text: 'Câmera cadastrada com sucesso.' })
-    onSaved()
+  function applyRtspCredentials(raw: string): void {
+    const parsed = parseRtspUrl(raw);
+    if (!parsed) return;
+    if (parsed.username) setUsername(parsed.username);
+    if (parsed.password) setPassword(parsed.password);
   }
 
+  function applyRtspDetails(raw: string): void {
+    const parsed = parseRtspUrl(raw);
+    if (!parsed) return;
+
+    setRtspUrl(parsed.sanitizedUrl);
+    setHost((current) => current.trim() || parsed.host);
+    setPort((current) => current.trim() || String(parsed.port));
+    applyRtspCredentials(raw);
+  }
+
+  function applyOnvifCredentials(raw: string): void {
+    const parsed = parseHttpUrl(raw);
+    if (!parsed) return;
+    if (parsed.username) setUsername(parsed.username);
+    if (parsed.password) setPassword(parsed.password);
+  }
+
+  function applyOnvifDetails(raw: string): void {
+    if (parseRtspUrl(raw)) {
+      setOnvifUrl("");
+      applyRtspDetails(raw);
+      setMessage({
+        kind: "info",
+        text: "URL RTSP movida para o campo RTSP; credenciais preenchidas.",
+      });
+      return;
+    }
+    const parsed = parseHttpUrl(raw);
+    if (!parsed) return;
+    setOnvifUrl(parsed.sanitizedUrl);
+    applyOnvifCredentials(raw);
+  }
+
+  function handleOnvifChange(raw: string): void {
+    if (parseRtspUrl(raw)) {
+      applyOnvifDetails(raw);
+      return;
+    }
+    setOnvifUrl(raw);
+    applyOnvifCredentials(raw);
+  }
+
+  async function handleSubmit(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    if (saving) return;
+    setMessage(null);
+    setSaving(true);
+
+    try {
+      if (editingId) {
+        const rawRtspUrl = rtspUrl.trim();
+        const parsedRtsp = rawRtspUrl ? parseRtspUrl(rawRtspUrl) : null;
+        if (rawRtspUrl && !parsedRtsp) {
+          setMessage({ kind: "error", text: "Informe uma URL RTSP válida." });
+          return;
+        }
+        const result = await window.api.cameras.update({
+          id: editingId,
+          name: name.trim(),
+          host: host.trim() || parsedRtsp?.host || "",
+          port: port ? Number(port) : (parsedRtsp?.port ?? null),
+          onvifUrl: onvifUrl.trim() || null,
+          rtspUrl: parsedRtsp?.sanitizedUrl ?? null,
+          username: username.trim() || parsedRtsp?.username || null,
+          password: password || parsedRtsp?.password || null,
+        });
+        if (!result.ok) {
+          setMessage({ kind: "error", text: result.error.message });
+          return;
+        }
+        onSaved();
+        return;
+      }
+
+      const rawRtspUrl = rtspUrl.trim();
+      const parsedRtsp = rawRtspUrl ? parseRtspUrl(rawRtspUrl) : null;
+      if (rawRtspUrl && !parsedRtsp) {
+        setMessage({ kind: "error", text: "Informe uma URL RTSP válida." });
+        return;
+      }
+
+      const result = await window.api.cameras.create({
+        name: name.trim(),
+        host: host.trim() || parsedRtsp?.host || "",
+        port: port ? Number(port) : (parsedRtsp?.port ?? null),
+        epr: initial?.epr ?? null,
+        onvifUrl: onvifUrl.trim() || null,
+        rtspUrl: parsedRtsp?.sanitizedUrl ?? null,
+        username: username.trim() || parsedRtsp?.username || null,
+        password: password || parsedRtsp?.password || null,
+        allowDuplicate: duplicate,
+      });
+
+      if (!result.ok) {
+        setMessage({ kind: "error", text: result.error.message });
+        return;
+      }
+
+      if (result.value.duplicate && !duplicate) {
+        setDuplicate(true);
+        setMessage({
+          kind: "info",
+          text: "Uma câmera similar já existe. Confirme para salvar como cadastro separado.",
+        });
+        return;
+      }
+
+      setMessage({ kind: "success", text: "Câmera cadastrada com sucesso." });
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTestConnection(): Promise<void> {
+    if (testing) return;
+    const rawRtspUrl = rtspUrl.trim();
+    const parsedRtsp = rawRtspUrl ? parseRtspUrl(rawRtspUrl) : null;
+    if (rawRtspUrl && !parsedRtsp) {
+      setMessage({ kind: "error", text: "Informe uma URL RTSP válida." });
+      return;
+    }
+
+    setTesting(true);
+    setMessage({ kind: "info", text: "Testando a conexão informada…" });
+    try {
+      const result = await window.api.cameras.testConnection({
+        host: host.trim() || parsedRtsp?.host || "",
+        port: port ? Number(port) : (parsedRtsp?.port ?? null),
+        onvifUrl: onvifUrl.trim() || null,
+        rtspUrl: parsedRtsp?.sanitizedUrl ?? null,
+        username: username.trim() || parsedRtsp?.username || null,
+        password: password || parsedRtsp?.password || null,
+      });
+      if (!result.ok) {
+        setMessage({ kind: "error", text: result.error.message });
+        return;
+      }
+      const details = result.value.segments
+        .map((segment) => `${segment.name.toUpperCase()}: ${segment.detail}`)
+        .join(" ");
+      setMessage({
+        kind: result.value.status === "connected" ? "success" : "error",
+        text: details,
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  /*
+   * A URL RTSP can contain the host and credentials. Fields remain editable so
+   * the operator can replace either source before saving.
+   */
+
   return (
-    <form className="camera-form" onSubmit={(event) => void handleSubmit(event)}>
+    <form
+      className="camera-form"
+      onSubmit={(event) => void handleSubmit(event)}
+    >
       <div className="field">
         <label className="field-label" htmlFor="cam-name">
           Nome amigável
@@ -85,6 +204,33 @@ export function CameraForm({
         />
       </div>
 
+      {editingId &&
+        (initial?.manufacturer || initial?.model || initial?.serialNumber) && (
+          <div
+            className="camera-details-grid"
+            aria-label="Informações do dispositivo"
+          >
+            {initial.manufacturer && (
+              <div className="camera-detail">
+                <span>Fabricante</span>
+                <strong>{initial.manufacturer}</strong>
+              </div>
+            )}
+            {initial.model && (
+              <div className="camera-detail">
+                <span>Modelo</span>
+                <strong>{initial.model}</strong>
+              </div>
+            )}
+            {initial.serialNumber && (
+              <div className="camera-detail">
+                <span>Número de série</span>
+                <strong>{initial.serialNumber}</strong>
+              </div>
+            )}
+          </div>
+        )}
+
       <div className="field-row">
         <div className="field">
           <label className="field-label" htmlFor="cam-host">
@@ -95,8 +241,7 @@ export function CameraForm({
             className="field-input"
             value={host}
             onChange={(event) => setHost(event.target.value)}
-            required
-            disabled={Boolean(editingId)}
+            required={!parseRtspUrl(rtspUrl)}
           />
         </div>
         <div className="field field-narrow">
@@ -111,7 +256,6 @@ export function CameraForm({
             max={65_535}
             value={port}
             onChange={(event) => setPort(event.target.value)}
-            disabled={Boolean(editingId)}
           />
         </div>
       </div>
@@ -125,8 +269,8 @@ export function CameraForm({
           className="field-input"
           placeholder="http://camera/onvif/device_service"
           value={onvifUrl}
-          onChange={(event) => setOnvifUrl(event.target.value)}
-          disabled={Boolean(editingId)}
+          onChange={(event) => handleOnvifChange(event.target.value)}
+          onBlur={(event) => applyOnvifDetails(event.target.value)}
         />
       </div>
 
@@ -139,10 +283,42 @@ export function CameraForm({
           className="field-input"
           placeholder="rtsp://camera/stream"
           value={rtspUrl}
-          onChange={(event) => setRtspUrl(event.target.value)}
-          disabled={Boolean(editingId)}
+          onChange={(event) => {
+            setRtspUrl(event.target.value);
+            applyRtspCredentials(event.target.value);
+          }}
+          onBlur={(event) => applyRtspDetails(event.target.value)}
         />
       </div>
+
+      {editingId && (
+        <div className="field-row">
+          <div className="field">
+            <label className="field-label" htmlFor="cam-rtsp-sub">
+              URL RTSP secundária
+            </label>
+            <input
+              id="cam-rtsp-sub"
+              className="field-input"
+              value={initial?.rtspSubUrl ?? ""}
+              placeholder="Não configurada"
+              readOnly
+            />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="cam-snapshot">
+              URL de snapshot
+            </label>
+            <input
+              id="cam-snapshot"
+              className="field-input"
+              value={initial?.snapshotUrl ?? ""}
+              placeholder="Não configurada"
+              readOnly
+            />
+          </div>
+        </div>
+      )}
 
       <div className="field-row">
         <div className="field">
@@ -154,12 +330,11 @@ export function CameraForm({
             className="field-input"
             value={username}
             onChange={(event) => setUsername(event.target.value)}
-            disabled={Boolean(editingId)}
           />
         </div>
         <div className="field">
           <label className="field-label" htmlFor="cam-pass">
-            {editingId ? 'Nova senha (deixe vazio para manter)' : 'Senha'}
+            {editingId ? "Nova senha (deixe vazio para manter)" : "Senha"}
           </label>
           <input
             id="cam-pass"
@@ -172,16 +347,34 @@ export function CameraForm({
         </div>
       </div>
 
-      {message && <div className={`form-message form-${message.kind}`}>{message.text}</div>}
+      {message && (
+        <div className={`form-message form-${message.kind}`}>
+          {message.text}
+        </div>
+      )}
 
       <div className="modal-actions">
         <button type="button" className="btn btn-secondary" onClick={onCancel}>
           Cancelar
         </button>
-        <button type="submit" className="btn btn-primary">
-          {editingId ? 'Salvar alterações' : duplicate ? 'Confirmar cadastro' : 'Cadastrar câmera'}
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={() => void handleTestConnection()}
+          disabled={testing || saving}
+        >
+          {testing ? "Testando…" : "Testar conexão"}
+        </button>
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving
+            ? "Salvando…"
+            : editingId
+              ? "Salvar alterações"
+              : duplicate
+                ? "Confirmar cadastro"
+                : "Cadastrar câmera"}
         </button>
       </div>
     </form>
-  )
+  );
 }

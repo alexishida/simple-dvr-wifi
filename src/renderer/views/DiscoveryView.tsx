@@ -17,12 +17,15 @@ export interface NetworkInterfaceSummary {
 
 interface DiscoveryViewProps {
   onAddCamera: (camera: DiscoveryCamera) => void;
+  onAddRtspCamera: () => void;
 }
 
 export function DiscoveryView({
   onAddCamera,
+  onAddRtspCamera,
 }: DiscoveryViewProps): React.JSX.Element {
   const [interfaces, setInterfaces] = useState<NetworkInterfaceSummary[]>([]);
+  const [interfacesLoading, setInterfacesLoading] = useState(true);
   const [selectedInterface, setSelectedInterface] = useState<string>("");
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<DiscoveryCamera[]>([]);
@@ -32,10 +35,17 @@ export function DiscoveryView({
   useEffect(() => {
     void window.api.discovery.interfaces().then((result) => {
       if (result.ok) {
-        setInterfaces(result.value.filter((entry) => entry.eligible));
-        const first = result.value.find((entry) => entry.eligible);
+        const eligible = result.value.filter((entry) => entry.eligible);
+        setInterfaces(eligible);
+        const first = eligible[0];
         if (first) setSelectedInterface(first.name);
+        if (eligible.length === 0) {
+          setError("Nenhuma interface IPv4 elegível foi encontrada.");
+        }
+      } else {
+        setError(result.error.message);
       }
+      setInterfacesLoading(false);
     });
   }, []);
 
@@ -48,18 +58,20 @@ export function DiscoveryView({
       interfaceName: selectedInterface,
       timeoutMs: 6_000,
     });
-    if (result.ok) {
-      setResults(result.value);
-    } else {
-      setError(
-        result.error?.message ?? "Não foi possível concluir a descoberta.",
-      );
+    try {
+      if (result.ok) {
+        setResults(result.value);
+      } else {
+        setError(result.error.message);
+      }
+    } finally {
+      setRunning(false);
     }
-    setRunning(false);
   }
 
   async function cancel(): Promise<void> {
-    await window.api.discovery.cancel();
+    const result = await window.api.discovery.cancel();
+    if (!result.ok) setError(result.error.message);
     setRunning(false);
   }
 
@@ -81,6 +93,10 @@ export function DiscoveryView({
             onChange={(event) => setSelectedInterface(event.target.value)}
             disabled={running}
           >
+            {interfacesLoading && <option>Carregando interfaces…</option>}
+            {!interfacesLoading && interfaces.length === 0 && (
+              <option>Nenhuma interface disponível</option>
+            )}
             {interfaces.map((entry) => (
               <option key={entry.name} value={entry.name}>
                 {entry.name} ({entry.category}) — {entry.addresses.join(", ")}
@@ -103,10 +119,19 @@ export function DiscoveryView({
               type="button"
               className="btn btn-primary"
               onClick={() => void start()}
-              disabled={!selectedInterface}
+              disabled={interfacesLoading || !selectedInterface}
             >
               <SearchIcon size={16} />
               Iniciar busca
+            </button>
+          )}
+          {!running && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={onAddRtspCamera}
+            >
+              Cadastrar URL RTSP
             </button>
           )}
         </div>
@@ -123,7 +148,7 @@ export function DiscoveryView({
           <p className="empty-state-text discovery-hint">
             A descoberta usa WS-Discovery por multicast. Firewalls, VLANs, VPNs
             e o isolamento de clientes Wi-Fi podem bloquear as respostas. Nesse
-            caso, use o cadastro manual — ele não altera seu firewall.
+            caso, use o cadastro manual — URLs RTSP não aparecem nesta busca.
           </p>
         )}
       </section>

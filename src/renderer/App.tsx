@@ -7,7 +7,9 @@ import { DiscoveryView } from "./views/DiscoveryView.js";
 import { FullscreenView } from "./views/FullscreenView.js";
 import { LibraryView } from "./views/LibraryView.js";
 import { MonitoringGrid } from "./components/MonitoringGrid.js";
+import { PtzPanel } from "./components/PtzPanel.js";
 import { useAppStore, subscribeToCameraEvents } from "./store/appStore.js";
+import type { CameraSummary } from "../shared/contracts.js";
 import type { CameraDraft } from "./views/camera-types.js";
 import { discoveryCameraToDraft } from "./discovery-draft.js";
 import {
@@ -76,41 +78,54 @@ function EmptyPanel({
   );
 }
 
-function DashboardView(): React.JSX.Element {
+function DashboardView({
+  onPtzSelect,
+  selectedPtzCameraId,
+}: {
+  onPtzSelect: (camera: CameraSummary) => void;
+  selectedPtzCameraId: string | null;
+}): React.JSX.Element {
   const cameras = useAppStore((state) => state.cameras);
   const openFullscreen = useAppStore((state) => state.openFullscreen);
 
-  const connected = cameras.filter((c) => c.status === "connected").length;
-  const recording = cameras.filter(
-    (c) => c.recordingStatus === "recording",
-  ).length;
-  const withError = cameras.filter(
-    (c) => c.status.includes("error") || c.status === "unavailable",
-  ).length;
-
   return (
-    <>
-      <section aria-label="Resumo" className="stats-grid">
-        <div className="stat-card">
-          <span className="stat-label">Total de câmeras</span>
-          <span className="stat-value">{cameras.length}</span>
-        </div>
-        <div className="stat-card">
-          <span className="stat-label">Conectadas</span>
-          <span className="stat-value success">{connected}</span>
-        </div>
-        <div className="stat-card">
-          <span className="stat-label">Gravando</span>
-          <span className="stat-value warning">{recording}</span>
-        </div>
-        <div className="stat-card">
-          <span className="stat-label">Com erro</span>
-          <span className="stat-value danger">{withError}</span>
-        </div>
-      </section>
+    <MonitoringGrid
+      cameras={cameras}
+      onOpenFullscreen={openFullscreen}
+      onPtzSelect={onPtzSelect}
+      selectedPtzCameraId={selectedPtzCameraId}
+    />
+  );
+}
 
-      <MonitoringGrid cameras={cameras} onOpenFullscreen={openFullscreen} />
-    </>
+function SidebarPtz({
+  camera,
+}: {
+  camera: CameraSummary | null;
+}): React.JSX.Element {
+  return (
+    <section className="sidebar-ptz" aria-labelledby="sidebar-ptz-title">
+      <p className="sidebar-ptz-title" id="sidebar-ptz-title">
+        Controle PTZ
+      </p>
+      {camera?.active && camera.supportsPtz ? (
+        <>
+          <p className="sidebar-ptz-camera">Selecionada: {camera.name}</p>
+          <PtzPanel
+            cameraId={camera.id}
+            supported
+            zoomSupported
+            presetsSupported={false}
+          />
+        </>
+      ) : (
+        <p className="sidebar-ptz-hint">
+          {camera
+            ? `${camera.name} não possui PTZ disponível.`
+            : "Clique em uma câmera no painel para controlá-la."}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -133,8 +148,13 @@ export function App(): React.JSX.Element {
   const [discoveryDraft, setDiscoveryDraft] = useState<CameraDraft | null>(
     null,
   );
+  const [selectedPtzCameraId, setSelectedPtzCameraId] = useState<string | null>(
+    null,
+  );
   const cameras = useAppStore((state) => state.cameras);
   const fullscreenCamera = useAppStore((state) => state.fullscreenCamera);
+  const selectedPtzCamera =
+    cameras.find((camera) => camera.id === selectedPtzCameraId) ?? null;
 
   const refreshCameras = useCallback(() => {
     void window.api.cameras.list().then((result) => {
@@ -190,6 +210,7 @@ export function App(): React.JSX.Element {
         </nav>
 
         <div className="sidebar-footer">
+          <SidebarPtz camera={selectedPtzCamera} />
           <p>v0.1.0 · Totalmente local</p>
         </div>
       </aside>
@@ -202,7 +223,12 @@ export function App(): React.JSX.Element {
           </div>
         </header>
 
-        {section === "dashboard" && <DashboardView />}
+        {section === "dashboard" && (
+          <DashboardView
+            onPtzSelect={(camera) => setSelectedPtzCameraId(camera.id)}
+            selectedPtzCameraId={selectedPtzCameraId}
+          />
+        )}
         {section === "cameras" && (
           <CamerasView
             cameras={cameras}
@@ -216,6 +242,10 @@ export function App(): React.JSX.Element {
           <DiscoveryView
             onAddCamera={(camera) => {
               setDiscoveryDraft(discoveryCameraToDraft(camera));
+              setSection("cameras");
+            }}
+            onAddRtspCamera={() => {
+              setDiscoveryDraft({ name: "", host: "", rtspUrl: null });
               setSection("cameras");
             }}
           />

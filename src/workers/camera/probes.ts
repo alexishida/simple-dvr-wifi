@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
 
 export type ProbeResult =
@@ -23,7 +23,7 @@ export interface RtspProbeOptions {
 }
 
 export interface RtspCheckOptions {
-  url: string;
+  url: URL;
   username?: string | null;
   password?: string | null;
   timeoutMs: number;
@@ -205,6 +205,11 @@ async function probeRtspTcp(
         const second = await describe(`Digest ${response}`);
         return /^RTSP\/1\.0 2\d\d/.test(second.text) ? "ok" : "auth_error";
       }
+      if (/^Basic/i.test(challenge)) {
+        const authorization = buildAuthorization(username, password ?? "");
+        const second = await describe(authorization);
+        return /^RTSP\/1\.0 2\d\d/.test(second.text) ? "ok" : "auth_error";
+      }
       return "auth_error";
     }
 
@@ -228,6 +233,21 @@ function digestChallenge(
     .update(`${username}:${realm}:${password}`)
     .digest("hex");
   const ha2 = createHash("md5").update(`${method}:${uri}`).digest("hex");
+  const qop = /qop="([^"]+)"/i.exec(header)?.[1];
+  if (
+    qop
+      ?.split(",")
+      .map((value) => value.trim())
+      .includes("auth")
+  ) {
+    const nc = "00000001";
+    const cnonce = randomBytes(12).toString("hex");
+    const response = createHash("md5")
+      .update(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`)
+      .digest("hex");
+    return `username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${response}", qop=auth, nc=${nc}, cnonce="${cnonce}"`;
+  }
+
   const response = createHash("md5")
     .update(`${ha1}:${nonce}:${ha2}`)
     .digest("hex");

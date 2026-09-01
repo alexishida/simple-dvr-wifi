@@ -58,6 +58,7 @@ export class PtzControlService {
   private stopBlocked = false
   private stopFailures = 0
   private lastTrigger: PtzControlTrigger | null = null
+  private operationQueue: Promise<void> = Promise.resolve()
   private readonly leaseMs: number
   private readonly stopRetryLimit: number
   private readonly clock: NonNullable<PtzLeaseOptions['clock']>
@@ -84,6 +85,10 @@ export class PtzControlService {
   }
 
   async startMove(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
+    return this.enqueue(() => this.startMoveNow(cameraId, rawVelocity))
+  }
+
+  private async startMoveNow(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
     const velocity = normalizePtzVelocity(rawVelocity)
     this.cameraId = cameraId
     await this.guard.continuousMove({
@@ -98,18 +103,26 @@ export class PtzControlService {
   }
 
   async renew(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
+    return this.enqueue(() => this.renewNow(cameraId, rawVelocity))
+  }
+
+  private async renewNow(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
     const velocity = normalizePtzVelocity(rawVelocity)
     if (this.stopBlocked) return
-    if (this.cameraId !== cameraId || !this.moving) {
-      await this.guard.continuousMove({
-        profileToken: this.profileToken,
-        velocity: toVelocityRecord(velocity),
-      })
-      this.cameraId = cameraId
-      this.moving = true
-      this.movingSince = new Date().toISOString()
-    }
+    await this.guard.continuousMove({
+      profileToken: this.profileToken,
+      velocity: toVelocityRecord(velocity),
+    })
+    this.cameraId = cameraId
+    this.moving = true
+    this.movingSince ??= new Date().toISOString()
     this.scheduleLease()
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const result = this.operationQueue.then(operation, operation)
+    this.operationQueue = result.catch(() => undefined)
+    return result
   }
 
   private scheduleLease(): void {
@@ -121,6 +134,10 @@ export class PtzControlService {
   }
 
   async stop(trigger: PtzControlTrigger): Promise<void> {
+    return this.enqueue(() => this.stopNow(trigger))
+  }
+
+  private async stopNow(trigger: PtzControlTrigger): Promise<void> {
     this.lastTrigger = trigger
     if (this.leaseTimer !== null) {
       this.clock.clearTimeout(this.leaseTimer)

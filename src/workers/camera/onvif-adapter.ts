@@ -32,6 +32,28 @@ export interface OnvifClientOptions {
   maxXmlBytes?: number;
 }
 
+export function createFetchOnvifTransport(): OnvifTransport {
+  return {
+    post: async (url, body, options = {}) => {
+      const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 5_000);
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: options.headers,
+        body,
+        signal,
+      });
+      return {
+        status: response.status,
+        body: await response.text(),
+        headers: Object.fromEntries(response.headers.entries()),
+      };
+    },
+  };
+}
+
 const DEFAULT_OPTIONS = { timeoutMs: 5_000, maxXmlBytes: 512 * 1024 };
 
 function escapeXml(value: string): string {
@@ -47,21 +69,50 @@ function soapEnvelope(
   username?: string | null,
   password?: string | null,
 ): string {
-  const security = username
-    ? `<s:Header>
-      <Security xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-        <UsernameToken>
-          <Username>${escapeXml(username)}</Username>
-          <Password>${escapeXml(password ?? "")}</Password>
-        </UsernameToken>
-      </Security>
-    </s:Header>`
-    : "";
+  let security = "";
+  if (username) {
+    const nonce = randomBytes(16);
+    const created = new Date().toISOString();
+    const digest = createHash("sha1")
+      .update(
+        Buffer.concat([
+          nonce,
+          Buffer.from(created, "utf8"),
+          Buffer.from(password ?? "", "utf8"),
+        ]),
+      )
+      .digest("base64");
+
+    security = `<s:Header>
+      <wsse:Security s:mustUnderstand="1" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+        <wsse:UsernameToken>
+          <wsse:Username>${escapeXml(username)}</wsse:Username>
+          <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">${digest}</wsse:Password>
+          <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">${nonce.toString("base64")}</wsse:Nonce>
+          <wsu:Created>${created}</wsu:Created>
+        </wsse:UsernameToken>
+      </wsse:Security>
+    </s:Header>`;
+  }
   return `<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
 ${security}
   <s:Body>${body}</s:Body>
 </s:Envelope>`;
+}
+
+function soapAction(body: string): string | null {
+  const operation = /<(tds|trt|tr2|tptz):([A-Za-z][A-Za-z0-9]*)/.exec(body);
+  if (!operation) return null;
+  const namespace =
+    operation[1] === "tds"
+      ? "http://www.onvif.org/ver10/device/wsdl"
+      : operation[1] === "tr2"
+        ? "http://www.onvif.org/ver20/media/wsdl"
+        : operation[1] === "tptz"
+          ? "http://www.onvif.org/ver20/ptz/wsdl"
+          : "http://www.onvif.org/ver10/media/wsdl";
+  return `${namespace}/${operation[2]}`;
 }
 
 function stateFromBoolean(value: boolean | null | undefined): CapabilityState {
@@ -91,6 +142,8 @@ function classifyProfile(profile: CameraProfileInfo): "main" | "sub" {
 
 export class OnvifAdapter implements CameraAdapter {
   private readonly options: OnvifClientOptions;
+  private ptzServiceUrl: string | null = null;
+  private primaryProfileToken: string | null = null;
 
   constructor(options: OnvifClientOptions) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -127,8 +180,15 @@ export class OnvifAdapter implements CameraAdapter {
 
     const mediaUrl = await this.fetchMediaUrl();
     info.mediaServiceUrl = mediaUrl;
+    this.ptzServiceUrl =
+      (await this.fetchPtzUrl()) ?? this.deriveServiceUrl("ptz_service");
 
-    const profiles = await this.fetchProfiles();
+    const profiles = await this.fetchProfiles(mediaUrl);
+    this.primaryProfileToken =
+      profiles.find((profile) => profile.ptzAvailable)?.token ??
+      profiles.find((profile) => profile.streamType === "main")?.token ??
+      profiles[0]?.token ??
+      null;
     info.ptzSupported = profiles.some((p) => p.ptzAvailable);
     info.capabilities.ptz = stateFromBoolean(info.ptzSupported);
     info.profiles = profiles.map(({ ptzAvailable, ...profile }) => {
@@ -140,7 +200,9 @@ export class OnvifAdapter implements CameraAdapter {
     const withStreams = await Promise.all(
       profiles.map(async (p) => ({
         ...p,
-        rtspUrl: p.rtspUrl ?? (await this.fetchStreamUri(p.token)),
+        rtspUrl: p.rtspUrl ?? (await this.fetchStreamUri(p.token, mediaUrl)),
+        snapshotUri:
+          p.snapshotUri ?? (await this.fetchSnapshotUri(p.token, mediaUrl)),
       })),
     );
 
@@ -173,20 +235,141 @@ export class OnvifAdapter implements CameraAdapter {
     return info;
   }
 
-  private async call(body: string): Promise<string> {
+  private actualProfileToken(profileToken: string): string {
+    return profileToken === "main"
+      ? (this.primaryProfileToken ?? profileToken)
+      : profileToken;
+  }
+
+  private deriveServiceUrl(segment: string): string | null {
+    try {
+      const url = new URL(this.options.deviceServiceUrl);
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts.length === 0) return null;
+      parts[parts.length - 1] = segment;
+      url.pathname = "/" + parts.join("/");
+      return url.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  async continuousMove(options: {
+    profileToken: string;
+    velocity: Record<string, number>;
+  }): Promise<void> {
+    const pan = options.velocity.pan ?? 0;
+    const tilt = options.velocity.tilt ?? 0;
+    const zoom = options.velocity.zoom ?? 0;
+    await this.call(
+      `<tptz:ContinuousMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="${pan}" y="${tilt}"/><tt:Zoom x="${zoom}"/></tptz:Velocity></tptz:ContinuousMove>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+  }
+
+  async stop(options: { profileToken: string }): Promise<void> {
+    await this.call(
+      `<tptz:Stop><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+  }
+
+  async relativeMove(options: {
+    profileToken: string;
+    velocity: Record<string, number>;
+  }): Promise<void> {
+    const pan = options.velocity.pan ?? 0;
+    const tilt = options.velocity.tilt ?? 0;
+    const zoom = options.velocity.zoom ?? 0;
+    await this.call(
+      `<tptz:RelativeMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:Translation><tt:PanTilt x="${pan}" y="${tilt}"/><tt:Zoom x="${zoom}"/></tptz:Translation></tptz:RelativeMove>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+  }
+
+  async absoluteMove(options: {
+    profileToken: string;
+    position: Record<string, number>;
+  }): Promise<void> {
+    const pan = options.position.pan ?? 0;
+    const tilt = options.position.tilt ?? 0;
+    const zoom = options.position.zoom ?? 0;
+    await this.call(
+      `<tptz:AbsoluteMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:Position><tt:PanTilt x="${pan}" y="${tilt}"/><tt:Zoom x="${zoom}"/></tptz:Position></tptz:AbsoluteMove>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+  }
+
+  async listPresets(options: {
+    profileToken: string;
+  }): Promise<Array<{ token: string; name: string }>> {
+    const body = await this.call(
+      `<tptz:GetPresets><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken></tptz:GetPresets>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+    const node = this.parseXml(body);
+    return queryAll(node, "Body/GetPresetsResponse/Preset").map((preset) => ({
+      token: preset.attributes.token ?? "",
+      name: queryText(preset, "Name") ?? preset.attributes.token ?? "Preset",
+    }));
+  }
+
+  async gotoPreset(options: {
+    profileToken: string;
+    presetToken: string;
+  }): Promise<void> {
+    await this.call(
+      `<tptz:GotoPreset><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:PresetToken>${escapeXml(options.presetToken)}</tptz:PresetToken></tptz:GotoPreset>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+  }
+
+  async setPreset(options: {
+    profileToken: string;
+    presetToken?: string;
+    name?: string;
+  }): Promise<string> {
+    const body = await this.call(
+      `<tptz:SetPreset><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${options.name ? `<tptz:PresetName>${escapeXml(options.name)}</tptz:PresetName>` : ""}${options.presetToken ? `<tptz:PresetToken>${escapeXml(options.presetToken)}</tptz:PresetToken>` : ""}</tptz:SetPreset>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+    const token = queryText(
+      this.parseXml(body),
+      "Body/SetPresetResponse/PresetToken",
+    );
+    return token ?? options.presetToken ?? "";
+  }
+
+  async removePreset(options: {
+    profileToken: string;
+    presetToken: string;
+  }): Promise<void> {
+    await this.call(
+      `<tptz:RemovePreset><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:PresetToken>${escapeXml(options.presetToken)}</tptz:PresetToken></tptz:RemovePreset>`,
+      this.ptzServiceUrl ?? this.options.deviceServiceUrl,
+    );
+  }
+
+  private async call(
+    body: string,
+    serviceUrl = this.options.deviceServiceUrl,
+  ): Promise<string> {
     const envelope = soapEnvelope(
       body,
       this.options.username,
       this.options.password,
     );
     const envelopeNoSecurity = soapEnvelope(body, null, null);
-    const initial = await this.options.transport.post(
-      this.options.deviceServiceUrl,
-      envelope,
-      {
-        timeoutMs: this.options.timeoutMs,
-      },
-    );
+    const action = soapAction(body);
+    const headers = action
+      ? {
+          "Content-Type": `application/soap+xml; charset=utf-8; action="${action}"`,
+        }
+      : undefined;
+    const initial = await this.options.transport.post(serviceUrl, envelope, {
+      timeoutMs: this.options.timeoutMs,
+      headers,
+    });
     if (initial.status >= 200 && initial.status < 300) return initial.body;
 
     // Câmeras (ex.: Intelbras) rejeitam UsernameToken SOAP com 400 e exigem
@@ -197,10 +380,11 @@ export class OnvifAdapter implements CameraAdapter {
       (initial.status === 400 || initial.status === 401)
     ) {
       const bare = await this.options.transport.post(
-        this.options.deviceServiceUrl,
+        serviceUrl,
         envelopeNoSecurity,
         {
           timeoutMs: this.options.timeoutMs,
+          headers,
         },
       );
       if (bare.status >= 200 && bare.status < 300) return bare.body;
@@ -212,17 +396,17 @@ export class OnvifAdapter implements CameraAdapter {
           const digest = buildDigestHeader(
             challenge,
             "POST",
-            new URL(this.options.deviceServiceUrl),
+            new URL(serviceUrl),
             this.options.username,
             this.options.password ?? "",
           );
           if (digest) {
             const retry = await this.options.transport.post(
-              this.options.deviceServiceUrl,
+              serviceUrl,
               envelopeNoSecurity,
               {
                 timeoutMs: this.options.timeoutMs,
-                headers: { Authorization: `Digest ${digest}` },
+                headers: { ...headers, Authorization: `Digest ${digest}` },
               },
             );
             if (retry.status >= 200 && retry.status < 300) return retry.body;
@@ -266,7 +450,8 @@ export class OnvifAdapter implements CameraAdapter {
       const caps = queryAll(node, "Body/GetCapabilitiesResponse/Capabilities");
       for (const cap of caps) {
         const media = cap.children.find((c) => c.name === "Media");
-        const xaddr = media?.attributes.XAddr;
+        const xaddr =
+          media?.attributes.XAddr ?? (media ? queryText(media, "XAddr") : null);
         if (xaddr) return xaddr;
       }
       return null;
@@ -275,10 +460,33 @@ export class OnvifAdapter implements CameraAdapter {
     }
   }
 
-  private async fetchStreamUri(profileToken: string): Promise<string | null> {
+  private async fetchPtzUrl(): Promise<string | null> {
+    try {
+      const body = await this.call(
+        "<tds:GetCapabilities><tds:Category>PTZ</tds:Category></tds:GetCapabilities>",
+      );
+      const node = this.parseXml(body);
+      const caps = queryAll(node, "Body/GetCapabilitiesResponse/Capabilities");
+      for (const cap of caps) {
+        const ptz = cap.children.find((child) => child.name === "PTZ");
+        const xaddr =
+          ptz?.attributes.XAddr ?? (ptz ? queryText(ptz, "XAddr") : null);
+        if (xaddr) return xaddr;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchStreamUri(
+    profileToken: string,
+    mediaServiceUrl: string | null,
+  ): Promise<string | null> {
     try {
       const body = await this.call(
         `<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>${escapeXml(profileToken)}</trt:ProfileToken></trt:GetStreamUri>`,
+        mediaServiceUrl ?? this.options.deviceServiceUrl,
       );
       const node = this.parseXml(body);
       const uri = queryText(node, "Body/GetStreamUriResponse/MediaUri/Uri");
@@ -288,11 +496,32 @@ export class OnvifAdapter implements CameraAdapter {
     }
   }
 
-  private async fetchProfiles(): Promise<
-    Array<CameraProfileInfo & { ptzAvailable: boolean }>
-  > {
+  private async fetchSnapshotUri(
+    profileToken: string,
+    mediaServiceUrl: string | null,
+  ): Promise<string | null> {
     try {
-      const body = await this.call("<trt:GetProfiles/>");
+      const body = await this.call(
+        `<trt:GetSnapshotUri><trt:ProfileToken>${escapeXml(profileToken)}</trt:ProfileToken></trt:GetSnapshotUri>`,
+        mediaServiceUrl ?? this.options.deviceServiceUrl,
+      );
+      const node = this.parseXml(body);
+      return (
+        queryText(node, "Body/GetSnapshotUriResponse/MediaUri/Uri") || null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchProfiles(
+    mediaServiceUrl: string | null,
+  ): Promise<Array<CameraProfileInfo & { ptzAvailable: boolean }>> {
+    try {
+      const body = await this.call(
+        "<trt:GetProfiles/>",
+        mediaServiceUrl ?? this.options.deviceServiceUrl,
+      );
       const node = this.parseXml(body);
       const profiles = queryAll(node, "Body/GetProfilesResponse/Profiles");
       return profiles.map((profile) => {

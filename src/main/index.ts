@@ -9,7 +9,9 @@ import {
   safeStorage,
 } from "electron";
 import { pathToFileURL } from "node:url";
-import { join, resolve } from "node:path";
+import { extname, join, relative, resolve } from "node:path";
+import { copyFile, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { is } from "@electron-toolkit/utils";
 import { z } from "zod";
 import { IpcRegistry, EmptyRequestSchema } from "./ipc/registry.js";
@@ -35,8 +37,18 @@ import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
 import { PtzControllerRegistry } from "./services/ptz-registry.js";
 import { AppConfigSchema, type AppConfig } from "../shared/config.js";
-import type { CameraSummary } from "../shared/contracts.js";
-import type { CameraRecord } from "../shared/database.js";
+import type { CameraEditDetails, CameraSummary } from "../shared/contracts.js";
+import type {
+  CameraRecord,
+  RecordingRecord,
+  RecordingSegmentRecord,
+  SnapshotRecord,
+} from "../shared/database.js";
+import {
+  parseHttpUrl,
+  parseRtspUrl,
+  rtspUrlWithCredentials,
+} from "../shared/camera-urls.js";
 
 let mainWindow: BrowserWindow | undefined;
 const shutdownCoordinator = new ShutdownCoordinator();
@@ -50,6 +62,31 @@ let ptzRegistry: PtzControllerRegistry | null = null;
 let config: AppConfig | null = null;
 let configRepository: ConfigRepository | null = null;
 let diagnostics: DiagnosticService | null = null;
+const activeRecordings = new Map<
+  string,
+  { recordingId: string; startedAt: string; recordDir: string }
+>();
+const activeViewSessions = new Set<string>();
+const recordingOperations = new Map<string, Promise<void>>();
+
+async function withRecordingLock<T>(
+  cameraId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = recordingOperations.get(cameraId) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(operation);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  recordingOperations.set(cameraId, settled);
+  try {
+    return await result;
+  } finally {
+    if (recordingOperations.get(cameraId) === settled)
+      recordingOperations.delete(cameraId);
+  }
+}
 
 function mapCameraRecord(
   record: CameraRecord,
@@ -59,6 +96,7 @@ function mapCameraRecord(
     id: record.id,
     name: record.name,
     host: record.host,
+    active: record.active,
     status: record.status,
     recordingStatus: record.recordingStatus,
     hasCredential,
@@ -66,6 +104,229 @@ function mapCameraRecord(
   };
 }
 
+async function getCameraRecord(cameraId: string): Promise<CameraRecord | null> {
+  if (!database) return null;
+  const response = await database.request("camera.get", { id: cameraId });
+  return response.ok ? (response.value as CameraRecord) : null;
+}
+
+function sanitizedEndpointUrl(
+  record: CameraRecord,
+  service: "onvif" | "rtsp" | "rtsp_sub" | "snapshot",
+): string | null {
+  const value = record.endpoints.find(
+    (endpoint) => endpoint.service === service,
+  )?.url;
+  if (!value) return null;
+  const parsed =
+    service === "rtsp" || service === "rtsp_sub"
+      ? parseRtspUrl(value)
+      : parseHttpUrl(value);
+  return parsed?.sanitizedUrl ?? null;
+}
+
+async function cameraEditDetails(cameraId: string): Promise<CameraEditDetails> {
+  const camera = await getCameraRecord(cameraId);
+  if (!camera) throw new Error("Câmera não encontrada.");
+
+  let username: string | null = null;
+  if (credentials) {
+    for (const service of ["rtsp", "onvif", "snapshot", "ptz"] as const) {
+      try {
+        const credential = await credentials.getCredentialDetails(
+          cameraId,
+          service,
+        );
+        if (credential?.username) {
+          username = credential.username;
+          break;
+        }
+      } catch {
+        // A senha nunca é retornada; uma credencial inválida pode ser substituída no formulário.
+      }
+    }
+  }
+
+  return {
+    id: camera.id,
+    name: camera.name,
+    host: camera.host,
+    port: camera.port,
+    onvifUrl: sanitizedEndpointUrl(camera, "onvif"),
+    rtspUrl: sanitizedEndpointUrl(camera, "rtsp"),
+    rtspSubUrl: sanitizedEndpointUrl(camera, "rtsp_sub"),
+    snapshotUrl: sanitizedEndpointUrl(camera, "snapshot"),
+    username,
+    manufacturer: camera.manufacturer,
+    model: camera.model,
+    serialNumber: camera.serialNumber,
+  };
+}
+
+async function cameraRtspUrl(
+  camera: CameraRecord,
+  profile: "main" | "sub" = "main",
+): Promise<string | null> {
+  const endpoint =
+    profile === "sub"
+      ? (camera.endpoints.find((item) => item.service === "rtsp_sub") ??
+        camera.endpoints.find((item) => item.service === "rtsp"))
+      : camera.endpoints.find((item) => item.service === "rtsp");
+  if (!endpoint) return null;
+  const credential = await cameraCredential(camera.id, "rtsp");
+  return rtspUrlWithCredentials(endpoint.url, credential);
+}
+
+async function cameraCredential(
+  cameraId: string,
+  service: "onvif" | "rtsp" | "snapshot" | "ptz",
+): Promise<{ username: string | null; password: string } | null> {
+  if (!credentials) return null;
+  const services = await credentials.listCredentialServices(cameraId);
+  if (!services.includes(service)) {
+    if (
+      (service === "snapshot" || service === "rtsp" || service === "ptz") &&
+      services.includes("onvif")
+    ) {
+      return credentials.getCredentialDetails(cameraId, "onvif");
+    }
+    return null;
+  }
+  return credentials.getCredentialDetails(cameraId, service);
+}
+
+function mediaPath(cameraId: string): string {
+  return `camera_${cameraId.replaceAll("-", "")}`;
+}
+
+function mediaSessionId(cameraId: string, profile: "main" | "sub"): string {
+  return `${cameraId}_${profile}`;
+}
+
+async function releaseCameraMedia(cameraId: string): Promise<void> {
+  if (!mediaSupervisor) return;
+  await Promise.all([
+    mediaSupervisor.release(mediaSessionId(cameraId, "main")),
+    mediaSupervisor.release(mediaSessionId(cameraId, "sub")),
+  ]);
+}
+
+async function listCameraSummaries(): Promise<CameraSummary[]> {
+  if (!database) throw new Error("Banco de dados indisponível.");
+  const response = await database.request("camera.listAll", undefined);
+  if (!response.ok) throw new Error(response.error.message);
+  const summaries: CameraSummary[] = [];
+  for (const record of response.value as CameraRecord[]) {
+    summaries.push(
+      mapCameraRecord(
+        record,
+        credentials ? await credentials.hasCredential(record.id) : false,
+      ),
+    );
+  }
+  return summaries;
+}
+
+async function emitCameraChanged(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("cameras:changed", await listCameraSummaries());
+}
+
+async function resolveLibraryFile(
+  libraryRoot: string,
+  requestedPath: string,
+  allowedExtensions: ReadonlySet<string>,
+): Promise<string> {
+  const [root, target] = await Promise.all([
+    realpath(libraryRoot),
+    realpath(requestedPath),
+  ]);
+  const fromRoot = relative(root, target);
+  if (!fromRoot || fromRoot.startsWith("..") || fromRoot.includes(":")) {
+    throw new Error("Arquivo fora da biblioteca autorizada.");
+  }
+  if (!allowedExtensions.has(extname(target).toLowerCase())) {
+    throw new Error("Tipo de arquivo não autorizado.");
+  }
+  const info = await stat(target);
+  if (!info.isFile()) throw new Error("Arquivo da biblioteca não encontrado.");
+  return target;
+}
+
+async function stopActiveRecording(
+  cameraId: string,
+  status: "completed" | "interrupted" = "completed",
+): Promise<boolean> {
+  const active = activeRecordings.get(cameraId);
+  if (!active || !database) return false;
+  const disabled = mediaSupervisor
+    ? await mediaSupervisor.setRecording(
+        mediaSessionId(cameraId, "main"),
+        false,
+      )
+    : false;
+  if (disabled)
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+  await catalogRecordingFiles(active);
+  await database.request("recording.complete", {
+    id: active.recordingId,
+    status: disabled ? status : "interrupted",
+  });
+  await database.request("camera.setRecordingStatus", {
+    cameraId,
+    status: "idle",
+  });
+  activeRecordings.delete(cameraId);
+  const mainSessionId = mediaSessionId(cameraId, "main");
+  if (!activeViewSessions.has(mainSessionId))
+    await mediaSupervisor?.release(mainSessionId);
+  return true;
+}
+
+async function catalogRecordingFiles(active: {
+  recordingId: string;
+  startedAt: string;
+  recordDir: string;
+}): Promise<void> {
+  if (!database) return;
+  const files: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await Promise.all(
+      entries.map(async (entry) => {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) await visit(path);
+        else if (/\.(?:mp4|m4s)$/i.test(entry.name)) files.push(path);
+      }),
+    );
+  };
+  await visit(active.recordDir);
+  const startedAfter = Date.parse(active.startedAt) - 5_000;
+  for (const path of files) {
+    let info;
+    try {
+      info = await stat(path);
+    } catch {
+      continue;
+    }
+    if (info.mtimeMs < startedAfter) continue;
+    await database.request("recording.segment.create", {
+      recordingId: active.recordingId,
+      path,
+      startedAt: info.birthtime.toISOString(),
+      endedAt: info.mtime.toISOString(),
+      durationMs: Math.max(0, info.mtimeMs - info.birthtimeMs),
+      status: "completed",
+    });
+  }
+}
+
+app.setName("simple-dvr-wifi");
 app.enableSandbox();
 if (process.env.SWC_TEST_USER_DATA) {
   app.setPath("userData", resolve(process.env.SWC_TEST_USER_DATA));
@@ -252,8 +513,30 @@ const CameraIdRequestSchema = z.object({
 
 const CameraUpdateCredentialsSchema = z.object({
   id: z.string().uuid(),
+  username: z.string().trim().max(256).nullable().optional(),
   password: z.string().max(2048).nullable().optional(),
   rtspPassword: z.string().max(2048).nullable().optional(),
+});
+
+const CameraUpdateRequestSchema = CameraCreateRequestSchema.pick({
+  name: true,
+  host: true,
+  port: true,
+  rtspUrl: true,
+  onvifUrl: true,
+  username: true,
+  password: true,
+}).extend({
+  id: z.string().uuid(),
+});
+
+const CameraConnectionTestSchema = z.object({
+  host: z.string().trim().max(253).optional(),
+  port: z.number().int().min(1).max(65_535).nullable().optional(),
+  rtspUrl: z.string().max(2048).nullable().optional(),
+  onvifUrl: z.string().max(2048).nullable().optional(),
+  username: z.string().max(253).nullable().optional(),
+  password: z.string().max(2048).nullable().optional(),
 });
 
 const DiscoveryStartSchema = z.object({
@@ -266,20 +549,12 @@ function registerIpcHandlers(): void {
 
   registry.register("cameras:list", {
     input: EmptyRequestSchema,
-    handle: async () => {
-      if (!database) return [];
-      const response = await database.request("camera.list", undefined);
-      if (!response.ok) return [];
-      const records = response.value as CameraRecord[];
-      const summaries: CameraSummary[] = [];
-      for (const record of records) {
-        const hasCredential = credentials
-          ? await credentials.hasCredential(record.id)
-          : false;
-        summaries.push(mapCameraRecord(record, hasCredential));
-      }
-      return summaries;
-    },
+    handle: listCameraSummaries,
+  });
+
+  registry.register("cameras:details", {
+    input: CameraIdRequestSchema,
+    handle: ({ id }) => cameraEditDetails(id),
   });
 
   registry.register("cameras:create", {
@@ -288,11 +563,16 @@ function registerIpcHandlers(): void {
       if (!cameraManagement)
         return { ok: false, error: "Serviço indisponível." };
       const result = await cameraManagement.create(input);
-      return {
+      const hasCredential = credentials
+        ? await credentials.hasCredential(result.camera.id)
+        : false;
+      const response = {
         ok: true,
-        camera: mapCameraRecord(result.camera, false),
+        camera: mapCameraRecord(result.camera, hasCredential),
         duplicate: result.duplicate,
       };
+      await emitCameraChanged();
+      return response;
     },
   });
 
@@ -309,26 +589,317 @@ function registerIpcHandlers(): void {
     },
   });
 
+  registry.register("cameras:update", {
+    input: CameraUpdateRequestSchema,
+    handle: async ({ id, ...input }) => {
+      if (!cameraManagement) throw new Error("Serviço indisponível.");
+      const updated = await cameraManagement.update(id, input);
+      if (!updated) throw new Error("Câmera não encontrada.");
+      await emitCameraChanged();
+      return { updated: true };
+    },
+  });
+
+  registry.register("cameras:testConnection", {
+    input: CameraConnectionTestSchema,
+    handle: async ({ rtspUrl, onvifUrl, username, password }) => {
+      const parsedRtsp = rtspUrl ? parseRtspUrl(rtspUrl) : null;
+      if (rtspUrl && !parsedRtsp) throw new Error("URL RTSP inválida.");
+      const parsedOnvif = onvifUrl ? parseHttpUrl(onvifUrl) : null;
+      if (onvifUrl && !parsedOnvif) throw new Error("URL ONVIF inválida.");
+      if (!parsedRtsp && !parsedOnvif) {
+        throw new Error("Informe uma URL ONVIF ou RTSP para testar.");
+      }
+
+      const segments: Array<{
+        name: "onvif" | "rtsp";
+        status: "ok" | "error" | "skipped";
+        detail: string;
+      }> = [];
+      const connection = {
+        username:
+          username?.trim() ||
+          parsedRtsp?.username ||
+          parsedOnvif?.username ||
+          null,
+        password:
+          password || parsedRtsp?.password || parsedOnvif?.password || null,
+      };
+
+      if (parsedOnvif) {
+        try {
+          const { OnvifAdapter, createFetchOnvifTransport } =
+            await import("../workers/camera/onvif-adapter.js");
+          const info = await new OnvifAdapter({
+            deviceServiceUrl: parsedOnvif.sanitizedUrl,
+            username: connection.username,
+            password: connection.password,
+            transport: createFetchOnvifTransport(),
+          }).detect();
+          const available = info.capabilities.onvif !== "error";
+          segments.push({
+            name: "onvif",
+            status: available ? "ok" : "error",
+            detail: available ? "ONVIF acessível." : "ONVIF não respondeu.",
+          });
+        } catch {
+          segments.push({
+            name: "onvif",
+            status: "error",
+            detail: "Falha ao consultar o endpoint ONVIF.",
+          });
+        }
+      } else {
+        segments.push({
+          name: "onvif",
+          status: "skipped",
+          detail: "Endpoint não configurado.",
+        });
+      }
+
+      if (parsedRtsp) {
+        const { probeRtsp } = await import("../workers/camera/probes.js");
+        const result = await probeRtsp({
+          url: parsedRtsp.sanitizedUrl,
+          username: connection.username,
+          password: connection.password,
+          timeoutMs: 5_000,
+        });
+        segments.push({
+          name: "rtsp",
+          status: result === "ok" ? "ok" : "error",
+          detail:
+            result === "ok"
+              ? "Stream RTSP acessível."
+              : result === "auth_error"
+                ? "Credenciais RTSP rejeitadas."
+                : "Stream RTSP inacessível.",
+        });
+      } else {
+        segments.push({
+          name: "rtsp",
+          status: "skipped",
+          detail: "Endpoint não configurado.",
+        });
+      }
+
+      return {
+        status: segments.some((segment) => segment.status === "ok")
+          ? "connected"
+          : "unavailable",
+        segments,
+      };
+    },
+  });
+
+  registry.register("cameras:test", {
+    input: CameraIdRequestSchema,
+    handle: async ({ id }) => {
+      if (!database) throw new Error("Banco indisponível.");
+      const camera = await getCameraRecord(id);
+      if (!camera) throw new Error("Câmera não encontrada.");
+      const segments: Array<{
+        name: "onvif" | "rtsp";
+        status: "ok" | "error" | "skipped";
+        detail: string;
+      }> = [];
+      const onvifEndpoint = camera.endpoints.find(
+        (item) => item.service === "onvif",
+      )?.url;
+      let discoveredRtsp = camera.endpoints.find(
+        (item) => item.service === "rtsp",
+      )?.url;
+      let onvifAvailable = false;
+
+      if (onvifEndpoint) {
+        try {
+          const { OnvifAdapter, createFetchOnvifTransport } =
+            await import("../workers/camera/onvif-adapter.js");
+          const credential = await cameraCredential(id, "onvif");
+          const info = await new OnvifAdapter({
+            deviceServiceUrl: onvifEndpoint,
+            username: credential?.username,
+            password: credential?.password,
+            transport: createFetchOnvifTransport(),
+          }).detect();
+          onvifAvailable = info.capabilities.onvif !== "error";
+          await database.request("camera.setIdentity", {
+            cameraId: id,
+            manufacturer: info.identity.manufacturer || undefined,
+            model: info.identity.model || undefined,
+            serialNumber: info.identity.serialNumber || undefined,
+          });
+          await database.request("camera.setCapabilities", {
+            cameraId: id,
+            onvif: onvifAvailable,
+            rtsp: info.capabilities.rtsp === "supported",
+            snapshot: info.capabilities.snapshot === "supported",
+            ptz: info.ptzSupported,
+            h264: info.capabilities.h264 === "supported",
+            h265: info.capabilities.h265 === "supported",
+            mjpeg: info.capabilities.mjpeg === "supported",
+          });
+          if (info.profiles.length > 0) {
+            await database.request("profile.replaceAll", {
+              cameraId: id,
+              profiles: info.profiles.map((profile) => ({
+                token: profile.token,
+                name: profile.name || null,
+                streamType: profile.streamType,
+                codec: profile.codec,
+                width: profile.width,
+                height: profile.height,
+                fps: profile.fps,
+              })),
+            });
+          }
+          if (info.rtspMainUrl) {
+            const parsedRtsp = parseRtspUrl(info.rtspMainUrl);
+            if (parsedRtsp) {
+              discoveredRtsp = parsedRtsp.sanitizedUrl;
+              await database.request("camera.setEndpoint", {
+                cameraId: id,
+                service: "rtsp",
+                url: discoveredRtsp,
+              });
+              if (parsedRtsp.password && credentials) {
+                await credentials.setCredential(id, {
+                  service: "rtsp",
+                  username: parsedRtsp.username,
+                  password: parsedRtsp.password,
+                });
+              }
+            }
+          }
+          if (info.rtspSubUrl) {
+            const parsedSubRtsp = parseRtspUrl(info.rtspSubUrl);
+            if (parsedSubRtsp) {
+              await database.request("camera.setEndpoint", {
+                cameraId: id,
+                service: "rtsp_sub",
+                url: parsedSubRtsp.sanitizedUrl,
+              });
+            }
+          }
+          if (info.snapshotUri) {
+            const parsedSnapshot = parseHttpUrl(info.snapshotUri);
+            if (parsedSnapshot) {
+              await database.request("camera.setEndpoint", {
+                cameraId: id,
+                service: "snapshot",
+                url: parsedSnapshot.sanitizedUrl,
+              });
+              if (parsedSnapshot.password && credentials) {
+                await credentials.setCredential(id, {
+                  service: "snapshot",
+                  username: parsedSnapshot.username,
+                  password: parsedSnapshot.password,
+                });
+              }
+            }
+          }
+          segments.push({
+            name: "onvif",
+            status: onvifAvailable ? "ok" : "error",
+            detail: onvifAvailable
+              ? `${info.profiles.length} perfil(is) detectado(s).`
+              : "O dispositivo não respondeu às operações ONVIF.",
+          });
+        } catch {
+          segments.push({
+            name: "onvif",
+            status: "error",
+            detail: "Falha ao consultar o endpoint ONVIF.",
+          });
+        }
+      } else {
+        segments.push({
+          name: "onvif",
+          status: "skipped",
+          detail: "Endpoint não configurado.",
+        });
+      }
+
+      let finalStatus: CameraRecord["status"] = onvifAvailable
+        ? "connected"
+        : "unavailable";
+      if (discoveredRtsp) {
+        const { probeRtsp } = await import("../workers/camera/probes.js");
+        const credential = await cameraCredential(id, "rtsp");
+        const result = await probeRtsp({
+          url: discoveredRtsp,
+          username: credential?.username,
+          password: credential?.password,
+          timeoutMs: 5_000,
+        });
+        finalStatus =
+          result === "ok"
+            ? "connected"
+            : result === "auth_error"
+              ? "auth_error"
+              : "network_error";
+        segments.push({
+          name: "rtsp",
+          status: result === "ok" ? "ok" : "error",
+          detail:
+            result === "ok"
+              ? "Stream RTSP acessível."
+              : result === "auth_error"
+                ? "Credenciais RTSP rejeitadas."
+                : "Stream RTSP inacessível.",
+        });
+      } else {
+        segments.push({
+          name: "rtsp",
+          status: "skipped",
+          detail: "Endpoint não configurado.",
+        });
+      }
+      await database.request("camera.setStatus", {
+        cameraId: id,
+        status: finalStatus,
+      });
+      await emitCameraChanged();
+      return { status: finalStatus, segments };
+    },
+  });
+
   registry.register("cameras:deactivate", {
     input: CameraIdRequestSchema,
-    handle: async ({ id }) =>
-      cameraManagement ? await cameraManagement.deactivate(id) : false,
+    handle: async ({ id }) => {
+      await withRecordingLock(id, () => stopActiveRecording(id, "interrupted"));
+      activeViewSessions.delete(mediaSessionId(id, "main"));
+      activeViewSessions.delete(mediaSessionId(id, "sub"));
+      await releaseCameraMedia(id);
+      const changed = cameraManagement
+        ? await cameraManagement.deactivate(id)
+        : false;
+      await emitCameraChanged();
+      return changed;
+    },
   });
 
   registry.register("cameras:reactivate", {
     input: CameraIdRequestSchema,
-    handle: async ({ id }) =>
-      cameraManagement ? await cameraManagement.reactivate(id) : false,
+    handle: async ({ id }) => {
+      const changed = cameraManagement
+        ? await cameraManagement.reactivate(id)
+        : false;
+      await emitCameraChanged();
+      return changed;
+    },
   });
 
   registry.register("cameras:updateCredentials", {
     input: CameraUpdateCredentialsSchema,
-    handle: async ({ id, password, rtspPassword }) => {
+    handle: async ({ id, username, password, rtspPassword }) => {
       if (!cameraManagement) return false;
       await cameraManagement.updateCredentials(id, {
+        username: username ?? null,
         password: password ?? null,
         rtspPassword: rtspPassword ?? null,
       });
+      await emitCameraChanged();
       return true;
     },
   });
@@ -337,7 +908,14 @@ function registerIpcHandlers(): void {
     input: CameraIdRequestSchema,
     handle: async ({ id }) => {
       if (!cameraManagement) return { removed: false };
-      return cameraManagement.remove(id);
+      await withRecordingLock(id, () => stopActiveRecording(id, "interrupted"));
+      activeViewSessions.delete(mediaSessionId(id, "main"));
+      activeViewSessions.delete(mediaSessionId(id, "sub"));
+      await releaseCameraMedia(id);
+      await ptzRegistry?.release(id);
+      const result = await cameraManagement.remove(id);
+      await emitCameraChanged();
+      return result;
     },
   });
 
@@ -363,21 +941,48 @@ function registerIpcHandlers(): void {
   registry.register("media:acquire", {
     input: z.object({
       cameraId: z.string().uuid(),
-      rtspUrl: z.string().min(1).max(2048),
-      path: z.string().min(1).max(253),
+      profile: z.enum(["main", "sub"]),
     }),
-    handle: async ({ cameraId, rtspUrl, path }) => {
+    handle: async ({ cameraId, profile }) => {
       if (!mediaSupervisor) return null;
-      const status = await mediaSupervisor.acquire(cameraId, rtspUrl, path);
+      const camera = await getCameraRecord(cameraId);
+      if (!camera) throw new Error("Câmera não encontrada.");
+      if (!camera.active) {
+        throw new Error("A câmera está desativada.");
+      }
+      const rtspUrl = await cameraRtspUrl(camera, profile);
+      if (!rtspUrl)
+        throw new Error("A câmera não possui um endpoint RTSP configurado.");
+      const sessionId = mediaSessionId(cameraId, profile);
+      const status = await mediaSupervisor.acquire(
+        sessionId,
+        rtspUrl,
+        `${mediaPath(cameraId)}_${profile}`,
+      );
+      if (status.state === "running") activeViewSessions.add(sessionId);
+      if (database) {
+        await database.request("camera.setStatus", {
+          cameraId,
+          status: status.state === "running" ? "connected" : "media_error",
+        });
+      }
+      await emitCameraChanged();
       return status;
     },
   });
 
   registry.register("media:release", {
-    input: z.object({ cameraId: z.string().uuid() }),
-    handle: async ({ cameraId }) => {
+    input: z.object({
+      cameraId: z.string().uuid(),
+      profile: z.enum(["main", "sub"]),
+    }),
+    handle: async ({ cameraId, profile }) => {
       if (!mediaSupervisor) return { released: false };
-      await mediaSupervisor.release(cameraId);
+      const sessionId = mediaSessionId(cameraId, profile);
+      activeViewSessions.delete(sessionId);
+      if (profile === "main" && activeRecordings.has(cameraId))
+        return { released: false };
+      await mediaSupervisor.release(sessionId);
       return { released: true };
     },
   });
@@ -385,7 +990,9 @@ function registerIpcHandlers(): void {
   registry.register("media:status", {
     input: z.object({ cameraId: z.string().uuid() }),
     handle: async ({ cameraId }) =>
-      mediaSupervisor ? mediaSupervisor.status(cameraId) : null,
+      mediaSupervisor
+        ? mediaSupervisor.status(mediaSessionId(cameraId, "main"))
+        : null,
   });
 
   registry.register("media:whepEndpoint", {
@@ -394,7 +1001,12 @@ function registerIpcHandlers(): void {
       profile: z.enum(["main", "sub"]),
     }),
     handle: async ({ cameraId, profile }) =>
-      mediaSupervisor ? mediaSupervisor.whepEndpoint(cameraId, profile) : null,
+      mediaSupervisor
+        ? mediaSupervisor.whepEndpoint(
+            mediaSessionId(cameraId, profile),
+            profile,
+          )
+        : null,
   });
 
   registry.register("ptz:move", {
@@ -407,8 +1019,19 @@ function registerIpcHandlers(): void {
       }),
     }),
     handle: async ({ cameraId, velocity }) => {
+      // eslint-disable-next-line no-console
+      console.log("[ptz:move]", cameraId, JSON.stringify(velocity));
       if (!ptzRegistry) return { started: false };
-      return ptzRegistry.move(cameraId, velocity, true);
+      const camera = await getCameraRecord(cameraId);
+      if (!camera || !camera.active || !camera.supportsPtz) {
+        // eslint-disable-next-line no-console
+        console.log("[ptz:move] rejeitado:", camera ? `active=${camera.active} ptz=${camera.supportsPtz}` : "sem câmera");
+        return { started: false };
+      }
+      const result = await ptzRegistry.move(cameraId, velocity, camera.supportsPtz);
+      // eslint-disable-next-line no-console
+      console.log("[ptz:move] resultado:", JSON.stringify(result));
+      return result;
     },
   });
 
@@ -440,18 +1063,32 @@ function registerIpcHandlers(): void {
   registry.register("snapshots:capture", {
     input: z.object({
       cameraId: z.string().uuid(),
-      snapshotUri: z.string().max(2048).nullable().optional(),
-      rtspUrl: z.string().max(2048).nullable().optional(),
     }),
-    handle: async ({ cameraId, snapshotUri, rtspUrl }) => {
-      if (!config) return { ok: false };
+    handle: async ({ cameraId }) => {
+      if (!config || !database) return { ok: false };
+      const camera = await getCameraRecord(cameraId);
+      if (!camera) throw new Error("Câmera não encontrada.");
+      if (!camera.active) {
+        throw new Error("A câmera está desativada.");
+      }
+      const storedSnapshot = camera.endpoints.find(
+        (item) => item.service === "snapshot",
+      )?.url;
+      const storedRtsp = await cameraRtspUrl(camera);
+      const snapshotCredential = await cameraCredential(cameraId, "snapshot");
       const { captureSnapshot } =
         await import("./services/snapshot-capture.js");
       const result = await captureSnapshot({
         cameraId,
         libraryRoot: config.snapshotDir || resolve(userDataPath, "snapshots"),
-        snapshotUri,
-        rtspUrl,
+        snapshotUri: storedSnapshot ?? null,
+        rtspUrl: storedRtsp,
+        username: snapshotCredential?.username,
+        password: snapshotCredential?.password,
+      });
+      await database.request("snapshot.create", {
+        cameraId,
+        path: result.path,
       });
       return { ok: true, ...result };
     },
@@ -459,25 +1096,212 @@ function registerIpcHandlers(): void {
 
   registry.register("recordings:start", {
     input: z.object({ cameraId: z.string().uuid() }),
-    handle: async ({ cameraId }) => {
-      if (!config || !database) return { ok: false };
-      const { RecordingCatalogService } =
-        await import("./services/recording-catalog.js");
-      const service = new RecordingCatalogService(database, {
-        cameraId,
-        libraryRoot:
-          config.recordingsDir || resolve(userDataPath, "recordings"),
-      });
-      const state = await service.start(cameraId);
-      return { ok: state.writeAllowed, ...state };
-    },
+    handle: async ({ cameraId }) =>
+      withRecordingLock(cameraId, async () => {
+        if (!config || !database || !mediaSupervisor) return { ok: false };
+        const existing = activeRecordings.get(cameraId);
+        if (existing) {
+          return {
+            ok: true,
+            writeAllowed: true,
+            cameraId,
+            recordingId: existing.recordingId,
+            startedAt: existing.startedAt,
+            status: "recording",
+          };
+        }
+
+        const camera = await getCameraRecord(cameraId);
+        if (!camera) throw new Error("Câmera não encontrada.");
+        if (!camera.active) {
+          throw new Error("A câmera está desativada.");
+        }
+        const rtspUrl = await cameraRtspUrl(camera);
+        if (!rtspUrl)
+          throw new Error("A câmera não possui um endpoint RTSP configurado.");
+
+        const libraryRoot =
+          config.recordingsDir || resolve(userDataPath, "recordings");
+        await mkdir(libraryRoot, { recursive: true });
+        const { checkStorageStatus, shouldAllowWrite } =
+          await import("./services/storage-monitor.js");
+        const storage = await checkStorageStatus(libraryRoot);
+        if (!shouldAllowWrite(storage)) {
+          return { ok: false, writeAllowed: false, cameraId, status: "failed" };
+        }
+
+        const mainSessionId = mediaSessionId(cameraId, "main");
+        const currentMediaStatus = mediaSupervisor.status(mainSessionId);
+        const mediaStatus =
+          currentMediaStatus?.state === "running"
+            ? currentMediaStatus
+            : await mediaSupervisor.acquire(
+                mainSessionId,
+                rtspUrl,
+                `${mediaPath(cameraId)}_main`,
+              );
+        if (mediaStatus.state !== "running") {
+          throw new Error(
+            mediaStatus.error || "Gateway de mídia indisponível.",
+          );
+        }
+
+        const recordPath = resolve(
+          libraryRoot,
+          "%path",
+          "%Y-%m-%d",
+          "%H-%M-%S-%f",
+        );
+        const response = await database.request("recording.create", {
+          cameraId,
+        });
+        if (!response.ok)
+          throw new Error("Não foi possível criar o catálogo da gravação.");
+        const recording = response.value as {
+          id: string;
+          startedAt: string;
+        };
+        const enabled = await mediaSupervisor.setRecording(
+          mainSessionId,
+          true,
+          recordPath,
+        );
+        if (!enabled) {
+          await database.request("recording.complete", {
+            id: recording.id,
+            status: "failed",
+          });
+          if (!activeViewSessions.has(mainSessionId))
+            await mediaSupervisor.release(mainSessionId);
+          throw new Error("O gateway recusou o início da gravação.");
+        }
+
+        activeRecordings.set(cameraId, {
+          recordingId: recording.id,
+          startedAt: recording.startedAt,
+          recordDir: resolve(libraryRoot, `${mediaPath(cameraId)}_main`),
+        });
+        await database.request("camera.setRecordingStatus", {
+          cameraId,
+          status: "recording",
+        });
+        await emitCameraChanged();
+        return {
+          ok: true,
+          writeAllowed: true,
+          recordingId: recording.id,
+          cameraId,
+          status: "recording",
+          startedAt: recording.startedAt,
+        };
+      }),
   });
 
   registry.register("recordings:stop", {
     input: z.object({ cameraId: z.string().uuid() }),
-    handle: async ({ cameraId: _cameraId }) => {
-      void _cameraId;
-      return { stopped: true };
+    handle: async ({ cameraId }) =>
+      withRecordingLock(cameraId, async () => {
+        if (!database || !mediaSupervisor) return { stopped: false };
+        const stopped = await stopActiveRecording(cameraId);
+        if (!stopped) return { stopped: false };
+        await emitCameraChanged();
+        return { stopped: true };
+      }),
+  });
+
+  registry.register("library:snapshots", {
+    input: z.object({ cameraId: z.string().uuid().optional() }),
+    handle: async ({ cameraId }) => {
+      if (!database) return [];
+      const camerasResult = cameraId
+        ? null
+        : await database.request("camera.list", undefined);
+      const cameraIds = cameraId
+        ? [cameraId]
+        : camerasResult?.ok
+          ? (camerasResult.value as CameraRecord[]).map((camera) => camera.id)
+          : [];
+      const rows = await Promise.all(
+        cameraIds.map(async (id) => {
+          const result = await database!.request("snapshot.list", {
+            cameraId: id,
+          });
+          return result.ok ? (result.value as SnapshotRecord[]) : [];
+        }),
+      );
+      return rows
+        .flat()
+        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
+    },
+  });
+
+  registry.register("library:recordings", {
+    input: z.object({ cameraId: z.string().uuid().optional() }),
+    handle: async ({ cameraId }) => {
+      if (!database) return [];
+      const camerasResult = cameraId
+        ? null
+        : await database.request("camera.list", undefined);
+      const cameraIds = cameraId
+        ? [cameraId]
+        : camerasResult?.ok
+          ? (camerasResult.value as CameraRecord[]).map((camera) => camera.id)
+          : [];
+      const rows = await Promise.all(
+        cameraIds.map(async (id) => {
+          const result = await database!.request("recording.list", {
+            cameraId: id,
+          });
+          return result.ok ? (result.value as RecordingRecord[]) : [];
+        }),
+      );
+      const recordings = rows.flat();
+      const withPaths = await Promise.all(
+        recordings.map(async (recording) => {
+          const segments = await database!.request("recording.segment.list", {
+            recordingId: recording.id,
+          });
+          const first = segments.ok
+            ? (segments.value as RecordingSegmentRecord[])[0]
+            : undefined;
+          return { ...recording, path: first?.path ?? null };
+        }),
+      );
+      return withPaths.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    },
+  });
+
+  registry.register("library:openSnapshot", {
+    input: z.object({ path: z.string().min(1).max(2048) }),
+    handle: async ({ path }) => {
+      if (!config) return { opened: false };
+      const root = resolve(
+        config.snapshotDir || resolve(userDataPath, "snapshots"),
+      );
+      const target = await resolveLibraryFile(
+        root,
+        path,
+        new Set([".jpg", ".jpeg", ".png"]),
+      );
+      const error = await shell.openPath(target);
+      return { opened: error.length === 0 };
+    },
+  });
+
+  registry.register("library:openRecording", {
+    input: z.object({ path: z.string().min(1).max(2048) }),
+    handle: async ({ path }) => {
+      if (!config) return { opened: false };
+      const root = resolve(
+        config.recordingsDir || resolve(userDataPath, "recordings"),
+      );
+      const target = await resolveLibraryFile(
+        root,
+        path,
+        new Set([".mp4", ".m4s"]),
+      );
+      const error = await shell.openPath(target);
+      return { opened: error.length === 0 };
     },
   });
 
@@ -519,7 +1343,32 @@ const userDataPath = app.getPath("userData");
 const databasePath = resolve(userDataPath, "simple-dvr-wifi.sqlite");
 const backupDir = resolve(userDataPath, "backups");
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function migrateLegacyDevelopmentDatabase(): Promise<void> {
+  if (process.env.SWC_TEST_USER_DATA || (await fileExists(databasePath)))
+    return;
+
+  const legacyPath = resolve(
+    app.getPath("appData"),
+    "Electron",
+    "simple-dvr-wifi.sqlite",
+  );
+  if (legacyPath === databasePath || !(await fileExists(legacyPath))) return;
+
+  await mkdir(userDataPath, { recursive: true });
+  await copyFile(legacyPath, databasePath);
+}
+
 async function initializeDatabase(): Promise<void> {
+  await migrateLegacyDevelopmentDatabase();
   database = new DatabaseSupervisor(
     createUtilityProcessTransport(databasePath, backupDir),
   );
@@ -533,10 +1382,27 @@ async function initializeDatabase(): Promise<void> {
   configRepository = new ConfigRepository(database);
   config = await configRepository.load();
   diagnostics = new DiagnosticService(database);
-  shutdownCoordinator.register({
-    name: "database",
-    stop: () => database?.shutdown(3_000),
-  });
+  const cameraList = await database.request("camera.list", undefined);
+  if (cameraList.ok) {
+    for (const camera of cameraList.value as CameraRecord[]) {
+      const recordingList = await database.request("recording.list", {
+        cameraId: camera.id,
+      });
+      if (!recordingList.ok) continue;
+      for (const recording of recordingList.value as RecordingRecord[]) {
+        if (!["starting", "recording", "stopping"].includes(recording.status))
+          continue;
+        await database.request("recording.complete", {
+          id: recording.id,
+          status: "interrupted",
+        });
+      }
+      await database.request("camera.setRecordingStatus", {
+        cameraId: camera.id,
+        status: "idle",
+      });
+    }
+  }
 
   const mediaResources = resolve(userDataPath, "media");
   const mediaConfigDir = resolve(mediaResources, "config");
@@ -554,17 +1420,53 @@ async function initializeDatabase(): Promise<void> {
     expectedHash: expectedMediaMtxHashFromManifest(mediaManifestPath),
     configDir: mediaConfigDir,
   });
-  shutdownCoordinator.register({
-    name: "media-sessions",
-    stop: () => mediaSupervisor?.shutdown() ?? Promise.resolve(),
-  });
 
   ptzRegistry = new PtzControllerRegistry({
-    getAdapter: async () => null,
+    getAdapter: async (cameraId) => {
+      const camera = await getCameraRecord(cameraId);
+      const onvifUrl = camera?.endpoints.find(
+        (endpoint) => endpoint.service === "onvif",
+      )?.url;
+      // eslint-disable-next-line no-console
+      console.log("[ptz:getAdapter]", cameraId, "onvifUrl=", onvifUrl ?? "(sem onvif)");
+      if (!onvifUrl) return null;
+      const { OnvifAdapter, createFetchOnvifTransport } =
+        await import("../workers/camera/onvif-adapter.js");
+      const credential = await cameraCredential(cameraId, "onvif");
+      // eslint-disable-next-line no-console
+      console.log("[ptz:getAdapter] credencial=", credential ? `user=${credential.username}` : "(sem credencial)");
+      const adapter = new OnvifAdapter({
+        deviceServiceUrl: onvifUrl,
+        username: credential?.username,
+        password: credential?.password,
+        transport: createFetchOnvifTransport(),
+        timeoutMs: 10_000,
+      });
+      let ptzSupported = false;
+      try {
+        const info = await adapter.detect();
+        ptzSupported = info.ptzSupported;
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.log("[ptz:getAdapter] detect() erro:", error instanceof Error ? error.message : String(error));
+      }
+      // eslint-disable-next-line no-console
+      console.log("[ptz:getAdapter] ptzSupported=", ptzSupported);
+      return ptzSupported ? adapter : null;
+    },
   });
   shutdownCoordinator.register({
-    name: "ptz",
-    stop: () => ptzRegistry?.shutdownAll() ?? Promise.resolve(),
+    name: "application-resources",
+    stop: async () => {
+      for (const cameraId of [...activeRecordings.keys()]) {
+        await withRecordingLock(cameraId, () =>
+          stopActiveRecording(cameraId, "interrupted"),
+        );
+      }
+      await ptzRegistry?.shutdownAll();
+      await mediaSupervisor?.shutdown();
+      await database?.shutdown(3_000);
+    },
   });
 }
 

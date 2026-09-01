@@ -27,14 +27,16 @@ export class DiscoveryService {
       );
     }
 
-    const { discoverOnInterface } =
-      await import("../../workers/discovery/ws-discovery.js");
-    const targets = await discoverOnInterface(address, {
-      timeoutMs: input.timeoutMs ?? 6_000,
-      signal: controller.signal,
-    });
-    this.active = null;
-    return targets;
+    try {
+      const { discoverOnInterface } =
+        await import("../../workers/discovery/ws-discovery.js");
+      return await discoverOnInterface(address, {
+        timeoutMs: input.timeoutMs ?? 6_000,
+        signal: controller.signal,
+      });
+    } finally {
+      if (this.active === controller) this.active = null;
+    }
   }
 
   async cancel(): Promise<{ cancelled: boolean }> {

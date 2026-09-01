@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http'
+import { createHash } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 
 export interface SimulatedCameraConfig {
@@ -56,7 +57,9 @@ export class OnvifSimulator {
   }
 
   async start(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve))
+    await new Promise<void>((resolve) =>
+      this.server.listen(0, '127.0.0.1', resolve),
+    )
     const address = this.server.address() as AddressInfo
     this.port = address.port
   }
@@ -68,12 +71,30 @@ export class OnvifSimulator {
   }
 
   private requiresAuth(
-    req: { username?: string; password?: string },
+    req: {
+      username?: string
+      password?: string
+      nonce?: string
+      created?: string
+      passwordDigest: boolean
+    },
     res: { writeHead(status: number): void; end(body: string): void },
   ): boolean {
-    const expected = `${this.config.username}:${this.config.password}`
-    const provided = req.username && req.password ? `${req.username}:${req.password}` : ''
-    if (provided !== expected) {
+    const validUsername = req.username === this.config.username
+    let validPassword = req.password === this.config.password
+    if (req.passwordDigest && req.nonce && req.created && req.password) {
+      const expectedDigest = createHash('sha1')
+        .update(
+          Buffer.concat([
+            Buffer.from(req.nonce, 'base64'),
+            Buffer.from(req.created, 'utf8'),
+            Buffer.from(this.config.password, 'utf8'),
+          ]),
+        )
+        .digest('base64')
+      validPassword = req.password === expectedDigest
+    }
+    if (!validUsername || !validPassword) {
       res.writeHead(401)
       res.end(
         '<s:Envelope><s:Body><Fault><Reason>Unauthorized</Reason></Fault></s:Body></s:Envelope>',
@@ -90,8 +111,22 @@ export class OnvifSimulator {
       end(body: string): void
     },
   ): void {
-    const username = /<Username>([^<]+)<\/Username>/.exec(raw)?.[1]
-    const password = /<Password>([^<]+)<\/Password>/.exec(raw)?.[1]
+    const username =
+      /<(?:[A-Za-z0-9_-]+:)?Username>([^<]+)<\/(?:[A-Za-z0-9_-]+:)?Username>/.exec(
+        raw,
+      )?.[1]
+    const password =
+      /<(?:[A-Za-z0-9_-]+:)?Password(?:\s[^>]*)?>([^<]+)<\/(?:[A-Za-z0-9_-]+:)?Password>/.exec(
+        raw,
+      )?.[1]
+    const nonce =
+      /<(?:[A-Za-z0-9_-]+:)?Nonce(?:\s[^>]*)?>([^<]+)<\/(?:[A-Za-z0-9_-]+:)?Nonce>/.exec(
+        raw,
+      )?.[1]
+    const created =
+      /<(?:[A-Za-z0-9_-]+:)?Created>([^<]+)<\/(?:[A-Za-z0-9_-]+:)?Created>/.exec(
+        raw,
+      )?.[1]
     const action =
       /<tds:([A-Za-z]+)/.exec(raw)?.[1] ??
       /<trt:([A-Za-z]+)/.exec(raw)?.[1] ??
@@ -100,7 +135,19 @@ export class OnvifSimulator {
 
     this.requests.push({ body: raw, action })
 
-    if (!this.requiresAuth({ username, password }, res)) return
+    if (
+      !this.requiresAuth(
+        {
+          username,
+          password,
+          nonce,
+          created,
+          passwordDigest: raw.includes('#PasswordDigest'),
+        },
+        res,
+      )
+    )
+      return
 
     let body: string
     switch (action) {
@@ -136,7 +183,8 @@ export class OnvifSimulator {
       const width = main ? 1920 : 640
       const height = main ? 1080 : 360
       const fps = main ? 30 : 15
-      const ptz = this.config.ptz && main ? '<PTZConfiguration token="ptz1"/>' : ''
+      const ptz =
+        this.config.ptz && main ? '<PTZConfiguration token="ptz1"/>' : ''
       const name = main ? 'Main Stream' : 'Secondary Stream'
       return `<Profiles token="${main ? 'main_profile' : 'sub_profile'}">
         <Name>${name}</Name>
@@ -153,5 +201,6 @@ export const SIMULATED_CAMERA_FIXTURES = {
   noPtz: () => new OnvifSimulator({ profiles: 2, ptz: false }),
   singleProfile: () => new OnvifSimulator({ profiles: 1 }),
   partial: () => new OnvifSimulator({ profiles: 1, partialResponses: true }),
-  authRequired: () => new OnvifSimulator({ username: 'admin', password: 'secret' }),
+  authRequired: () =>
+    new OnvifSimulator({ username: 'admin', password: 'secret' }),
 }
