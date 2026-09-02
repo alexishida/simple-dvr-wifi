@@ -96,6 +96,7 @@ function mapCameraRecord(
     status: record.status,
     recordingStatus: record.recordingStatus,
     hasCredential,
+    hasOnvif: record.endpoints.some((endpoint) => endpoint.service === "onvif"),
     supportsPtz: record.supportsPtz,
   };
 }
@@ -995,10 +996,19 @@ function registerIpcHandlers(): void {
       if (!ptzRegistry) return { started: false };
       const camera = await getCameraRecord(cameraId);
       if (!camera || !camera.active || !camera.supportsPtz) {
-        console.log("[ptz:move] rejeitado:", camera ? `active=${camera.active} ptz=${camera.supportsPtz}` : "sem câmera");
+        console.log(
+          "[ptz:move] rejeitado:",
+          camera
+            ? `active=${camera.active} ptz=${camera.supportsPtz}`
+            : "sem câmera",
+        );
         return { started: false };
       }
-      const result = await ptzRegistry.move(cameraId, velocity, camera.supportsPtz);
+      const result = await ptzRegistry.move(
+        cameraId,
+        velocity,
+        camera.supportsPtz,
+      );
       console.log("[ptz:move] resultado:", JSON.stringify(result));
       return result;
     },
@@ -1401,12 +1411,20 @@ async function initializeDatabase(): Promise<void> {
       const onvifUrl = camera?.endpoints.find(
         (endpoint) => endpoint.service === "onvif",
       )?.url;
-      console.log("[ptz:getAdapter]", cameraId, "onvifUrl=", onvifUrl ?? "(sem onvif)");
+      console.log(
+        "[ptz:getAdapter]",
+        cameraId,
+        "onvifUrl=",
+        onvifUrl ?? "(sem onvif)",
+      );
       if (!onvifUrl) return null;
       const { OnvifAdapter, createFetchOnvifTransport } =
         await import("../workers/camera/onvif-adapter.js");
       const credential = await cameraCredential(cameraId, "onvif");
-      console.log("[ptz:getAdapter] credencial=", credential ? `user=${credential.username}` : "(sem credencial)");
+      console.log(
+        "[ptz:getAdapter] credencial=",
+        credential ? `user=${credential.username}` : "(sem credencial)",
+      );
       const adapter = new OnvifAdapter({
         deviceServiceUrl: onvifUrl,
         username: credential?.username,
@@ -1419,7 +1437,10 @@ async function initializeDatabase(): Promise<void> {
         const info = await adapter.detect();
         ptzSupported = info.ptzSupported;
       } catch (error) {
-        console.log("[ptz:getAdapter] detect() erro:", error instanceof Error ? error.message : String(error));
+        console.log(
+          "[ptz:getAdapter] detect() erro:",
+          error instanceof Error ? error.message : String(error),
+        );
       }
       console.log("[ptz:getAdapter] ptzSupported=", ptzSupported);
       return ptzSupported ? adapter : null;

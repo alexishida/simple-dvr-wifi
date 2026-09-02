@@ -1,7 +1,17 @@
 import { useState } from "react";
 import type { CameraSummary } from "../../shared/contracts.js";
 import type { CameraDraft } from "./camera-types.js";
-import { CameraIcon, KeyIcon, BoltIcon, RecIcon } from "../icons.js";
+import {
+  ActivityIcon,
+  BlockIcon,
+  BoltIcon,
+  CameraIcon,
+  CloseIcon,
+  EditIcon,
+  RecIcon,
+  SettingsIcon,
+  TrashIcon,
+} from "../icons.js";
 import {
   cameraStatusLabel,
   cameraStatusTone,
@@ -46,10 +56,10 @@ function CameraRow({
               {recordingStatusLabel(camera.recordingStatus)}
             </span>
           )}
-          {camera.hasCredential && (
+          {camera.hasOnvif && (
             <span className="meta-chip">
-              <KeyIcon size={14} />
-              Credencial
+              <SettingsIcon size={14} />
+              ONVIF
             </span>
           )}
           {camera.supportsPtz && (
@@ -64,31 +74,39 @@ function CameraRow({
         <div className="row-actions">
           <button
             type="button"
-            className="btn btn-secondary btn-sm"
+            className="btn-icon row-action-btn"
+            aria-label={`Testar conexão de ${camera.name}`}
+            title="Testar conexão"
             onClick={() => onTest(camera)}
           >
-            Testar
+            <ActivityIcon size={16} />
           </button>
           <button
             type="button"
-            className="btn btn-secondary btn-sm"
+            className="btn-icon row-action-btn"
+            aria-label={`Editar ${camera.name}`}
+            title="Editar"
             onClick={() => onEdit(camera)}
           >
-            Editar
+            <EditIcon size={16} />
           </button>
           <button
             type="button"
-            className="btn btn-secondary btn-sm"
+            className="btn-icon row-action-btn"
+            aria-label={`${active ? "Desativar" : "Ativar"} ${camera.name}`}
+            title={active ? "Desativar" : "Ativar"}
             onClick={() => onToggle(camera)}
           >
-            {active ? "Desativar" : "Ativar"}
+            <BlockIcon size={16} />
           </button>
           <button
             type="button"
-            className="btn btn-secondary btn-sm btn-danger"
+            className="btn-icon row-action-btn btn-danger"
+            aria-label={`Remover ${camera.name}`}
+            title="Remover"
             onClick={() => onRemove(camera)}
           >
-            Remover
+            <TrashIcon size={16} />
           </button>
         </div>
       </td>
@@ -175,6 +193,7 @@ export function CameraTable({
                 className="btn btn-secondary"
                 onClick={() => setSelected(null)}
               >
+                <CloseIcon size={16} />
                 Cancelar
               </button>
               <button
@@ -182,6 +201,7 @@ export function CameraTable({
                 className="btn btn-primary btn-danger"
                 onClick={() => void confirmRemove()}
               >
+                <TrashIcon size={16} />
                 Remover
               </button>
             </div>

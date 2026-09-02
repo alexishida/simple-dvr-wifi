@@ -41,6 +41,7 @@ export const CameraSummarySchema = z
     status: CameraStatusSchema,
     recordingStatus: RecordingStatusSchema,
     hasCredential: z.boolean(),
+    hasOnvif: z.boolean(),
     supportsPtz: z.boolean(),
   })
   .strict();

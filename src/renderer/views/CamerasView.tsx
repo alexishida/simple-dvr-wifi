@@ -110,7 +110,7 @@ export function CamerasView({
 
   return (
     <>
-      <div className="section-heading">
+      <div className="section-heading camera-list-heading">
         <h2 className="section-title">Câmeras cadastradas</h2>
         <div className="camera-actions">
           <button
@@ -138,6 +138,7 @@ export function CamerasView({
             className="btn btn-primary"
             onClick={() => setCreating(true)}
           >
+            <PlusIcon size={16} />
             Adicionar câmera
           </button>
         </div>
