@@ -8,7 +8,8 @@ interface PtzVelocityInput {
 }
 
 interface PtzPanelProps {
-  cameraId: string;
+  cameraId: string | null;
+  cameraName: string | null;
   supported: boolean;
   zoomSupported: boolean;
   presetsSupported: boolean;
@@ -23,6 +24,7 @@ function clampSpeed(value: number): number {
 
 export function PtzPanel({
   cameraId,
+  cameraName,
   supported,
   zoomSupported,
   presetsSupported,
@@ -30,7 +32,9 @@ export function PtzPanel({
   const [speed, setSpeed] = useState(0.5);
   const [blocked, setBlocked] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
-  const [preparing, setPreparing] = useState(true);
+  const [connectionState, setConnectionState] = useState<
+    "idle" | "connecting" | "ready" | "error"
+  >("idle");
   const [presets, setPresets] = useState<
     Array<{ token: string; name: string }>
   >([]);
@@ -48,6 +52,7 @@ export function PtzPanel({
 
   const dispatchMove = useCallback(
     (velocity: PtzVelocityInput) => {
+      if (!cameraId) return;
       activeMove.current = true;
       void window.api.ptz.move(cameraId, velocity).then((result) => {
         const started = result.ok && result.value.started;
@@ -67,7 +72,7 @@ export function PtzPanel({
 
   const startMove = useCallback(
     (velocity: PtzVelocityInput) => {
-      if (!supported || blocked) return;
+      if (connectionState !== "ready" || blocked) return;
       clearRepeat();
       dispatchMove(velocity);
       repeatTimer.current = window.setInterval(
@@ -75,13 +80,13 @@ export function PtzPanel({
         500,
       );
     },
-    [supported, blocked, clearRepeat, dispatchMove],
+    [connectionState, blocked, clearRepeat, dispatchMove],
   );
 
   const stopMove = useCallback(
     (trigger: "pointer_release" | "key_release" | "blur" | "unmount") => {
       clearRepeat();
-      if (!activeMove.current && !activeAxis.current) return;
+      if (!cameraId || (!activeMove.current && !activeAxis.current)) return;
       activeAxis.current = null;
       activeMove.current = false;
       void window.api.ptz.stop(cameraId, trigger).then((result) => {
@@ -100,8 +105,8 @@ export function PtzPanel({
   );
 
   useEffect(() => {
-    if (!supported || blocked) clearRepeat();
-  }, [supported, blocked, clearRepeat]);
+    if (connectionState !== "ready" || blocked) clearRepeat();
+  }, [connectionState, blocked, clearRepeat]);
 
   useEffect(() => {
     const onBlur = (): void => void stopMove("blur");
@@ -113,51 +118,44 @@ export function PtzPanel({
   }, [stopMove]);
 
   useEffect(() => {
-    if (!supported) return;
-    let cancelled = false;
-    setPreparing(true);
+    setBlocked(false);
     setCommandError(null);
+    activeAxis.current = null;
+    activeMove.current = false;
+    clearRepeat();
 
-    const prepare = async (): Promise<void> => {
-      const started = await window.api.ptz.move(cameraId, {
-        pan: 0,
-        tilt: 0,
-      });
-      if (!started.ok || !started.value.started) {
-        if (!cancelled) {
-          setCommandError(
-            started.ok
-              ? "A câmera não aceitou a preparação do controle PTZ."
-              : started.error.message,
-          );
-          setPreparing(false);
-        }
+    if (!cameraId || !supported) {
+      setConnectionState("idle");
+      return;
+    }
+
+    let cancelled = false;
+    setConnectionState("connecting");
+    void window.api.ptz.connect(cameraId).then((result) => {
+      if (cancelled) return;
+      if (result.ok && result.value.connected) {
+        setConnectionState("ready");
         return;
       }
+      setConnectionState("error");
+      setCommandError(
+        result.ok
+          ? "Não foi possível conectar o controle PTZ desta câmera."
+          : result.error.message,
+      );
+    });
 
-      const stopped = await window.api.ptz.stop(cameraId, "camera_switch");
-      if (!cancelled) {
-        if (!stopped.ok) {
-          setBlocked(true);
-          setCommandError(stopped.error.message);
-        }
-        setPreparing(false);
-      }
-    };
-
-    void prepare();
     return () => {
       cancelled = true;
-      void window.api.ptz.stop(cameraId, "camera_switch");
     };
-  }, [cameraId, supported]);
+  }, [cameraId, supported, clearRepeat]);
 
   useEffect(() => {
-    if (!presetsSupported) return;
+    if (!cameraId || !presetsSupported || connectionState !== "ready") return;
     void window.api.ptz.status(cameraId).then((result) => {
       if (result.ok && result.value) setBlocked(result.value.stopBlocked);
     });
-  }, [cameraId, presetsSupported]);
+  }, [cameraId, presetsSupported, connectionState]);
 
   const loadPresets = useCallback(() => {
     // Presets listing happens through the camera adapter in main; the renderer
@@ -170,14 +168,16 @@ export function PtzPanel({
     void presets;
   };
 
-  if (!supported) {
-    return (
-      <div className="ptz-unavailable">
-        <BoltIcon size={18} />
-        <span>PTZ não disponível nesta câmera.</span>
-      </div>
-    );
-  }
+  const controlsDisabled = connectionState !== "ready" || blocked;
+  const statusMessage = !cameraName
+    ? "Selecione uma câmera PTZ no painel para conectar."
+    : !supported
+      ? `${cameraName} não possui PTZ disponível.`
+      : connectionState === "connecting"
+        ? `Conectando à ${cameraName}…`
+        : connectionState === "ready"
+          ? `Conectada: ${cameraName}`
+          : "Não foi possível conectar o controle PTZ.";
 
   const direction = (
     pan: number,
@@ -206,7 +206,7 @@ export function PtzPanel({
         if (event.key === " " || event.key === "Enter")
           void stopMove("key_release");
       }}
-      disabled={blocked || preparing}
+      disabled={controlsDisabled}
     >
       {label === "Cima"
         ? "↑"
@@ -220,6 +220,13 @@ export function PtzPanel({
 
   return (
     <div className="ptz-panel" role="group" aria-label="Controle PTZ">
+      <p
+        className={`ptz-connection ptz-connection-${connectionState}`}
+        role="status"
+      >
+        <BoltIcon size={15} />
+        {statusMessage}
+      </p>
       <div className="ptz-cross">
         <div className="ptz-row">{direction(0, 1, "Cima")}</div>
         <div className="ptz-row">
@@ -247,7 +254,7 @@ export function PtzPanel({
               void stopMove("pointer_release");
             }}
             onPointerCancel={() => void stopMove("pointer_release")}
-            disabled={blocked || preparing}
+            disabled={controlsDisabled}
           >
             +
           </button>
@@ -266,7 +273,7 @@ export function PtzPanel({
               void stopMove("pointer_release");
             }}
             onPointerCancel={() => void stopMove("pointer_release")}
-            disabled={blocked || preparing}
+            disabled={controlsDisabled}
           >
             −
           </button>
@@ -286,12 +293,9 @@ export function PtzPanel({
           step={SPEED_STEP}
           value={speed}
           onChange={(event) => setSpeed(clampSpeed(Number(event.target.value)))}
+          disabled={controlsDisabled}
         />
       </div>
-
-      {preparing && (
-        <p className="form-message form-info">Preparando controle PTZ…</p>
-      )}
 
       {blocked && (
         <p className="form-message form-error">

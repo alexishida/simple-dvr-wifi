@@ -30,9 +30,7 @@ import { createUtilityProcessTransport } from "./supervisors/database-utility-pr
 import { CredentialService } from "./services/credentials.js";
 import { SafeStorageMasterKeyStore } from "./security/vault.js";
 import { ConfigRepository } from "./services/config.js";
-import { DiagnosticService } from "./services/diagnostics.js";
 import { CameraManagementService } from "./services/camera-management.js";
-import { DiscoveryService } from "./services/discovery.js";
 import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
 import { PtzControllerRegistry } from "./services/ptz-registry.js";
@@ -56,12 +54,10 @@ let shutdownStarted = false;
 let database: DatabaseSupervisor | null = null;
 let credentials: CredentialService | null = null;
 let cameraManagement: CameraManagementService | null = null;
-let discovery: DiscoveryService | null = null;
 let mediaSupervisor: MediaSessionSupervisor | null = null;
 let ptzRegistry: PtzControllerRegistry | null = null;
 let config: AppConfig | null = null;
 let configRepository: ConfigRepository | null = null;
-let diagnostics: DiagnosticService | null = null;
 const activeRecordings = new Map<
   string,
   { recordingId: string; startedAt: string; recordDir: string }
@@ -539,11 +535,6 @@ const CameraConnectionTestSchema = z.object({
   password: z.string().max(2048).nullable().optional(),
 });
 
-const DiscoveryStartSchema = z.object({
-  interfaceName: z.string().min(1).max(253),
-  timeoutMs: z.number().int().min(500).max(30_000).optional(),
-});
-
 function registerIpcHandlers(): void {
   const registry = new IpcRegistry(ipcMain, () => mainWindow?.webContents);
 
@@ -919,25 +910,6 @@ function registerIpcHandlers(): void {
     },
   });
 
-  registry.register("discovery:interfaces", {
-    input: EmptyRequestSchema,
-    handle: () => (discovery ? discovery.listInterfaces() : []),
-  });
-
-  registry.register("discovery:start", {
-    input: DiscoveryStartSchema,
-    handle: async (input) => {
-      if (!discovery) return [];
-      return discovery.start(input);
-    },
-  });
-
-  registry.register("discovery:cancel", {
-    input: EmptyRequestSchema,
-    handle: async () =>
-      discovery ? await discovery.cancel() : { cancelled: false },
-  });
-
   registry.register("media:acquire", {
     input: z.object({
       cameraId: z.string().uuid(),
@@ -1019,19 +991,28 @@ function registerIpcHandlers(): void {
       }),
     }),
     handle: async ({ cameraId, velocity }) => {
-      // eslint-disable-next-line no-console
       console.log("[ptz:move]", cameraId, JSON.stringify(velocity));
       if (!ptzRegistry) return { started: false };
       const camera = await getCameraRecord(cameraId);
       if (!camera || !camera.active || !camera.supportsPtz) {
-        // eslint-disable-next-line no-console
         console.log("[ptz:move] rejeitado:", camera ? `active=${camera.active} ptz=${camera.supportsPtz}` : "sem câmera");
         return { started: false };
       }
       const result = await ptzRegistry.move(cameraId, velocity, camera.supportsPtz);
-      // eslint-disable-next-line no-console
       console.log("[ptz:move] resultado:", JSON.stringify(result));
       return result;
+    },
+  });
+
+  registry.register("ptz:connect", {
+    input: z.object({ cameraId: z.string().uuid() }),
+    handle: async ({ cameraId }) => {
+      if (!ptzRegistry) return { connected: false };
+      const camera = await getCameraRecord(cameraId);
+      if (!camera || !camera.active || !camera.supportsPtz) {
+        return { connected: false };
+      }
+      return ptzRegistry.connect(cameraId, camera.supportsPtz);
     },
   });
 
@@ -1322,11 +1303,6 @@ function registerIpcHandlers(): void {
     },
   });
 
-  registry.register("diagnostics:list", {
-    input: EmptyRequestSchema,
-    handle: async () => (diagnostics ? await diagnostics.list(100) : []),
-  });
-
   registry.register("shell:openExternal", {
     input: OpenExternalRequestSchema,
     handle: async ({ url }) => {
@@ -1378,10 +1354,8 @@ async function initializeDatabase(): Promise<void> {
   );
   await credentials.initialize();
   cameraManagement = new CameraManagementService(database, credentials);
-  discovery = new DiscoveryService();
   configRepository = new ConfigRepository(database);
   config = await configRepository.load();
-  diagnostics = new DiagnosticService(database);
   const cameraList = await database.request("camera.list", undefined);
   if (cameraList.ok) {
     for (const camera of cameraList.value as CameraRecord[]) {
@@ -1427,13 +1401,11 @@ async function initializeDatabase(): Promise<void> {
       const onvifUrl = camera?.endpoints.find(
         (endpoint) => endpoint.service === "onvif",
       )?.url;
-      // eslint-disable-next-line no-console
       console.log("[ptz:getAdapter]", cameraId, "onvifUrl=", onvifUrl ?? "(sem onvif)");
       if (!onvifUrl) return null;
       const { OnvifAdapter, createFetchOnvifTransport } =
         await import("../workers/camera/onvif-adapter.js");
       const credential = await cameraCredential(cameraId, "onvif");
-      // eslint-disable-next-line no-console
       console.log("[ptz:getAdapter] credencial=", credential ? `user=${credential.username}` : "(sem credencial)");
       const adapter = new OnvifAdapter({
         deviceServiceUrl: onvifUrl,
@@ -1447,10 +1419,8 @@ async function initializeDatabase(): Promise<void> {
         const info = await adapter.detect();
         ptzSupported = info.ptzSupported;
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.log("[ptz:getAdapter] detect() erro:", error instanceof Error ? error.message : String(error));
       }
-      // eslint-disable-next-line no-console
       console.log("[ptz:getAdapter] ptzSupported=", ptzSupported);
       return ptzSupported ? adapter : null;
     },

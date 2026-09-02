@@ -1,34 +1,30 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AppConfig } from "../shared/config.js";
 import { SettingsView } from "./views/SettingsView.js";
-import { DiagnosticsView } from "./views/DiagnosticsView.js";
 import { CamerasView } from "./views/CamerasView.js";
-import { DiscoveryView } from "./views/DiscoveryView.js";
 import { FullscreenView } from "./views/FullscreenView.js";
 import { LibraryView } from "./views/LibraryView.js";
-import { MonitoringGrid } from "./components/MonitoringGrid.js";
+import {
+  LayoutSwitcher,
+  MonitoringGrid,
+  type GridLayout,
+} from "./components/MonitoringGrid.js";
 import { PtzPanel } from "./components/PtzPanel.js";
 import { useAppStore, subscribeToCameraEvents } from "./store/appStore.js";
 import type { CameraSummary } from "../shared/contracts.js";
-import type { CameraDraft } from "./views/camera-types.js";
-import { discoveryCameraToDraft } from "./discovery-draft.js";
 import {
-  ActivityIcon,
   CameraIcon,
   DashboardIcon,
   ImageIcon,
   RecIcon,
-  SearchIcon,
   SettingsIcon,
 } from "./icons.js";
 
 type Section =
   | "dashboard"
   | "cameras"
-  | "discovery"
   | "recordings"
   | "snapshots"
-  | "diagnostics"
   | "settings";
 
 const NAV_ITEMS: Array<{
@@ -36,53 +32,35 @@ const NAV_ITEMS: Array<{
   label: string;
   icon: React.JSX.Element;
 }> = [
-  { id: "dashboard", label: "Dashboard", icon: <DashboardIcon /> },
+  { id: "dashboard", label: "Live", icon: <DashboardIcon /> },
   { id: "cameras", label: "Câmeras", icon: <CameraIcon /> },
-  { id: "discovery", label: "Descoberta", icon: <SearchIcon /> },
   { id: "recordings", label: "Gravações", icon: <RecIcon /> },
   { id: "snapshots", label: "Snapshots", icon: <ImageIcon /> },
-  { id: "diagnostics", label: "Diagnóstico", icon: <ActivityIcon /> },
   { id: "settings", label: "Configurações", icon: <SettingsIcon /> },
 ];
 
 const SECTION_DESCRIPTIONS: Record<Section, string> = {
-  dashboard: "Visão geral do seu parque de câmeras.",
+  dashboard: "Monitoramento ao vivo das suas câmeras.",
   cameras: "Gerencie câmeras cadastradas, edite e teste conexões.",
-  discovery: "Encontre câmeras ONVIF na sua rede local.",
   recordings: "Gravações locais por câmera, data e horário.",
   snapshots: "Snapshots capturados por câmera.",
-  diagnostics: "Diagnóstico de conexão e logs sanitizados.",
   settings: "Tema, diretórios, reconexão e comportamento de streams.",
 };
 
 function sectionTitle(section: Section): string {
   const item = NAV_ITEMS.find((nav) => nav.id === section);
-  return item?.label ?? "Dashboard";
-}
-
-function EmptyPanel({
-  icon,
-  title,
-  text,
-}: {
-  icon: React.JSX.Element;
-  title: string;
-  text: string;
-}): React.JSX.Element {
-  return (
-    <div className="empty-state">
-      <span className="empty-state-icon">{icon}</span>
-      <h3 className="empty-state-title">{title}</h3>
-      <p className="empty-state-text">{text}</p>
-    </div>
-  );
+  return item?.label ?? "Live";
 }
 
 function DashboardView({
+  layout,
   onPtzSelect,
+  onEditCamera,
   selectedPtzCameraId,
 }: {
+  layout: GridLayout;
   onPtzSelect: (camera: CameraSummary) => void;
+  onEditCamera: (camera: CameraSummary) => void;
   selectedPtzCameraId: string | null;
 }): React.JSX.Element {
   const cameras = useAppStore((state) => state.cameras);
@@ -91,8 +69,10 @@ function DashboardView({
   return (
     <MonitoringGrid
       cameras={cameras}
+      layout={layout}
       onOpenFullscreen={openFullscreen}
       onPtzSelect={onPtzSelect}
+      onEdit={onEditCamera}
       selectedPtzCameraId={selectedPtzCameraId}
     />
   );
@@ -108,46 +88,22 @@ function SidebarPtz({
       <p className="sidebar-ptz-title" id="sidebar-ptz-title">
         Controle PTZ
       </p>
-      {camera?.active && camera.supportsPtz ? (
-        <>
-          <p className="sidebar-ptz-camera">Selecionada: {camera.name}</p>
-          <PtzPanel
-            cameraId={camera.id}
-            supported
-            zoomSupported
-            presetsSupported={false}
-          />
-        </>
-      ) : (
-        <p className="sidebar-ptz-hint">
-          {camera
-            ? `${camera.name} não possui PTZ disponível.`
-            : "Clique em uma câmera no painel para controlá-la."}
-        </p>
-      )}
+      <PtzPanel
+        cameraId={camera?.active && camera.supportsPtz ? camera.id : null}
+        cameraName={camera?.name ?? null}
+        supported={Boolean(camera?.active && camera.supportsPtz)}
+        zoomSupported
+        presetsSupported={false}
+      />
     </section>
-  );
-}
-
-function ComingSoon({ section }: { section: Section }): React.JSX.Element {
-  const icon = NAV_ITEMS.find((nav) => nav.id === section)?.icon ?? (
-    <SettingsIcon />
-  );
-  return (
-    <EmptyPanel
-      icon={icon}
-      title={`${sectionTitle(section)} em breve`}
-      text={SECTION_DESCRIPTIONS[section]}
-    />
   );
 }
 
 export function App(): React.JSX.Element {
   const [section, setSection] = useState<Section>("dashboard");
+  const [gridLayout, setGridLayout] = useState<GridLayout>(2);
+  const [cameraToEditId, setCameraToEditId] = useState<string | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [discoveryDraft, setDiscoveryDraft] = useState<CameraDraft | null>(
-    null,
-  );
   const [selectedPtzCameraId, setSelectedPtzCameraId] = useState<string | null>(
     null,
   );
@@ -215,17 +171,31 @@ export function App(): React.JSX.Element {
         </div>
       </aside>
 
-      <main className="app-content">
+      <main
+        className={`app-content${section === "dashboard" ? " app-content-live" : ""}`}
+      >
         <header className="page-header">
           <div>
             <h1 className="page-title">{sectionTitle(section)}</h1>
-            <p className="page-description">{SECTION_DESCRIPTIONS[section]}</p>
+            {SECTION_DESCRIPTIONS[section] && (
+              <p className="page-description">
+                {SECTION_DESCRIPTIONS[section]}
+              </p>
+            )}
           </div>
+          {section === "dashboard" && (
+            <LayoutSwitcher layout={gridLayout} onChange={setGridLayout} />
+          )}
         </header>
 
         {section === "dashboard" && (
           <DashboardView
+            layout={gridLayout}
             onPtzSelect={(camera) => setSelectedPtzCameraId(camera.id)}
+            onEditCamera={(camera) => {
+              setCameraToEditId(camera.id);
+              setSection("cameras");
+            }}
             selectedPtzCameraId={selectedPtzCameraId}
           />
         )}
@@ -233,21 +203,8 @@ export function App(): React.JSX.Element {
           <CamerasView
             cameras={cameras}
             onRefresh={refreshCameras}
-            onNavigateToDiscovery={() => setSection("discovery")}
-            initialDraft={discoveryDraft}
-            onDraftConsumed={() => setDiscoveryDraft(null)}
-          />
-        )}
-        {section === "discovery" && (
-          <DiscoveryView
-            onAddCamera={(camera) => {
-              setDiscoveryDraft(discoveryCameraToDraft(camera));
-              setSection("cameras");
-            }}
-            onAddRtspCamera={() => {
-              setDiscoveryDraft({ name: "", host: "", rtspUrl: null });
-              setSection("cameras");
-            }}
+            editCameraId={cameraToEditId}
+            onEditCameraConsumed={() => setCameraToEditId(null)}
           />
         )}
         {section === "recordings" && (
@@ -257,14 +214,6 @@ export function App(): React.JSX.Element {
           <LibraryView cameras={cameras} mode="snapshots" />
         )}
         {section === "settings" && <SettingsView initialConfig={config} />}
-        {section === "diagnostics" && <DiagnosticsView cameras={cameras} />}
-        {section !== "dashboard" &&
-          section !== "cameras" &&
-          section !== "discovery" &&
-          section !== "recordings" &&
-          section !== "snapshots" &&
-          section !== "settings" &&
-          section !== "diagnostics" && <ComingSoon section={section} />}
       </main>
     </div>
   );

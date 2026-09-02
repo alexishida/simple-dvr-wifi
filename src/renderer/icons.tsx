@@ -108,6 +108,22 @@ export const PlusIcon = icon(
   </>,
 )
 
+export const EditIcon = icon(
+  <>
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4L16.5 3.5Z" />
+  </>,
+)
+
+export const MoveIcon = icon(
+  <>
+    <path d="M12 3v18M3 12h18" />
+    <path d="m8 7 4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4" />
+  </>,
+)
+
+export const CheckIcon = icon(<path d="m5 12 4 4L19 6" />)
+
 export const MaximizeIcon = icon(
   <>
     <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />

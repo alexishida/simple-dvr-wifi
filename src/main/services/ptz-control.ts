@@ -33,6 +33,11 @@ export interface PtzControlState {
   lastTrigger: PtzControlTrigger | null
 }
 
+interface PtzAxes {
+  panTilt: boolean
+  zoom: boolean
+}
+
 const DEFAULT_LEASE_MS = 1_500
 const DEFAULT_STOP_RETRY_LIMIT = 3
 
@@ -50,6 +55,13 @@ function toVelocityRecord(velocity: NormalizedVelocity): Record<string, number> 
   return record
 }
 
+function axesFromVelocity(velocity: NormalizedVelocity): PtzAxes {
+  return {
+    panTilt: velocity.pan !== undefined || velocity.tilt !== undefined,
+    zoom: velocity.zoom !== undefined,
+  }
+}
+
 export class PtzControlService {
   private leaseTimer: unknown = null
   private cameraId: string | null = null
@@ -58,6 +70,7 @@ export class PtzControlService {
   private stopBlocked = false
   private stopFailures = 0
   private lastTrigger: PtzControlTrigger | null = null
+  private activeAxes: PtzAxes | null = null
   private operationQueue: Promise<void> = Promise.resolve()
   private readonly leaseMs: number
   private readonly stopRetryLimit: number
@@ -97,6 +110,7 @@ export class PtzControlService {
     })
 
     this.moving = true
+    this.activeAxes = axesFromVelocity(velocity)
     this.movingSince = new Date().toISOString()
     this.stopBlocked = false
     this.scheduleLease()
@@ -115,6 +129,7 @@ export class PtzControlService {
     })
     this.cameraId = cameraId
     this.moving = true
+    this.activeAxes = axesFromVelocity(velocity)
     this.movingSince ??= new Date().toISOString()
     this.scheduleLease()
   }
@@ -149,9 +164,10 @@ export class PtzControlService {
     }
 
     try {
-      await this.guard.stop({ profileToken: this.profileToken })
+      await this.guard.stop({ profileToken: this.profileToken, ...this.activeAxes })
       this.moving = false
       this.movingSince = null
+      this.activeAxes = null
       this.stopBlocked = false
       this.stopFailures = 0
     } catch {
@@ -177,9 +193,10 @@ export class PtzControlService {
   private async retryStop(trigger: PtzControlTrigger): Promise<void> {
     if (this.stopBlocked) return
     try {
-      await this.guard.stop({ profileToken: this.profileToken })
+      await this.guard.stop({ profileToken: this.profileToken, ...this.activeAxes })
       this.stopBlocked = false
       this.stopFailures = 0
+      this.activeAxes = null
     } catch {
       this.stopFailures++
       if (this.stopFailures >= this.stopRetryLimit) {

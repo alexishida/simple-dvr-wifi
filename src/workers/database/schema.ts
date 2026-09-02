@@ -112,16 +112,4 @@ CREATE TABLE preferences (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE diagnostics (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  camera_id TEXT REFERENCES cameras(id) ON DELETE SET NULL,
-  code TEXT NOT NULL,
-  message TEXT NOT NULL,
-  count INTEGER NOT NULL DEFAULT 1,
-  first_seen TEXT NOT NULL,
-  last_seen TEXT NOT NULL,
-  fingerprint TEXT NOT NULL
-);
-
-CREATE INDEX idx_diagnostics_fingerprint ON diagnostics (fingerprint);
 `

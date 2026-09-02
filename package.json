@@ -15,6 +15,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "security:smoke": "npm run build && node scripts/electron-security-smoke.mjs",
+    "test:ptz": "npm run build && node scripts/verify-ptz-onvif.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

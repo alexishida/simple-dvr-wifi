@@ -9,7 +9,6 @@ import {
   CameraRepository,
   CapabilityRepository,
   CredentialRepository,
-  DiagnosticRepository,
   PreferenceRepository,
   ProfileRepository,
   RecordingRepository,
@@ -25,7 +24,6 @@ type RepositoryBag = {
   recordings: RecordingRepository;
   snapshots: SnapshotRepository;
   preferences: PreferenceRepository;
-  diagnostics: DiagnosticRepository;
 };
 
 export class SqliteWorker {
@@ -57,7 +55,6 @@ export class SqliteWorker {
       recordings: new RecordingRepository(db),
       snapshots: new SnapshotRepository(db),
       preferences: new PreferenceRepository(db),
-      diagnostics: new DiagnosticRepository(db),
     };
   }
 
@@ -320,16 +317,6 @@ export class SqliteWorker {
           const p = request.payload as { key: string; value: string };
           r.preferences.set(p.key, p.value);
           return reply({ stored: true });
-        }
-        case "diagnostic.append": {
-          const p = request.payload as Parameters<
-            DiagnosticRepository["append"]
-          >[0];
-          return reply(r.diagnostics.append(p));
-        }
-        case "diagnostic.list": {
-          const p = request.payload as { limit?: number } | undefined;
-          return reply(r.diagnostics.list(p?.limit));
         }
         default:
           return error("NOT_FOUND", `Operação desconhecida: ${request.op}`);

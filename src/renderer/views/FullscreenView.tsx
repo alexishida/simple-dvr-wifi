@@ -67,14 +67,13 @@ export function FullscreenView({ camera }: FullscreenViewProps): React.JSX.Eleme
         )}
       </div>
 
-      {camera.supportsPtz && (
-        <PtzPanel
-          cameraId={camera.id}
-          supported
-          zoomSupported
-          presetsSupported={false}
-        />
-      )}
+      <PtzPanel
+        cameraId={camera.active && camera.supportsPtz ? camera.id : null}
+        cameraName={camera.name}
+        supported={camera.active && camera.supportsPtz}
+        zoomSupported
+        presetsSupported={false}
+      />
 
       <div className="fullscreen-meta">
         <div className="camera-meta">

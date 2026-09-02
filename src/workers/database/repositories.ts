@@ -4,7 +4,6 @@ import type {
   CameraEndpoint,
   CameraProfile,
   CameraRecord,
-  DiagnosticRecord,
   EncryptedCredential,
   RecordingRecord,
   RecordingSegmentRecord,
@@ -67,18 +66,6 @@ function mapSnapshot(row: Row): SnapshotRecord {
     cameraId: row.camera_id as string,
     path: row.path as string,
     capturedAt: row.captured_at as string,
-  }
-}
-
-function mapDiagnostic(row: Row): DiagnosticRecord {
-  return {
-    id: row.id as number,
-    cameraId: (row.camera_id as string) ?? null,
-    code: row.code as string,
-    message: row.message as string,
-    count: row.count as number,
-    firstSeen: row.first_seen as string,
-    lastSeen: row.last_seen as string,
   }
 }
 
@@ -561,51 +548,5 @@ export class PreferenceRepository {
     this.db
       .prepare('INSERT OR REPLACE INTO preferences (key, value, updated_at) VALUES (?, ?, ?)')
       .run(key, value, nowIso())
-  }
-}
-
-export class DiagnosticRepository {
-  constructor(private readonly db: Database.Database) {}
-
-  append(input: {
-    cameraId?: string | null
-    code: string
-    message: string
-    fingerprint: string
-  }): DiagnosticRecord {
-    const ts = nowIso()
-    const existing = this.db
-      .prepare('SELECT id, count FROM diagnostics WHERE fingerprint = ?')
-      .get(input.fingerprint) as Row | undefined
-
-    if (existing) {
-      this.db
-        .prepare('UPDATE diagnostics SET count = count + 1, last_seen = ? WHERE id = ?')
-        .run(ts, existing.id)
-      return this.getById(existing.id as number) as DiagnosticRecord
-    }
-
-    this.db
-      .prepare(
-        `INSERT INTO diagnostics (camera_id, code, message, count, first_seen, last_seen, fingerprint)
-         VALUES (?, ?, ?, 1, ?, ?, ?)`,
-      )
-      .run(input.cameraId ?? null, input.code, input.message, ts, ts, input.fingerprint)
-    const row = this.db
-      .prepare('SELECT id FROM diagnostics WHERE fingerprint = ?')
-      .get(input.fingerprint) as Row
-    return this.getById(row.id as number) as DiagnosticRecord
-  }
-
-  getById(id: number): DiagnosticRecord | null {
-    const row = this.db.prepare('SELECT * FROM diagnostics WHERE id = ?').get(id) as Row | undefined
-    return row ? mapDiagnostic(row) : null
-  }
-
-  list(limit = 100): DiagnosticRecord[] {
-    const rows = this.db
-      .prepare('SELECT * FROM diagnostics ORDER BY last_seen DESC LIMIT ?')
-      .all(limit) as Row[]
-    return rows.map(mapDiagnostic)
   }
 }

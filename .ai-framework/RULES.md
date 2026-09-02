@@ -5,13 +5,11 @@ As instrucoes abaixo devem orientar analise, implementacao, alteracoes visuais e
 
 # Regras Gerais
 
-
-
 # Regras de Codigo
 
 - Escrever codigo claro, organizado e de facil manutencao.
 - Respeitar a arquitetura, convencoes e estrutura do projeto.
-
+- Todo botao que exiba texto visivel deve incluir tambem um icone representativo da acao.
 
 # Regras de Layout e Design
 
@@ -25,7 +23,6 @@ Essas diretrizes devem ser seguidas sempre que houver criacao ou alteracao de te
 - Criar novas solucoes visuais apenas quando houver necessidade real de produto, usabilidade ou escalabilidade.
 - Evitar interfaces desalinhadas com a identidade do projeto ou com a experiencia ja estabelecida para o usuario.
 - Considerar diferentes tamanhos de tela, acessibilidade basica e previsibilidade de uso em qualquer alteracao visual.
-
 
 # Guard Rails
 

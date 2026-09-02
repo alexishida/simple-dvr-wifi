@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { CameraSummary } from "../../shared/contracts.js";
 import { CameraTable } from "./CameraTable.js";
 import { CameraForm } from "./CameraForm.js";
@@ -9,17 +9,19 @@ import { runCameraMutation } from "../store/appStore.js";
 interface CamerasViewProps {
   cameras: CameraSummary[];
   onRefresh: () => void;
-  onNavigateToDiscovery: () => void;
   initialDraft?: CameraDraft | null;
   onDraftConsumed?: () => void;
+  editCameraId?: string | null;
+  onEditCameraConsumed?: () => void;
 }
 
 export function CamerasView({
   cameras,
   onRefresh,
-  onNavigateToDiscovery,
   initialDraft,
   onDraftConsumed,
+  editCameraId,
+  onEditCameraConsumed,
 }: CamerasViewProps): React.JSX.Element {
   const [editing, setEditing] = useState<{
     id: string;
@@ -35,14 +37,14 @@ export function CamerasView({
   const hasPendingDraft = initialDraft !== undefined && initialDraft !== null;
   const showForm = editing !== null || creating || hasPendingDraft;
 
-  const handleEdit = (camera: CameraSummary): void => {
-    void window.api.cameras.details(camera.id).then((result) => {
+  const openCameraEditor = useCallback((cameraId: string): void => {
+    void window.api.cameras.details(cameraId).then((result) => {
       if (!result.ok) {
         setTestMessage({ kind: "error", text: result.error.message });
         return;
       }
       setEditing({
-        id: camera.id,
+        id: cameraId,
         name: result.value.name,
         draft: {
           name: result.value.name,
@@ -59,7 +61,18 @@ export function CamerasView({
         },
       });
     });
+  }, []);
+
+  const handleEdit = (camera: CameraSummary): void => {
+    openCameraEditor(camera.id);
   };
+
+  useEffect(() => {
+    if (!editCameraId) return;
+
+    openCameraEditor(editCameraId);
+    onEditCameraConsumed?.();
+  }, [editCameraId, onEditCameraConsumed, openCameraEditor]);
 
   const handleSaved = (): void => {
     setEditing(null);
@@ -102,13 +115,6 @@ export function CamerasView({
         <div className="camera-actions">
           <button
             type="button"
-            className="btn btn-secondary"
-            onClick={onNavigateToDiscovery}
-          >
-            Descobrir na rede
-          </button>
-          <button
-            type="button"
             className="btn btn-primary"
             onClick={() => setCreating(true)}
           >
@@ -125,8 +131,7 @@ export function CamerasView({
           </span>
           <h3 className="empty-state-title">Nenhuma câmera</h3>
           <p className="empty-state-text">
-            Cadastre manualmente informando IP e credenciais, ou use a
-            descoberta ONVIF na rede local.
+            Cadastre manualmente informando IP e credenciais.
           </p>
           <button
             type="button"

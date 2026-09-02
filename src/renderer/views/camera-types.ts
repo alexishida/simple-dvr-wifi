@@ -1,5 +1,3 @@
-import type { CameraSummary } from "../../shared/contracts.js";
-
 export interface CameraDraft {
   name: string;
   host: string;
@@ -15,12 +13,6 @@ export interface CameraDraft {
   model?: string | null;
   serialNumber?: string | null;
   allowDuplicate?: boolean;
-}
-
-export interface CameraListViewProps {
-  cameras: CameraSummary[];
-  onRefresh: () => void;
-  onNavigateToDiscovery: () => void;
 }
 
 export interface CameraFormProps {

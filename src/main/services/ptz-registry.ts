@@ -78,6 +78,15 @@ export class PtzControllerRegistry {
     })
   }
 
+  async connect(
+    cameraId: string,
+    ptzSupported: boolean,
+  ): Promise<{ connected: boolean }> {
+    return this.enqueue(cameraId, async () => ({
+      connected: Boolean(await this.getOrCreate(cameraId, ptzSupported)),
+    }))
+  }
+
   async stop(
     cameraId: string,
     trigger:

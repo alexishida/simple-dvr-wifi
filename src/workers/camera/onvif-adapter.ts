@@ -55,6 +55,7 @@ export function createFetchOnvifTransport(): OnvifTransport {
 }
 
 const DEFAULT_OPTIONS = { timeoutMs: 5_000, maxXmlBytes: 512 * 1024 };
+const ONVIF_PTZ_SPACE_BASE = "http://www.onvif.org/ver10/tptz";
 
 function escapeXml(value: string): string {
   return value
@@ -62,6 +63,50 @@ function escapeXml(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function ptzVectorXml(
+  vector: Record<string, number>,
+  element: "Velocity" | "Translation" | "Position",
+  explicitSpace = false,
+): string {
+  const components: string[] = [];
+  const spaceSuffix = `${element}GenericSpace`;
+  const panTiltSpace = explicitSpace
+    ? ` space="${ONVIF_PTZ_SPACE_BASE}/PanTiltSpaces/${spaceSuffix}"`
+    : "";
+  const zoomSpace = explicitSpace
+    ? ` space="${ONVIF_PTZ_SPACE_BASE}/ZoomSpaces/${spaceSuffix}"`
+    : "";
+  if (vector.pan !== undefined || vector.tilt !== undefined) {
+    components.push(
+      `<tt:PanTilt x="${vector.pan ?? 0}" y="${vector.tilt ?? 0}"${panTiltSpace}/>`,
+    );
+  }
+  if (vector.zoom !== undefined) {
+    components.push(`<tt:Zoom x="${vector.zoom}"${zoomSpace}/>`);
+  }
+  if (components.length === 0) {
+    throw new Error("Comando PTZ sem eixo de movimento.");
+  }
+  return `<tptz:${element}>${components.join("")}</tptz:${element}>`;
+}
+
+function successfulSoapBody(body: string, maxBytes: number): string {
+  try {
+    const fault = parseXmlSafe(body, { maxBytes, maxDepth: 14 });
+    const reason =
+      queryText(fault, "Body/Fault/Reason/Text") ??
+      queryText(fault, "Body/Fault/Reason") ??
+      queryText(fault, "Body/Fault/faultstring") ??
+      queryText(fault, "Body/Fault/Code/Value");
+    if (reason) throw new Error(`ONVIF retornou uma falha: ${reason}`);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("ONVIF retornou")) {
+      throw error;
+    }
+  }
+  return body;
 }
 
 function soapEnvelope(
@@ -121,6 +166,28 @@ function stateFromBoolean(value: boolean | null | undefined): CapabilityState {
   return "unknown";
 }
 
+function isTapoDevice(identity: CameraOnvifInfo["identity"]): boolean {
+  return /tapo|tp[-\s]?link/i.test(`${identity.manufacturer} ${identity.model}`);
+}
+
+function tapoRelativePanVelocity(
+  velocity: Record<string, number>,
+): Record<string, number> {
+  const toStep = (value: number): number => {
+    if (value === 0) return 0;
+    const magnitude = Math.abs(value);
+    const step = magnitude <= 0.25 ? 5 : magnitude <= 0.75 ? 10 : 15;
+    return Math.sign(value) * step;
+  };
+  return {
+    ...velocity,
+    pan: toStep(velocity.pan ?? 0),
+    ...(velocity.tilt === undefined
+      ? {}
+      : { tilt: toStep(velocity.tilt) }),
+  };
+}
+
 function guessStreamType(name: string): "main" | "sub" {
   if (
     /sub|secondary|low-res|stream2|profile_2/i.test(name) &&
@@ -144,6 +211,9 @@ export class OnvifAdapter implements CameraAdapter {
   private readonly options: OnvifClientOptions;
   private ptzServiceUrl: string | null = null;
   private primaryProfileToken: string | null = null;
+  private useExplicitPtzSpaces = false;
+  private useRelativeMoveForTapoPan = false;
+  private skipNextTapoPanTiltStop = false;
 
   constructor(options: OnvifClientOptions) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -177,6 +247,8 @@ export class OnvifAdapter implements CameraAdapter {
 
     const identity = await this.fetchIdentity();
     if (identity) info.identity = identity;
+    this.useExplicitPtzSpaces = isTapoDevice(info.identity);
+    this.useRelativeMoveForTapoPan = this.useExplicitPtzSpaces;
 
     const mediaUrl = await this.fetchMediaUrl();
     info.mediaServiceUrl = mediaUrl;
@@ -258,18 +330,59 @@ export class OnvifAdapter implements CameraAdapter {
     profileToken: string;
     velocity: Record<string, number>;
   }): Promise<void> {
-    const pan = options.velocity.pan ?? 0;
-    const tilt = options.velocity.tilt ?? 0;
-    const zoom = options.velocity.zoom ?? 0;
+    if (
+      this.useRelativeMoveForTapoPan &&
+      options.velocity.pan !== undefined &&
+      options.velocity.pan !== 0
+    ) {
+      try {
+        // Alguns firmwares Tapo ignoram o eixo pan em ContinuousMove. O painel
+        // já renova o comando enquanto o botão está pressionado, tornando
+        // RelativeMove em passos curtos equivalente para essa integração.
+        await this.relativeMove({
+          profileToken: options.profileToken,
+          velocity: tapoRelativePanVelocity(options.velocity),
+        });
+        // RelativeMove já é um passo finito. Um Stop enviado no pointer-up
+        // pode cancelar o giro horizontal da Tapo antes de o motor iniciá-lo.
+        this.skipNextTapoPanTiltStop = true;
+        return;
+      } catch {
+        // Mantém ContinuousMove como fallback para firmwares Tapo compatíveis.
+      }
+    }
+    this.skipNextTapoPanTiltStop = false;
+    const velocity = ptzVectorXml(
+      options.velocity,
+      "Velocity",
+      this.useExplicitPtzSpaces,
+    );
     await this.call(
-      `<tptz:ContinuousMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="${pan}" y="${tilt}"/><tt:Zoom x="${zoom}"/></tptz:Velocity></tptz:ContinuousMove>`,
+      `<tptz:ContinuousMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${velocity}</tptz:ContinuousMove>`,
       this.ptzServiceUrl ?? this.options.deviceServiceUrl,
     );
   }
 
-  async stop(options: { profileToken: string }): Promise<void> {
+  async stop(options: {
+    profileToken: string;
+    panTilt?: boolean;
+    zoom?: boolean;
+  }): Promise<void> {
+    if (
+      this.skipNextTapoPanTiltStop &&
+      options.panTilt === true &&
+      options.zoom !== true
+    ) {
+      this.skipNextTapoPanTiltStop = false;
+      return;
+    }
+    this.skipNextTapoPanTiltStop = false;
+    const axes = [
+      options.panTilt === true ? "<tptz:PanTilt>true</tptz:PanTilt>" : "",
+      options.zoom === true ? "<tptz:Zoom>true</tptz:Zoom>" : "",
+    ].join("");
     await this.call(
-      `<tptz:Stop><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>`,
+      `<tptz:Stop><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${axes}</tptz:Stop>`,
       this.ptzServiceUrl ?? this.options.deviceServiceUrl,
     );
   }
@@ -278,11 +391,13 @@ export class OnvifAdapter implements CameraAdapter {
     profileToken: string;
     velocity: Record<string, number>;
   }): Promise<void> {
-    const pan = options.velocity.pan ?? 0;
-    const tilt = options.velocity.tilt ?? 0;
-    const zoom = options.velocity.zoom ?? 0;
+    const translation = ptzVectorXml(
+      options.velocity,
+      "Translation",
+      this.useExplicitPtzSpaces,
+    );
     await this.call(
-      `<tptz:RelativeMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:Translation><tt:PanTilt x="${pan}" y="${tilt}"/><tt:Zoom x="${zoom}"/></tptz:Translation></tptz:RelativeMove>`,
+      `<tptz:RelativeMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${translation}</tptz:RelativeMove>`,
       this.ptzServiceUrl ?? this.options.deviceServiceUrl,
     );
   }
@@ -291,11 +406,13 @@ export class OnvifAdapter implements CameraAdapter {
     profileToken: string;
     position: Record<string, number>;
   }): Promise<void> {
-    const pan = options.position.pan ?? 0;
-    const tilt = options.position.tilt ?? 0;
-    const zoom = options.position.zoom ?? 0;
+    const position = ptzVectorXml(
+      options.position,
+      "Position",
+      this.useExplicitPtzSpaces,
+    );
     await this.call(
-      `<tptz:AbsoluteMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:Position><tt:PanTilt x="${pan}" y="${tilt}"/><tt:Zoom x="${zoom}"/></tptz:Position></tptz:AbsoluteMove>`,
+      `<tptz:AbsoluteMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${position}</tptz:AbsoluteMove>`,
       this.ptzServiceUrl ?? this.options.deviceServiceUrl,
     );
   }
@@ -370,7 +487,12 @@ export class OnvifAdapter implements CameraAdapter {
       timeoutMs: this.options.timeoutMs,
       headers,
     });
-    if (initial.status >= 200 && initial.status < 300) return initial.body;
+    if (initial.status >= 200 && initial.status < 300) {
+      return successfulSoapBody(
+        initial.body,
+        this.options.maxXmlBytes ?? DEFAULT_OPTIONS.maxXmlBytes,
+      );
+    }
 
     // Câmeras (ex.: Intelbras) rejeitam UsernameToken SOAP com 400 e exigem
     // Digest HTTP. Nessas, o desafio digest só é emitido quando o envelope vai
@@ -387,7 +509,12 @@ export class OnvifAdapter implements CameraAdapter {
           headers,
         },
       );
-      if (bare.status >= 200 && bare.status < 300) return bare.body;
+      if (bare.status >= 200 && bare.status < 300) {
+        return successfulSoapBody(
+          bare.body,
+          this.options.maxXmlBytes ?? DEFAULT_OPTIONS.maxXmlBytes,
+        );
+      }
       if (bare.status === 401) {
         const challenge =
           bare.headers?.["www-authenticate"] ??
@@ -409,7 +536,12 @@ export class OnvifAdapter implements CameraAdapter {
                 headers: { ...headers, Authorization: `Digest ${digest}` },
               },
             );
-            if (retry.status >= 200 && retry.status < 300) return retry.body;
+            if (retry.status >= 200 && retry.status < 300) {
+              return successfulSoapBody(
+                retry.body,
+                this.options.maxXmlBytes ?? DEFAULT_OPTIONS.maxXmlBytes,
+              );
+            }
           }
         }
       }

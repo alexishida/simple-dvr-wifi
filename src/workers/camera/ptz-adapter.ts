@@ -11,7 +11,7 @@ export interface PtzCapabilities {
 
 export interface PtzServiceInterface {
   continuousMove(options: { profileToken: string; velocity: Record<string, number> }): Promise<void>
-  stop(options: { profileToken: string }): Promise<void>
+  stop(options: { profileToken: string; panTilt?: boolean; zoom?: boolean }): Promise<void>
   relativeMove(options: { profileToken: string; velocity: Record<string, number> }): Promise<void>
   absoluteMove(options: { profileToken: string; position: Record<string, number> }): Promise<void>
   listPresets(options: { profileToken: string }): Promise<Array<{ token: string; name: string }>>
@@ -73,7 +73,7 @@ export class PtzCommandGuard {
     return this.adapter.absoluteMove(options)
   }
 
-  async stop(options: { profileToken: string }): Promise<void> {
+  async stop(options: { profileToken: string; panTilt?: boolean; zoom?: boolean }): Promise<void> {
     if (!this.capabilities.stop) {
       throw new Error('Stop não suportado.')
     }

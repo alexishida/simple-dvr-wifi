@@ -10,10 +10,11 @@ function asBoolean(state) {
   return state
 }
 
-const executablePath = resolve(process.argv[2] ?? '')
-if (!executablePath) {
+const target = process.argv[2] ?? process.env.PACKAGED_EXE
+if (!target) {
   throw new Error('Usage: node scripts/verify-fuses.mjs <path-to-electron-executable>')
 }
+const executablePath = resolve(target)
 
 const wire = await getCurrentFuseWire(executablePath)
 const expected = {

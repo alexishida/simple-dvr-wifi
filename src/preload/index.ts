@@ -8,7 +8,6 @@ import type {
 import type { AppConfig } from "../shared/config.js";
 import type {
   CameraRecord,
-  DiagnosticRecord,
   RecordingRecord,
   SnapshotRecord,
 } from "../shared/database.js";
@@ -19,14 +18,6 @@ import {
   type EventPayloadMap,
   type Unsubscribe,
 } from "../shared/events.js";
-
-export interface NetworkInterfaceEntry {
-  name: string;
-  category: string;
-  addresses: string[];
-  mac: string | null;
-  eligible: boolean;
-}
 
 export interface CameraCreateInput {
   name: string;
@@ -70,13 +61,6 @@ export interface CameraTestResult {
     status: "ok" | "error" | "skipped";
     detail: string;
   }>;
-}
-
-export interface DiscoveryCameraResult {
-  epr: string;
-  addresses: string[];
-  types: string[];
-  scopes: string[];
 }
 
 export interface MediaSessionStatus {
@@ -210,21 +194,6 @@ const api = {
     save: (config: AppConfig): Promise<Result<{ saved: boolean }>> =>
       ipcRenderer.invoke("config:save", { config }),
   },
-  diagnostics: {
-    list: (): Promise<Result<DiagnosticRecord[]>> =>
-      ipcRenderer.invoke("diagnostics:list"),
-  },
-  discovery: {
-    interfaces: (): Promise<Result<NetworkInterfaceEntry[]>> =>
-      ipcRenderer.invoke("discovery:interfaces"),
-    start: (input: {
-      interfaceName: string;
-      timeoutMs?: number;
-    }): Promise<Result<DiscoveryCameraResult[]>> =>
-      ipcRenderer.invoke("discovery:start", input),
-    cancel: (): Promise<Result<{ cancelled: boolean }>> =>
-      ipcRenderer.invoke("discovery:cancel"),
-  },
   media: {
     acquire: (input: {
       cameraId: string;
@@ -245,6 +214,8 @@ const api = {
       ipcRenderer.invoke("media:whepEndpoint", { cameraId, profile }),
   },
   ptz: {
+    connect: (cameraId: string): Promise<Result<{ connected: boolean }>> =>
+      ipcRenderer.invoke("ptz:connect", { cameraId }),
     move: (
       cameraId: string,
       velocity: PtzVelocityInput,

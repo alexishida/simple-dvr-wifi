@@ -116,15 +116,3 @@ export const SnapshotRecordSchema = z.object({
 })
 
 export type SnapshotRecord = z.infer<typeof SnapshotRecordSchema>
-
-export const DiagnosticRecordSchema = z.object({
-  id: z.number().int().positive(),
-  cameraId: CameraIdSchema.nullable(),
-  code: z.string().min(1).max(64),
-  message: z.string().max(500),
-  count: z.number().int().positive(),
-  firstSeen: z.string(),
-  lastSeen: z.string(),
-})
-
-export type DiagnosticRecord = z.infer<typeof DiagnosticRecordSchema>

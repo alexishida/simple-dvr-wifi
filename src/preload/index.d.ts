@@ -5,26 +5,10 @@ import type {
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
 import type {
-  DiagnosticRecord,
   RecordingRecord,
   SnapshotRecord,
 } from "../shared/database.js";
 import type { EventListener, Unsubscribe } from "../shared/events.js";
-
-export interface NetworkInterfaceEntry {
-  name: string;
-  category: string;
-  addresses: string[];
-  mac: string | null;
-  eligible: boolean;
-}
-
-export interface DiscoveryCameraResult {
-  epr: string;
-  addresses: string[];
-  types: string[];
-  scopes: string[];
-}
 
 export interface MediaSessionStatus {
   state:
@@ -114,19 +98,6 @@ export interface ConfigApi {
   save: (config: AppConfig) => Promise<Result<{ saved: boolean }>>;
 }
 
-export interface DiagnosticsApi {
-  list: () => Promise<Result<DiagnosticRecord[]>>;
-}
-
-export interface DiscoveryApi {
-  interfaces: () => Promise<Result<NetworkInterfaceEntry[]>>;
-  start: (input: {
-    interfaceName: string;
-    timeoutMs?: number;
-  }) => Promise<Result<DiscoveryCameraResult[]>>;
-  cancel: () => Promise<Result<{ cancelled: boolean }>>;
-}
-
 export interface ShellApi {
   openExternal: (url: string) => Promise<Result<{ opened: boolean }>>;
 }
@@ -172,6 +143,7 @@ export interface PtzControlSnapshot {
 }
 
 export interface PtzApi {
+  connect: (cameraId: string) => Promise<Result<{ connected: boolean }>>;
   move: (
     cameraId: string,
     velocity: PtzVelocityInput,
@@ -221,8 +193,6 @@ export interface LibraryApi {
 export interface ExposedApi {
   cameras: CameraApi;
   config: ConfigApi;
-  diagnostics: DiagnosticsApi;
-  discovery: DiscoveryApi;
   media: MediaApi;
   ptz: PtzApi;
   snapshots: SnapshotApi;
