@@ -440,6 +440,10 @@ export class RecordingRepository {
     return row ? mapRecording(row) : null
   }
 
+  delete(id: string): boolean {
+    return this.db.prepare('DELETE FROM recordings WHERE id = ?').run(id).changes > 0
+  }
+
   complete(id: string, status: RecordingRecord['status']): RecordingRecord | null {
     const endedAt = nowIso()
     const start = this.db.prepare('SELECT started_at FROM recordings WHERE id = ?').get(id) as
@@ -525,6 +529,15 @@ export class SnapshotRepository {
       .prepare('INSERT INTO snapshots (id, camera_id, path, captured_at) VALUES (?, ?, ?, ?)')
       .run(id, cameraId, path, capturedAt)
     return { id, cameraId, path, capturedAt }
+  }
+
+  getById(id: string): SnapshotRecord | null {
+    const row = this.db.prepare('SELECT * FROM snapshots WHERE id = ?').get(id) as Row | undefined
+    return row ? mapSnapshot(row) : null
+  }
+
+  delete(id: string): boolean {
+    return this.db.prepare('DELETE FROM snapshots WHERE id = ?').run(id).changes > 0
   }
 
   list(cameraId: string): SnapshotRecord[] {

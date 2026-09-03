@@ -121,7 +121,12 @@ function MonitoringTile({
   selectedPtzCameraId,
 }: MonitoringTileProps): React.JSX.Element {
   const [localRecording, setLocalRecording] = useState(false);
+  const [actionState, setActionState] = useState<
+    "idle" | "recording" | "snapshot"
+  >("idle");
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const dragPreviewRef = useRef<HTMLElement | null>(null);
+  const liveVideoRef = useRef<HTMLVideoElement>(null);
 
   const removeDragPreview = (): void => {
     dragPreviewRef.current?.remove();
@@ -159,28 +164,139 @@ function MonitoringTile({
     camera.recordingStatus === "recording" ||
     camera.recordingStatus === "starting";
 
-  const toggleRecording = (): void => {
-    if (recording) {
-      void window.api.recordings.stop(camera.id).then((result) => {
-        if (result.ok && result.value.stopped) setLocalRecording(false);
-        else console.error("Falha ao finalizar a gravação.");
-      });
-    } else {
-      void window.api.recordings.start(camera.id).then((result) => {
-        if (result.ok && result.value.writeAllowed) setLocalRecording(true);
-        else
-          console.error(
-            result.ok ? "Não foi possível gravar." : result.error.message,
-          );
-      });
+  const showActionMessage = (message: string): void => {
+    setActionMessage(message);
+    window.setTimeout(() => setActionMessage(null), 4_000);
+  };
+
+  const createDisplayedFrame = async (
+    maxWidth?: number,
+    quality = 0.92,
+  ): Promise<Uint8Array> => {
+    const video = liveVideoRef.current;
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      throw new Error("O vídeo ainda não possui uma imagem disponível.");
+    }
+
+    const scale = maxWidth ? Math.min(1, maxWidth / video.videoWidth) : 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context || video.videoWidth === 0 || video.videoHeight === 0) {
+      throw new Error("Não foi possível ler o quadro atual do vídeo.");
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolveBlob) =>
+      canvas.toBlob(resolveBlob, "image/jpeg", quality),
+    );
+    if (!blob) throw new Error("Não foi possível gerar a imagem.");
+    return new Uint8Array(await blob.arrayBuffer());
+  };
+
+  const saveRecordingPreview = async (recordingId: string): Promise<void> => {
+    const data = await createDisplayedFrame(640, 0.78);
+    const result = await window.api.recordings.savePreview({
+      cameraId: camera.id,
+      recordingId,
+      data,
+    });
+    if (!result.ok || !result.value.saved) {
+      throw new Error(
+        result.ok ? "O preview não foi salvo." : result.error.message,
+      );
     }
   };
 
+  const toggleRecording = (): void => {
+    if (actionState !== "idle") return;
+    setActionState("recording");
+    if (recording) {
+      void window.api.recordings
+        .stop(camera.id)
+        .then((result) => {
+          if (result.ok && result.value.stopped) {
+            setLocalRecording(false);
+            showActionMessage(
+              result.value.saved
+                ? "Gravação finalizada e salva."
+                : "Gravação finalizada, mas nenhum arquivo de vídeo foi gerado.",
+            );
+          } else {
+            showActionMessage(
+              result.ok
+                ? "Não foi possível finalizar a gravação."
+                : result.error.message,
+            );
+          }
+        })
+        .catch(() => {
+          showActionMessage("Não foi possível finalizar a gravação.");
+        })
+        .finally(() => {
+          setActionState("idle");
+        });
+    } else {
+      void window.api.recordings
+        .start(camera.id)
+        .then(async (result) => {
+          if (result.ok && result.value.writeAllowed) {
+            setLocalRecording(true);
+            let previewSaved = true;
+            if (result.value.recordingId) {
+              try {
+                await saveRecordingPreview(result.value.recordingId);
+              } catch {
+                previewSaved = false;
+              }
+            }
+            showActionMessage(
+              previewSaved
+                ? "Gravação iniciada."
+                : "Gravação iniciada, mas o preview não pôde ser salvo.",
+            );
+          } else {
+            showActionMessage(
+              result.ok
+                ? "Não foi possível iniciar a gravação."
+                : result.error.message,
+            );
+          }
+        })
+        .catch(() => {
+          showActionMessage("Não foi possível iniciar a gravação.");
+        })
+        .finally(() => {
+          setActionState("idle");
+        });
+    }
+  };
+
+  const captureDisplayedFrame = async (): Promise<void> => {
+    const data = await createDisplayedFrame();
+    const result = await window.api.snapshots.saveFrame({
+      cameraId: camera.id,
+      data,
+    });
+    if (!result.ok) throw new Error(result.error.message);
+  };
+
   const captureSnapshot = (): void => {
-    void window.api.snapshots
-      .capture({ cameraId: camera.id })
-      .then((result) => {
-        if (!result.ok) console.error("Falha no snapshot");
+    if (actionState !== "idle") return;
+    setActionState("snapshot");
+    void captureDisplayedFrame()
+      .then(() => {
+        showActionMessage("Foto salva na biblioteca.");
+      })
+      .catch((error: unknown) => {
+        showActionMessage(
+          error instanceof Error
+            ? error.message
+            : "Não foi possível tirar a foto.",
+        );
+      })
+      .finally(() => {
+        setActionState("idle");
       });
   };
 
@@ -262,6 +378,7 @@ function MonitoringTile({
           cameraId={camera.id}
           cameraName={camera.name}
           profile="sub"
+          videoRef={liveVideoRef}
         />
         <button
           type="button"
@@ -285,12 +402,31 @@ function MonitoringTile({
         >
           <EditIcon size={15} />
         </button>
+        {recording && (
+          <span
+            className="tile-recording-indicator"
+            role="status"
+            aria-label={`${camera.name} está gravando`}
+            title="Gravando"
+          >
+            <RecIcon size={18} />
+          </span>
+        )}
         <div className="tile-actions">
           <button
             type="button"
             className="btn-icon"
-            aria-label={`Capturar snapshot de ${camera.name}`}
-            onClick={captureSnapshot}
+            aria-label={
+              actionState === "snapshot"
+                ? `Salvando foto de ${camera.name}`
+                : `Capturar foto de ${camera.name}`
+            }
+            title="Tirar foto"
+            disabled={actionState !== "idle"}
+            onClick={(event) => {
+              event.stopPropagation();
+              captureSnapshot();
+            }}
           >
             <ImageIcon size={15} />
           </button>
@@ -302,7 +438,12 @@ function MonitoringTile({
                 ? `Parar gravação de ${camera.name}`
                 : `Gravar ${camera.name}`
             }
-            onClick={toggleRecording}
+            title={recording ? "Parar gravação" : "Gravar"}
+            disabled={actionState !== "idle"}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleRecording();
+            }}
           >
             <RecIcon size={15} />
           </button>
@@ -310,11 +451,20 @@ function MonitoringTile({
             type="button"
             className="btn-icon"
             aria-label={`Abrir ${camera.name} em tela cheia`}
-            onClick={() => onFullscreen(camera)}
+            title="Tela cheia"
+            onClick={(event) => {
+              event.stopPropagation();
+              onFullscreen(camera);
+            }}
           >
             <MaximizeIcon size={16} />
           </button>
         </div>
+        {actionMessage && (
+          <p className="tile-action-feedback" role="status">
+            {actionMessage}
+          </p>
+        )}
       </div>
     </article>
   );

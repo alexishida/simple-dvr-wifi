@@ -1,8 +1,8 @@
 # Simple DVR Wi-Fi
 
 Monitoramento local de câmeras IP/Wi-Fi no Windows. O aplicativo é um desktop
-Electron + React + TypeScript para descobrir e cadastrar câmeras ONVIF/RTSP,
-acompanhar vídeo ao vivo, controlar PTZ compatível, capturar snapshots e gravar
+Electron + React + TypeScript para cadastrar câmeras ONVIF/RTSP, acompanhar
+vídeo ao vivo, controlar PTZ compatível, capturar snapshots e gravar
 localmente. Credenciais permanecem cifradas no computador do usuário.
 
 > **Escopo atual:** Windows 10/11 (x64). A arquitetura preserva fronteiras de
@@ -13,14 +13,14 @@ localmente. Credenciais permanecem cifradas no computador do usuário.
 
 ## Funcionalidades
 
-- **Descoberta WS-Discovery** por interface de rede (Ethernet, Wi-Fi, VPN, virtual),
-  com progresso, cancelamento e deduplicação por dispositivo.
-- **Cadastro manual** por URL RTSP/ONVIF, com verificação de conexão e
-  persistência de endpoints descobertos.
+- **Cadastro e edição manual** por endereço, URL RTSP e URL ONVIF, com
+  verificação de conexão e persistência dos endpoints configurados.
 - **Interoperabilidade ONVIF/RTSP** tolerante a implementações incompletas:
   capacidades e perfis normalizados como `supported` / `unsupported` / `unknown` / `error`.
 - **Vídeo ao vivo de baixa latência** (WebRTC/WHEP via MediaMTX em loopback),
-  com layouts 1/4/9/16, fullscreen e troca main/substream.
+  com grades 2×2, 3×3 e 4×4, fullscreen e troca main/substream.
+- **Organização da Live**: mova cards de câmera entre posições ocupadas ou
+  vazias; a ordem é salva separadamente para cada grade.
 - **Controle PTZ** condicionado às capacidades: movimentação contínua, zoom e
   parada de segurança com lease renovável.
 - **Snapshots** pelo endpoint da câmera ou fallback FFmpeg.
@@ -31,7 +31,6 @@ localmente. Credenciais permanecem cifradas no computador do usuário.
   do sistema.
 - **Operação 100% local**: sem telemetria, sem atualizações automáticas, sem
   tráfego externo além das câmeras configuradas.
-- **Diagnóstico sanitizado** por câmera, sem expor senhas, tokens ou URLs autenticadas.
 
 ## Requisitos
 
@@ -39,9 +38,6 @@ localmente. Credenciais permanecem cifradas no computador do usuário.
 - 4 GB de RAM recomendados; a necessidade cresce conforme a quantidade e o codec dos streams
 - Espaço em disco conforme a política de gravação e snapshots
 - Nenhuma ferramenta de desenvolvimento é necessária no uso final
-
-Para detalhes sobre firewall, multicast, VLAN, VPN e limitações de codec,
-veja [docs/release/requirements-windows.md](docs/release/requirements-windows.md).
 
 ### Limitações conhecidas
 
@@ -77,10 +73,14 @@ npm run build
 
 ## Uso básico
 
-1. Cadastre uma câmera manualmente ou abra **Descoberta** para procurar dispositivos ONVIF na rede local.
-2. Informe ou atualize as credenciais quando necessário e use **Testar** para atualizar endpoints e capacidades.
-3. Abra o Dashboard para visualizar o stream; selecione tela cheia para alternar entre perfil principal e substream.
-4. Use os controles do card para snapshot e gravação. Os arquivos ficam nos diretórios configurados em **Configurações**.
+1. Em **Câmeras**, selecione **Adicionar manualmente** e informe o nome, endereço e porta.
+2. Configure a URL RTSP quando ela estiver disponível. A URL ONVIF é opcional e
+   permite identificar capacidades como PTZ e perfis de stream.
+3. Salve a câmera e use **Testar conexão** para verificar a configuração.
+4. Abra **Live** para assistir às câmeras; use **Organizar posição** no card para
+   mover uma câmera para qualquer posição disponível na grade.
+5. Use os controles do card para snapshot, gravação e tela cheia. Os arquivos
+   ficam nos diretórios configurados em **Configurações**.
 
 ## Empacotamento Windows
 
@@ -137,7 +137,7 @@ src/
 │   └── logging/   # logger estruturado e sanitizador
 ├── preload/       # API estreita exposta via contextBridge (sem ipcRenderer)
 ├── renderer/      # React + Zustand (estado de apresentação)
-├── workers/       # database (SQLite), discovery (WS-Discovery), camera (ONVIF),
+├── workers/       # database (SQLite), camera (ONVIF),
 │   │              # media (MediaMTX/FFmpeg)
 └── shared/        # contratos, schemas (zod), estados e erros tipados
 ```
@@ -159,9 +159,6 @@ Princípios de segurança:
 
 ## Documentação
 
-- [Requisitos de execução — Windows](docs/release/requirements-windows.md)
-- [Matriz de validação com câmeras reais](docs/release/device-matrix.md)
-- [Decisão de dependências Windows](docs/decisions/dependency-spike-windows.md)
 - [Binários de mídia (MediaMTX/FFmpeg)](resources/README.md)
 - Especificações e mudanças OpenSpec em [openspec/](openspec/)
 

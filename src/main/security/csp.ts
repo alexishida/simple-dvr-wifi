@@ -10,6 +10,6 @@ export const CSP_DIRECTIVES = [
   "img-src 'self' data: blob:",
   "media-src 'self' blob: http://127.0.0.1:* ws://127.0.0.1:*",
   "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*",
-].join('; ')
+].join("; ");
 
-export const APP_CSP_HEADER = CSP_DIRECTIVES
+export const APP_CSP_HEADER = CSP_DIRECTIVES;

@@ -286,6 +286,14 @@ export class SqliteWorker {
           const p = request.payload as { id: string; status: string };
           return reply(r.recordings.complete(p.id, p.status as never));
         }
+        case "recording.get": {
+          const p = request.payload as { id: string };
+          return reply(r.recordings.getById(p.id));
+        }
+        case "recording.delete": {
+          const p = request.payload as { id: string };
+          return reply(r.recordings.delete(p.id));
+        }
         case "recording.list": {
           const p = request.payload as { cameraId: string };
           return reply(r.recordings.list(p.cameraId));
@@ -303,6 +311,14 @@ export class SqliteWorker {
         case "snapshot.create": {
           const p = request.payload as { cameraId: string; path: string };
           return reply(r.snapshots.create(p.cameraId, p.path));
+        }
+        case "snapshot.get": {
+          const p = request.payload as { id: string };
+          return reply(r.snapshots.getById(p.id));
+        }
+        case "snapshot.delete": {
+          const p = request.payload as { id: string };
+          return reply(r.snapshots.delete(p.id));
         }
         case "snapshot.list": {
           const p = request.payload as { cameraId: string };

@@ -5,6 +5,7 @@ interface LiveVideoProps {
   cameraId: string
   cameraName: string
   profile: 'main' | 'sub'
+  videoRef?: React.RefObject<HTMLVideoElement | null>
 }
 
 type PlayerState = 'connecting' | 'playing' | 'error'
@@ -36,8 +37,14 @@ function waitForIceGathering(peer: RTCPeerConnection, signal: AbortSignal): Prom
   })
 }
 
-export function LiveVideo({ cameraId, cameraName, profile }: LiveVideoProps): React.JSX.Element {
-  const videoRef = useRef<HTMLVideoElement>(null)
+export function LiveVideo({
+  cameraId,
+  cameraName,
+  profile,
+  videoRef: externalVideoRef,
+}: LiveVideoProps): React.JSX.Element {
+  const internalVideoRef = useRef<HTMLVideoElement>(null)
+  const videoRef = externalVideoRef ?? internalVideoRef
   const [state, setState] = useState<PlayerState>('connecting')
   const [message, setMessage] = useState('Conectando ao stream…')
   const [retryAttempt, setRetryAttempt] = useState(0)

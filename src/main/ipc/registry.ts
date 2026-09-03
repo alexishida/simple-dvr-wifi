@@ -7,6 +7,7 @@ export const MAX_IPC_PAYLOAD_BYTES = 16 * 1024
 
 export type IpcDefinition<TInput extends z.ZodType, TOutput> = {
   input: TInput
+  maxPayloadBytes?: number
   handle: (input: z.infer<TInput>) => Promise<TOutput> | TOutput
 }
 
@@ -41,9 +42,9 @@ export class IpcRegistry {
     return event.sender.id === window.id && event.senderFrame === event.sender.mainFrame
   }
 
-  isPayloadWithinLimit(payload: unknown): boolean {
+  isPayloadWithinLimit(payload: unknown, maxBytes = MAX_IPC_PAYLOAD_BYTES): boolean {
     try {
-      return Buffer.byteLength(JSON.stringify(payload ?? null), 'utf8') <= MAX_IPC_PAYLOAD_BYTES
+      return Buffer.byteLength(JSON.stringify(payload ?? null), 'utf8') <= maxBytes
     } catch {
       return false
     }
@@ -63,7 +64,7 @@ export class IpcRegistry {
       return failure('AUTH_ERROR', 'Solicitação não autorizada.')
     }
 
-    if (!this.isPayloadWithinLimit(payload)) {
+    if (!this.isPayloadWithinLimit(payload, definition.maxPayloadBytes)) {
       return failure('VALIDATION_ERROR', 'Solicitação inválida.')
     }
 

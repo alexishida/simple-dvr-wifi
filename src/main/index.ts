@@ -10,7 +10,15 @@ import {
 } from "electron";
 import { pathToFileURL } from "node:url";
 import { extname, join, relative, resolve } from "node:path";
-import { copyFile, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { is } from "@electron-toolkit/utils";
 import { z } from "zod";
@@ -250,24 +258,48 @@ async function resolveLibraryFile(
   return target;
 }
 
+async function deleteLibraryFile(
+  libraryRoot: string,
+  requestedPath: string,
+  allowedExtensions: ReadonlySet<string>,
+): Promise<void> {
+  try {
+    const target = await resolveLibraryFile(
+      libraryRoot,
+      requestedPath,
+      allowedExtensions,
+    );
+    await unlink(target);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
 async function stopActiveRecording(
   cameraId: string,
   status: "completed" | "interrupted" = "completed",
-): Promise<boolean> {
+): Promise<{ stopped: boolean; saved: boolean }> {
   const active = activeRecordings.get(cameraId);
-  if (!active || !database) return false;
+  if (!active || !database) return { stopped: false, saved: false };
   const disabled = mediaSupervisor
     ? await mediaSupervisor.setRecording(
         mediaSessionId(cameraId, "main"),
         false,
       )
     : false;
-  if (disabled)
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
-  await catalogRecordingFiles(active);
+  const segmentCount = disabled ? await catalogRecordingFiles(active) : 0;
+  const saved = segmentCount > 0;
   await database.request("recording.complete", {
     id: active.recordingId,
-    status: disabled ? status : "interrupted",
+    status: disabled && saved ? status : "interrupted",
   });
   await database.request("camera.setRecordingStatus", {
     cameraId,
@@ -277,33 +309,47 @@ async function stopActiveRecording(
   const mainSessionId = mediaSessionId(cameraId, "main");
   if (!activeViewSessions.has(mainSessionId))
     await mediaSupervisor?.release(mainSessionId);
-  return true;
+  return { stopped: true, saved };
 }
 
 async function catalogRecordingFiles(active: {
   recordingId: string;
   startedAt: string;
   recordDir: string;
-}): Promise<void> {
-  if (!database) return;
-  const files: string[] = [];
-  const visit = async (directory: string): Promise<void> => {
-    let entries: Dirent[];
-    try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    await Promise.all(
-      entries.map(async (entry) => {
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) await visit(path);
-        else if (/\.(?:mp4|m4s)$/i.test(entry.name)) files.push(path);
-      }),
-    );
+}): Promise<number> {
+  if (!database) return 0;
+  const databaseConnection = database;
+  const listFiles = async (): Promise<string[]> => {
+    const files: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      let entries: Dirent[];
+      try {
+        entries = await readdir(directory, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      await Promise.all(
+        entries.map(async (entry) => {
+          const path = join(directory, entry.name);
+          if (entry.isDirectory()) await visit(path);
+          else if (/\.(?:mp4|m4s)$/i.test(entry.name)) files.push(path);
+        }),
+      );
+    };
+    await visit(active.recordDir);
+    return files;
   };
-  await visit(active.recordDir);
+
+  const deadline = Date.now() + 3_000;
+  let files: string[] = [];
+  do {
+    files = await listFiles();
+    if (files.length > 0 || Date.now() >= deadline) break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+  } while (Date.now() < deadline);
+
   const startedAfter = Date.parse(active.startedAt) - 5_000;
+  let cataloged = 0;
   for (const path of files) {
     let info;
     try {
@@ -312,15 +358,20 @@ async function catalogRecordingFiles(active: {
       continue;
     }
     if (info.mtimeMs < startedAfter) continue;
-    await database.request("recording.segment.create", {
-      recordingId: active.recordingId,
-      path,
-      startedAt: info.birthtime.toISOString(),
-      endedAt: info.mtime.toISOString(),
-      durationMs: Math.max(0, info.mtimeMs - info.birthtimeMs),
-      status: "completed",
-    });
+    const result = await databaseConnection.request(
+      "recording.segment.create",
+      {
+        recordingId: active.recordingId,
+        path,
+        startedAt: info.birthtime.toISOString(),
+        endedAt: info.mtime.toISOString(),
+        durationMs: Math.max(0, info.mtimeMs - info.birthtimeMs),
+        status: "completed",
+      },
+    );
+    if (result.ok) cataloged += 1;
   }
+  return cataloged;
 }
 
 app.setName("simple-dvr-wifi");
@@ -336,6 +387,7 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       corsEnabled: true,
+      stream: true,
     },
   },
 ]);
@@ -345,6 +397,19 @@ const projectRoot = resolve(__dirname, "../..");
 
 function registerApplicationProtocol(): void {
   protocol.handle("app", async (request) => {
+    const url = new URL(request.url);
+    const recordingMatch = url.pathname.match(
+      /^\/media\/recordings\/([0-9a-f-]+)$/i,
+    );
+    if (
+      url.hostname === "renderer" &&
+      recordingMatch &&
+      !url.search &&
+      !url.hash
+    ) {
+      return recordingResponse(request, recordingMatch[1]!);
+    }
+
     const assetPath = resolveRenderAsset(rendererRoot, request.url);
     if (!assetPath) {
       return new Response("Not found", { status: 404 });
@@ -355,6 +420,96 @@ function registerApplicationProtocol(): void {
     headers.set("X-Content-Type-Options", "nosniff");
     return new Response(response.body, { status: response.status, headers });
   });
+}
+
+async function recordingResponse(
+  request: GlobalRequest,
+  id: string,
+): Promise<Response> {
+  if (!z.string().uuid().safeParse(id).success || !database || !config) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const result = await database.request("recording.get", { id });
+  if (!result.ok || !result.value) {
+    return new Response("Not found", { status: 404 });
+  }
+  const segmentsResponse = await database.request("recording.segment.list", {
+    recordingId: id,
+  });
+  const first = segmentsResponse.ok
+    ? (segmentsResponse.value as RecordingSegmentRecord[])[0]
+    : undefined;
+  if (!first) return new Response("Not found", { status: 404 });
+
+  try {
+    const root = resolve(
+      config.recordingsDir || resolve(userDataPath, "recordings"),
+    );
+    const target = await resolveLibraryFile(
+      root,
+      first.path,
+      new Set([".mp4", ".m4s"]),
+    );
+    const contents = await readFile(target);
+    const range = parseByteRange(request.headers.get("range"), contents.length);
+    const headers = new Headers({
+      "Accept-Ranges": "bytes",
+      "Content-Type":
+        extname(target).toLowerCase() === ".mp4"
+          ? "video/mp4"
+          : "video/iso.segment",
+    });
+
+    if (range === null) {
+      headers.set("Content-Length", String(contents.length));
+      return new Response(contents, { status: 200, headers });
+    }
+    if (range === "invalid") {
+      headers.set("Content-Range", `bytes */${contents.length}`);
+      return new Response(null, { status: 416, headers });
+    }
+
+    const { start, end } = range;
+    headers.set("Content-Length", String(end - start + 1));
+    headers.set("Content-Range", `bytes ${start}-${end}/${contents.length}`);
+    return new Response(contents.subarray(start, end + 1), {
+      status: 206,
+      headers,
+    });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+function parseByteRange(
+  value: string | null,
+  size: number,
+): { start: number; end: number } | "invalid" | null {
+  if (!value) return null;
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(value);
+  if (!match || size === 0) return "invalid";
+
+  const [, startValue, endValue] = match;
+  if (!startValue && !endValue) return "invalid";
+  if (!startValue) {
+    const suffixLength = Number(endValue);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return "invalid";
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+
+  const start = Number(startValue);
+  const end = endValue ? Number(endValue) : size - 1;
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    start < 0 ||
+    end < start ||
+    start >= size
+  ) {
+    return "invalid";
+  }
+  return { start, end: Math.min(end, size - 1) };
 }
 
 function configureSessionSecurity(): void {
@@ -927,10 +1082,20 @@ function registerIpcHandlers(): void {
       if (!rtspUrl)
         throw new Error("A câmera não possui um endpoint RTSP configurado.");
       const sessionId = mediaSessionId(cameraId, profile);
+      const libraryRoot =
+        config?.recordingsDir || resolve(userDataPath, "recordings");
+      const recordPath = resolve(
+        libraryRoot,
+        "%path",
+        "%Y-%m-%d",
+        "%H-%M-%S-%f",
+      );
       const status = await mediaSupervisor.acquire(
         sessionId,
         rtspUrl,
         `${mediaPath(cameraId)}_${profile}`,
+        recordPath,
+        profile !== "main",
       );
       if (status.state === "running") activeViewSessions.add(sessionId);
       if (database) {
@@ -1085,6 +1250,35 @@ function registerIpcHandlers(): void {
     },
   });
 
+  registry.register("snapshots:saveFrame", {
+    input: z.object({
+      cameraId: z.string().uuid(),
+      data: z.instanceof(Uint8Array),
+    }),
+    maxPayloadBytes: 32 * 1024 * 1024,
+    handle: async ({ cameraId, data }) => {
+      if (!config || !database)
+        throw new Error("Serviço de snapshots indisponível.");
+      const camera = await getCameraRecord(cameraId);
+      if (!camera?.active)
+        throw new Error("Câmera não encontrada ou desativada.");
+
+      const { saveSnapshot, validateSnapshotBuffer } =
+        await import("./services/snapshot.js");
+      const buffer = Buffer.from(data);
+      validateSnapshotBuffer(buffer);
+      const result = await saveSnapshot(buffer, {
+        cameraId,
+        libraryRoot: config.snapshotDir || resolve(userDataPath, "snapshots"),
+      });
+      await database.request("snapshot.create", {
+        cameraId,
+        path: result.path,
+      });
+      return { ok: true, ...result, source: "video" as const };
+    },
+  });
+
   registry.register("recordings:start", {
     input: z.object({ cameraId: z.string().uuid() }),
     handle: async ({ cameraId }) =>
@@ -1122,6 +1316,12 @@ function registerIpcHandlers(): void {
         }
 
         const mainSessionId = mediaSessionId(cameraId, "main");
+        const recordPath = resolve(
+          libraryRoot,
+          "%path",
+          "%Y-%m-%d",
+          "%H-%M-%S-%f",
+        );
         const currentMediaStatus = mediaSupervisor.status(mainSessionId);
         const mediaStatus =
           currentMediaStatus?.state === "running"
@@ -1130,6 +1330,8 @@ function registerIpcHandlers(): void {
                 mainSessionId,
                 rtspUrl,
                 `${mediaPath(cameraId)}_main`,
+                recordPath,
+                false,
               );
         if (mediaStatus.state !== "running") {
           throw new Error(
@@ -1137,12 +1339,6 @@ function registerIpcHandlers(): void {
           );
         }
 
-        const recordPath = resolve(
-          libraryRoot,
-          "%path",
-          "%Y-%m-%d",
-          "%H-%M-%S-%f",
-        );
         const response = await database.request("recording.create", {
           cameraId,
         });
@@ -1152,11 +1348,7 @@ function registerIpcHandlers(): void {
           id: string;
           startedAt: string;
         };
-        const enabled = await mediaSupervisor.setRecording(
-          mainSessionId,
-          true,
-          recordPath,
-        );
+        const enabled = await mediaSupervisor.setRecording(mainSessionId, true);
         if (!enabled) {
           await database.request("recording.complete", {
             id: recording.id,
@@ -1194,10 +1386,44 @@ function registerIpcHandlers(): void {
       withRecordingLock(cameraId, async () => {
         if (!database || !mediaSupervisor) return { stopped: false };
         const stopped = await stopActiveRecording(cameraId);
-        if (!stopped) return { stopped: false };
+        if (!stopped.stopped) return stopped;
         await emitCameraChanged();
-        return { stopped: true };
+        return stopped;
       }),
+  });
+
+  registry.register("recordings:savePreview", {
+    input: z.object({
+      cameraId: z.string().uuid(),
+      recordingId: z.string().uuid(),
+      data: z.instanceof(Uint8Array),
+    }),
+    maxPayloadBytes: 32 * 1024 * 1024,
+    handle: async ({ cameraId, recordingId, data }) => {
+      if (!database) throw new Error("Banco de dados indisponível.");
+      const active = activeRecordings.get(cameraId);
+      if (!active || active.recordingId !== recordingId) {
+        throw new Error("A gravação não está ativa.");
+      }
+      const response = await database.request("recording.get", {
+        id: recordingId,
+      });
+      const recording = response.ok
+        ? (response.value as RecordingRecord | null)
+        : null;
+      if (!recording || recording.cameraId !== cameraId) {
+        throw new Error("Gravação não encontrada.");
+      }
+
+      const { saveRecordingPreview } =
+        await import("./services/recording-preview.js");
+      await saveRecordingPreview(
+        resolve(userDataPath, "recording-previews"),
+        recordingId,
+        data,
+      );
+      return { saved: true };
+    },
   });
 
   registry.register("library:snapshots", {
@@ -1259,6 +1485,124 @@ function registerIpcHandlers(): void {
         }),
       );
       return withPaths.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    },
+  });
+
+  registry.register("library:recordingPreview", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!database) return { dataUrl: null };
+      const response = await database.request("recording.get", { id });
+      if (!response.ok || !response.value) return { dataUrl: null };
+
+      const { readRecordingPreview } =
+        await import("./services/recording-preview.js");
+      const dataUrl = await readRecordingPreview(
+        resolve(userDataPath, "recording-previews"),
+        id,
+      );
+      return { dataUrl };
+    },
+  });
+
+  registry.register("library:readRecording", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) throw new Error("Biblioteca indisponível.");
+      const response = await database.request("recording.get", { id });
+      if (!response.ok || !response.value)
+        throw new Error("Gravação não encontrada.");
+
+      const segmentsResponse = await database.request("recording.segment.list", {
+        recordingId: id,
+      });
+      const first = segmentsResponse.ok
+        ? (segmentsResponse.value as RecordingSegmentRecord[])[0]
+        : undefined;
+      if (!first) throw new Error("Arquivo de vídeo não encontrado.");
+
+      const root = resolve(
+        config.recordingsDir || resolve(userDataPath, "recordings"),
+      );
+      const target = await resolveLibraryFile(
+        root,
+        first.path,
+        new Set([".mp4", ".m4s"]),
+      );
+      return {
+        data: new Uint8Array(await readFile(target)),
+        mimeType:
+          extname(target).toLowerCase() === ".mp4"
+            ? "video/mp4"
+            : "video/iso.segment",
+      };
+    },
+  });
+
+  registry.register("library:deleteSnapshot", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) return { deleted: false };
+      const response = await database.request("snapshot.get", { id });
+      const snapshot = response.ok
+        ? (response.value as SnapshotRecord | null)
+        : null;
+      if (!snapshot) throw new Error("Foto não encontrada.");
+
+      const root = resolve(
+        config.snapshotDir || resolve(userDataPath, "snapshots"),
+      );
+      await deleteLibraryFile(
+        root,
+        snapshot.path,
+        new Set([".jpg", ".jpeg", ".png"]),
+      );
+      const deleted = await database.request("snapshot.delete", { id });
+      if (!deleted.ok || deleted.value !== true)
+        throw new Error("Não foi possível excluir a foto.");
+      return { deleted: true };
+    },
+  });
+
+  registry.register("library:deleteRecording", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) return { deleted: false };
+      const response = await database.request("recording.get", { id });
+      const recording = response.ok
+        ? (response.value as RecordingRecord | null)
+        : null;
+      if (!recording) throw new Error("Gravação não encontrada.");
+      if (
+        activeRecordings.has(recording.cameraId) ||
+        ["starting", "recording", "stopping"].includes(recording.status)
+      ) {
+        throw new Error("Finalize a gravação antes de excluí-la.");
+      }
+
+      const segmentsResponse = await database.request(
+        "recording.segment.list",
+        { recordingId: id },
+      );
+      if (!segmentsResponse.ok)
+        throw new Error("Não foi possível consultar os arquivos da gravação.");
+      const segments = segmentsResponse.value as RecordingSegmentRecord[];
+      const root = resolve(
+        config.recordingsDir || resolve(userDataPath, "recordings"),
+      );
+      const { deleteRecordingPreview } =
+        await import("./services/recording-preview.js");
+      await deleteRecordingPreview(
+        resolve(userDataPath, "recording-previews"),
+        id,
+      );
+      for (const segment of segments) {
+        await deleteLibraryFile(root, segment.path, new Set([".mp4", ".m4s"]));
+      }
+      const deleted = await database.request("recording.delete", { id });
+      if (!deleted.ok || deleted.value !== true)
+        throw new Error("Não foi possível excluir a gravação.");
+      return { deleted: true };
     },
   });
 

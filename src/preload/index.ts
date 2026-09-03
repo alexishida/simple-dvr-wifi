@@ -105,7 +105,7 @@ export interface SnapshotCaptureResult {
   relativePath?: string;
   bytes?: number;
   capturedAt?: string;
-  source?: "endpoint" | "ffmpeg";
+  source?: "endpoint" | "ffmpeg" | "video";
 }
 
 export interface RecordingSessionResult {
@@ -231,22 +231,47 @@ const api = {
       cameraId: string;
     }): Promise<Result<SnapshotCaptureResult>> =>
       ipcRenderer.invoke("snapshots:capture", input),
+    saveFrame: (input: {
+      cameraId: string;
+      data: Uint8Array;
+    }): Promise<Result<SnapshotCaptureResult>> =>
+      ipcRenderer.invoke("snapshots:saveFrame", input),
   },
   recordings: {
     start: (cameraId: string): Promise<Result<RecordingSessionResult>> =>
       ipcRenderer.invoke("recordings:start", { cameraId }),
-    stop: (cameraId: string): Promise<Result<{ stopped: boolean }>> =>
+    stop: (
+      cameraId: string,
+    ): Promise<Result<{ stopped: boolean; saved: boolean }>> =>
       ipcRenderer.invoke("recordings:stop", { cameraId }),
+    savePreview: (input: {
+      cameraId: string;
+      recordingId: string;
+      data: Uint8Array;
+    }): Promise<Result<{ saved: boolean }>> =>
+      ipcRenderer.invoke("recordings:savePreview", input),
   },
   library: {
     snapshots: (cameraId?: string): Promise<Result<SnapshotRecord[]>> =>
       ipcRenderer.invoke("library:snapshots", { cameraId }),
     recordings: (cameraId?: string): Promise<Result<RecordingLibraryItem[]>> =>
       ipcRenderer.invoke("library:recordings", { cameraId }),
+    recordingPreview: (
+      id: string,
+    ): Promise<Result<{ dataUrl: string | null }>> =>
+      ipcRenderer.invoke("library:recordingPreview", { id }),
+    readRecording: (
+      id: string,
+    ): Promise<Result<{ data: Uint8Array; mimeType: string }>> =>
+      ipcRenderer.invoke("library:readRecording", { id }),
     openSnapshot: (path: string): Promise<Result<{ opened: boolean }>> =>
       ipcRenderer.invoke("library:openSnapshot", { path }),
     openRecording: (path: string): Promise<Result<{ opened: boolean }>> =>
       ipcRenderer.invoke("library:openRecording", { path }),
+    deleteSnapshot: (id: string): Promise<Result<{ deleted: boolean }>> =>
+      ipcRenderer.invoke("library:deleteSnapshot", { id }),
+    deleteRecording: (id: string): Promise<Result<{ deleted: boolean }>> =>
+      ipcRenderer.invoke("library:deleteRecording", { id }),
   },
   shell: {
     openExternal: (url: string): Promise<Result<{ opened: boolean }>> =>

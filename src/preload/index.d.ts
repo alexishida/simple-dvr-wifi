@@ -4,10 +4,7 @@ import type {
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
-import type {
-  RecordingRecord,
-  SnapshotRecord,
-} from "../shared/database.js";
+import type { RecordingRecord, SnapshotRecord } from "../shared/database.js";
 import type { EventListener, Unsubscribe } from "../shared/events.js";
 
 export interface MediaSessionStatus {
@@ -158,7 +155,7 @@ export interface SnapshotCaptureResult {
   relativePath?: string;
   bytes?: number;
   capturedAt?: string;
-  source?: "endpoint" | "ffmpeg";
+  source?: "endpoint" | "ffmpeg" | "video";
 }
 
 export interface RecordingSessionResult {
@@ -174,11 +171,22 @@ export interface SnapshotApi {
   capture: (input: {
     cameraId: string;
   }) => Promise<Result<SnapshotCaptureResult>>;
+  saveFrame: (input: {
+    cameraId: string;
+    data: Uint8Array;
+  }) => Promise<Result<SnapshotCaptureResult>>;
 }
 
 export interface RecordingApi {
   start: (cameraId: string) => Promise<Result<RecordingSessionResult>>;
-  stop: (cameraId: string) => Promise<Result<{ stopped: boolean }>>;
+  stop: (
+    cameraId: string,
+  ) => Promise<Result<{ stopped: boolean; saved: boolean }>>;
+  savePreview: (input: {
+    cameraId: string;
+    recordingId: string;
+    data: Uint8Array;
+  }) => Promise<Result<{ saved: boolean }>>;
 }
 
 export type RecordingLibraryItem = RecordingRecord & { path: string | null };
@@ -186,8 +194,14 @@ export type RecordingLibraryItem = RecordingRecord & { path: string | null };
 export interface LibraryApi {
   snapshots: (cameraId?: string) => Promise<Result<SnapshotRecord[]>>;
   recordings: (cameraId?: string) => Promise<Result<RecordingLibraryItem[]>>;
+  recordingPreview: (id: string) => Promise<Result<{ dataUrl: string | null }>>;
+  readRecording: (
+    id: string,
+  ) => Promise<Result<{ data: Uint8Array; mimeType: string }>>;
   openSnapshot: (path: string) => Promise<Result<{ opened: boolean }>>;
   openRecording: (path: string) => Promise<Result<{ opened: boolean }>>;
+  deleteSnapshot: (id: string) => Promise<Result<{ deleted: boolean }>>;
+  deleteRecording: (id: string) => Promise<Result<{ deleted: boolean }>>;
 }
 
 export interface ExposedApi {

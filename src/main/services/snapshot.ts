@@ -164,6 +164,18 @@ function extensionFor(buffer: Buffer): string {
   return PNG_MAGIC.equals(buffer.subarray(0, 4)) ? '.png' : '.jpg'
 }
 
+export function validateSnapshotBuffer(buffer: Buffer): void {
+  const magic = buffer.subarray(0, 4)
+  const isJpeg = JPEG_MAGIC.equals(magic.subarray(0, 3))
+  const isPng = PNG_MAGIC.equals(magic)
+  if (!isJpeg && !isPng) {
+    throw new SnapshotError('Tipo de imagem não permitido.', 'INVALID_TYPE')
+  }
+  if (buffer.byteLength > MAX_SNAPSHOT_BYTES) {
+    throw new SnapshotError('Snapshot acima do limite de tamanho.', 'TOO_LARGE')
+  }
+}
+
 export function isPathInsideLibrary(libraryRoot: string, candidate: string): boolean {
   const fromRoot = relative(resolve(libraryRoot), resolve(candidate))
   return fromRoot !== '' && !fromRoot.startsWith('..') && !fromRoot.includes(':')
@@ -173,6 +185,7 @@ export async function saveSnapshot(
   buffer: Buffer,
   options: SnapshotSaveOptions,
 ): Promise<SnapshotSaveResult> {
+  validateSnapshotBuffer(buffer)
   const ext = extensionFor(buffer)
   const capturedAt = options.capturedAt ?? new Date().toISOString()
   const date = capturedAt.slice(0, 10)
