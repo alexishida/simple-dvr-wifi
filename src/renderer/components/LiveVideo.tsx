@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CameraIcon } from '../icons.js'
+import { CameraIcon, WifiIcon } from '../icons.js'
 
 interface LiveVideoProps {
   cameraId: string
@@ -11,7 +11,12 @@ interface LiveVideoProps {
 type PlayerState = 'connecting' | 'playing' | 'error'
 const pendingReleases = new Map<string, Promise<unknown>>()
 
-function waitForIceGathering(peer: RTCPeerConnection, signal: AbortSignal): Promise<void> {
+function waitForIceGathering(
+  peer: RTCPeerConnection,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted)
+    return Promise.reject(new DOMException('Operação cancelada.', 'AbortError'))
   if (peer.iceGatheringState === 'complete') return Promise.resolve()
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
@@ -56,6 +61,7 @@ export function LiveVideo({
     let bearerToken: string | null = null
     let mediaRequested = false
     const abortController = new AbortController()
+    const video = videoRef.current
 
     const connect = async (): Promise<void> => {
       setState('connecting')
@@ -64,12 +70,12 @@ export function LiveVideo({
       await pendingReleases.get(cameraId)
       if (cancelled) return
       const acquired = await window.api.media.acquire({ cameraId, profile })
-      mediaRequested = true
+      mediaRequested = acquired.ok && acquired.value?.state === 'running'
       if (cancelled) return
-      if (!acquired.ok || acquired.value.state !== 'running') {
+      if (!acquired.ok || acquired.value?.state !== 'running') {
         throw new Error(
           acquired.ok
-            ? acquired.value.error || 'O gateway de vídeo não iniciou.'
+            ? acquired.value?.error || 'O gateway de vídeo não iniciou.'
             : acquired.error.message,
         )
       }
@@ -77,7 +83,9 @@ export function LiveVideo({
       const endpoint = await window.api.media.whepEndpoint(cameraId, profile)
       if (cancelled) return
       if (!endpoint.ok || !endpoint.value) {
-        throw new Error(endpoint.ok ? 'Endpoint WHEP indisponível.' : endpoint.error.message)
+        throw new Error(
+          endpoint.ok ? 'Endpoint WHEP indisponível.' : endpoint.error.message,
+        )
       }
 
       bearerToken = endpoint.value.token
@@ -86,14 +94,18 @@ export function LiveVideo({
       peer.addTransceiver('audio', { direction: 'recvonly' })
       peer.addEventListener('track', (event) => {
         if (cancelled || !videoRef.current) return
-        videoRef.current.srcObject = event.streams[0] ?? new MediaStream([event.track])
+        videoRef.current.srcObject =
+          event.streams[0] ?? new MediaStream([event.track])
         void videoRef.current.play().catch(() => undefined)
       })
       peer.addEventListener('connectionstatechange', () => {
         if (cancelled || !peer) return
         if (peer.connectionState === 'connected') {
           setState('playing')
-        } else if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') {
+        } else if (
+          peer.connectionState === 'failed' ||
+          peer.connectionState === 'disconnected'
+        ) {
           setState('error')
           setMessage('A conexão de vídeo foi interrompida.')
         }
@@ -102,7 +114,8 @@ export function LiveVideo({
       const offer = await peer.createOffer()
       await peer.setLocalDescription(offer)
       await waitForIceGathering(peer, abortController.signal)
-      if (!peer.localDescription?.sdp) throw new Error('Não foi possível criar a oferta WebRTC.')
+      if (!peer.localDescription?.sdp)
+        throw new Error('Não foi possível criar a oferta WebRTC.')
 
       const response = await fetch(endpoint.value.url, {
         method: 'POST',
@@ -112,12 +125,17 @@ export function LiveVideo({
           Accept: 'application/sdp',
         },
         body: peer.localDescription.sdp,
-        signal: AbortSignal.any([abortController.signal, AbortSignal.timeout(10_000)]),
+        signal: AbortSignal.any([
+          abortController.signal,
+          AbortSignal.timeout(10_000),
+        ]),
       })
-      if (!response.ok) throw new Error(`O stream respondeu com HTTP ${response.status}.`)
+      if (!response.ok)
+        throw new Error(`O stream respondeu com HTTP ${response.status}.`)
 
       const location = response.headers.get('Location')
-      if (location) sessionUrl = new URL(location, endpoint.value.url).toString()
+      if (location)
+        sessionUrl = new URL(location, endpoint.value.url).toString()
       const answer = await response.text()
       if (cancelled) return
       await peer.setRemoteDescription({ type: 'answer', sdp: answer })
@@ -127,14 +145,16 @@ export function LiveVideo({
     void connectionTask.catch((error: unknown) => {
       if (cancelled) return
       setState('error')
-      setMessage(error instanceof Error ? error.message : 'Falha ao abrir o vídeo.')
+      setMessage(
+        error instanceof Error ? error.message : 'Falha ao abrir o vídeo.',
+      )
     })
 
     return () => {
       cancelled = true
       abortController.abort()
       peer?.close()
-      if (videoRef.current) videoRef.current.srcObject = null
+      if (video) video.srcObject = null
       const release = connectionTask
         .catch(() => undefined)
         .then(async () => {
@@ -147,8 +167,10 @@ export function LiveVideo({
           }
           if (mediaRequested) await window.api.media.release(cameraId, profile)
         })
+        .catch(() => undefined)
         .finally(() => {
-        if (pendingReleases.get(cameraId) === release) pendingReleases.delete(cameraId)
+          if (pendingReleases.get(cameraId) === release)
+            pendingReleases.delete(cameraId)
         })
       pendingReleases.set(cameraId, release)
     }
@@ -165,7 +187,10 @@ export function LiveVideo({
         playsInline
       />
       {state !== 'playing' && (
-        <div className={`camera-video-placeholder live-video-status live-video-${state}`} role="status">
+        <div
+          className={`camera-video-placeholder live-video-status live-video-${state}`}
+          role="status"
+        >
           <CameraIcon size={36} />
           <span>{message}</span>
           {state === 'error' && (
@@ -174,6 +199,7 @@ export function LiveVideo({
               className="btn btn-secondary btn-sm"
               onClick={() => setRetryAttempt((attempt) => attempt + 1)}
             >
+              <WifiIcon size={14} />
               Tentar novamente
             </button>
           )}

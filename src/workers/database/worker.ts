@@ -43,9 +43,14 @@ export class SqliteWorker {
   open(dbPath: string, backupDir?: string): void {
     if (this.db) throw new Error("Worker já inicializado.");
     const db = new DatabaseConstructor(dbPath) as Database.Database;
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    runMigrations(db, { dbPath, backupDir }, this.migrations);
+    try {
+      db.pragma("journal_mode = WAL");
+      db.pragma("foreign_keys = ON");
+      runMigrations(db, { dbPath, backupDir }, this.migrations);
+    } catch (error) {
+      db.close();
+      throw error;
+    }
     this.db = db;
     this.repos = {
       cameras: new CameraRepository(db),

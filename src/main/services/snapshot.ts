@@ -34,6 +34,7 @@ export interface SnapshotFetchOptions {
     status: number
     ok: boolean
     headers?: Record<string, string>
+    body?: ReadableStream<Uint8Array> | null
     arrayBuffer(): Promise<ArrayBuffer>
   }>
 }
@@ -51,7 +52,9 @@ export interface SnapshotSaveResult {
   capturedAt: string
 }
 
-export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buffer> {
+export async function fetchSnapshot(
+  options: SnapshotFetchOptions,
+): Promise<Buffer> {
   const fetchImpl =
     options.fetchImpl ??
     (async (url, init) => {
@@ -60,6 +63,7 @@ export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buff
         status: response.status,
         ok: response.ok,
         headers: Object.fromEntries(response.headers.entries()),
+        body: response.body,
         arrayBuffer: () => response.arrayBuffer(),
       }
     })
@@ -69,26 +73,25 @@ export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buff
     headers.Authorization = `Basic ${Buffer.from(`${options.username}:${options.password ?? ''}`).toString('base64')}`
   }
 
+  const signal = AbortSignal.timeout(options.timeoutMs ?? 8_000)
   let response
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 8_000)
-    try {
-      response = await fetchImpl(options.url, {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      })
-    } finally {
-      clearTimeout(timer)
-    }
+    response = await fetchImpl(options.url, {
+      method: 'GET',
+      headers,
+      signal,
+    })
   } catch {
-    throw new SnapshotError('Falha ao acessar o endpoint de snapshot.', 'FETCH_FAILED')
+    throw new SnapshotError(
+      'Falha ao acessar o endpoint de snapshot.',
+      'FETCH_FAILED',
+    )
   }
 
   if (response.status === 401 && options.username) {
     const challenge =
-      response.headers?.['www-authenticate'] ?? response.headers?.['WWW-Authenticate']
+      response.headers?.['www-authenticate'] ??
+      response.headers?.['WWW-Authenticate']
     if (challenge && /^Digest/i.test(challenge)) {
       const authorization = buildDigestAuthorization(
         challenge,
@@ -97,34 +100,63 @@ export async function fetchSnapshot(options: SnapshotFetchOptions): Promise<Buff
         options.password ?? '',
       )
       if (authorization) {
+        await response.body?.cancel()
         response = await fetchImpl(options.url, {
           method: 'GET',
           headers: { Authorization: `Digest ${authorization}` },
-          signal: AbortSignal.timeout(options.timeoutMs ?? 8_000),
+          signal,
         })
       }
     }
   }
 
   if (response.status === 401 || response.status === 403) {
+    await response.body?.cancel()
     throw new SnapshotError('Autenticação rejeitada.', 'AUTH_FAILED')
   }
   if (!response.ok) {
-    throw new SnapshotError(`Endpoint respondeu com status ${response.status}.`, 'FETCH_FAILED')
+    await response.body?.cancel()
+    throw new SnapshotError(
+      `Endpoint respondeu com status ${response.status}.`,
+      'FETCH_FAILED',
+    )
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer())
-
-  const magic = buffer.subarray(0, 4)
-  const isJpeg = JPEG_MAGIC.equals(magic.subarray(0, 3))
-  const isPng = PNG_MAGIC.equals(magic)
-  if (!isJpeg && !isPng) {
-    throw new SnapshotError('Tipo de imagem não permitido.', 'INVALID_TYPE')
-  }
-  if (buffer.byteLength > MAX_SNAPSHOT_BYTES) {
+  const contentLength = Number(
+    response.headers?.['content-length'] ??
+      response.headers?.['Content-Length'],
+  )
+  if (contentLength > MAX_SNAPSHOT_BYTES) {
+    await response.body?.cancel()
     throw new SnapshotError('Snapshot acima do limite de tamanho.', 'TOO_LARGE')
   }
-
+  let buffer: Buffer
+  if (response.body) {
+    const reader = response.body.getReader()
+    const chunks: Buffer[] = []
+    let bytes = 0
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        bytes += value.byteLength
+        if (bytes > MAX_SNAPSHOT_BYTES) {
+          throw new SnapshotError(
+            'Snapshot acima do limite de tamanho.',
+            'TOO_LARGE',
+          )
+        }
+        chunks.push(Buffer.from(value))
+      }
+      buffer = Buffer.concat(chunks, bytes)
+    } finally {
+      await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
+    }
+  } else {
+    buffer = Buffer.from(await response.arrayBuffer())
+  }
+  validateSnapshotBuffer(buffer)
   return buffer
 }
 
@@ -142,7 +174,8 @@ function buildDigestAuthorization(
   const uri = `${url.pathname}${url.search}`
   const cnonce = randomBytes(8).toString('hex')
   const nc = '00000001'
-  const md5 = (value: string): string => createHash('md5').update(value).digest('hex')
+  const md5 = (value: string): string =>
+    createHash('md5').update(value).digest('hex')
   const ha1 = md5(`${username}:${realm}:${password}`)
   const ha2 = md5(`GET:${uri}`)
   const response = qop
@@ -176,9 +209,14 @@ export function validateSnapshotBuffer(buffer: Buffer): void {
   }
 }
 
-export function isPathInsideLibrary(libraryRoot: string, candidate: string): boolean {
+export function isPathInsideLibrary(
+  libraryRoot: string,
+  candidate: string,
+): boolean {
   const fromRoot = relative(resolve(libraryRoot), resolve(candidate))
-  return fromRoot !== '' && !fromRoot.startsWith('..') && !fromRoot.includes(':')
+  return (
+    fromRoot !== '' && !fromRoot.startsWith('..') && !fromRoot.includes(':')
+  )
 }
 
 export async function saveSnapshot(
@@ -196,11 +234,16 @@ export async function saveSnapshot(
     throw new SnapshotError('Caminho fora da biblioteca.', 'NOT_ALLOWED')
   }
 
-  await mkdir(resolve(options.libraryRoot, options.cameraId, date), { recursive: true })
+  await mkdir(resolve(options.libraryRoot, options.cameraId, date), {
+    recursive: true,
+  })
   try {
     await writeFile(absolutePath, buffer)
   } catch {
-    throw new SnapshotError('Não foi possível gravar o snapshot.', 'WRITE_FAILED')
+    throw new SnapshotError(
+      'Não foi possível gravar o snapshot.',
+      'WRITE_FAILED',
+    )
   }
 
   return {
@@ -214,6 +257,9 @@ export async function saveSnapshot(
 export function validateExtension(rawPath: string): void {
   const ext = extname(rawPath).toLowerCase()
   if (!ALLOWED_EXTENSIONS.has(ext)) {
-    throw new SnapshotError('Extensão de arquivo não permitida.', 'INVALID_TYPE')
+    throw new SnapshotError(
+      'Extensão de arquivo não permitida.',
+      'INVALID_TYPE',
+    )
   }
 }

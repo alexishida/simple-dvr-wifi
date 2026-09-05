@@ -12,6 +12,7 @@ import {
 } from "../icons.js";
 import { useAppStore } from "../store/appStore.js";
 import { LiveVideo } from "./LiveVideo.js";
+import { buildCameraSlots } from "../camera-layout.js";
 
 export type GridLayout = 2 | 3 | 4;
 
@@ -79,6 +80,7 @@ export function LayoutSwitcher({
             aria-label={`Grade ${option.label}`}
             onClick={() => onChange(option.value)}
           >
+            <DashboardIcon size={14} />
             {option.label}
           </button>
         ))}
@@ -495,37 +497,10 @@ export function MonitoringGrid({
   const [dragTargetPosition, setDragTargetPosition] = useState<number | null>(
     null,
   );
-  const gridSlots = useMemo(() => {
-    const activeCameras = cameras.filter((camera) => camera.active);
-    const camerasById = new Map(
-      activeCameras.map((camera) => [camera.id, camera]),
-    );
-    const savedSlots = cameraLayout[layout];
-    const usedCameraIds = new Set<string>();
-    const slots = savedSlots.map((cameraId) => {
-      if (!cameraId || usedCameraIds.has(cameraId)) return null;
-      const camera = camerasById.get(cameraId);
-      if (!camera) return null;
-      usedCameraIds.add(cameraId);
-      return camera;
-    });
-    const unplacedCameras = activeCameras.filter(
-      (camera) => !usedCameraIds.has(camera.id),
-    );
-    for (const camera of unplacedCameras) {
-      const emptyPosition = slots.findIndex((slot) => slot === null);
-      if (emptyPosition === -1) slots.push(camera);
-      else slots[emptyPosition] = camera;
-    }
-    const minimumSlots = layout * layout;
-    const fullRows = Math.ceil(activeCameras.length / layout) * layout;
-    const slotCount = Math.max(minimumSlots, fullRows);
-
-    return Array.from(
-      { length: slotCount },
-      (_, index) => slots[index] ?? null,
-    );
-  }, [cameraLayout, cameras, layout]);
+  const gridSlots = useMemo(
+    () => buildCameraSlots(cameras, cameraLayout[layout], layout),
+    [cameraLayout, cameras, layout],
+  );
   const activeCameraCount = cameras.filter((camera) => camera.active).length;
 
   const handleDropCamera = (

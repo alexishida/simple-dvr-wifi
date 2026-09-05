@@ -67,6 +67,12 @@ npm run dev
 npm run typecheck
 npm run lint
 
+# Testes de regressão (inclui SQLite na ABI do Electron)
+npm test
+
+# Suíte local completa: build, regressões, PTZ, segurança, binários e lint
+npm run test:all
+
 # Build (typecheck + electron-vite)
 npm run build
 ```
@@ -106,10 +112,17 @@ empacotamento:
 
 ## Verificações operacionais
 
+`npm test` verifica encerramento de processos, RTSP,
+snapshots, leitura parcial de gravações, posições da grade e backups SQLite
+com dados no WAL, persistência cifrada e remoção de segredos em diagnósticos.
+Os testes usam diretórios temporários e servidores locais;
+o teste de segurança também mantém seus dados separados do banco do usuário.
+As verificações automatizadas não substituem a validação com câmeras reais.
+
 | Comando                      | O que verifica                                              |
 | ---------------------------- | ----------------------------------------------------------- |
 | `npm run security:smoke`     | Abertura, CSP, preload e banco no renderer empacotado       |
-| `npm run security:checklist` | Checklist de segurança/privacidade contra o build candidato |
+| `npm run security:checklist` | Runtime, hashes do pacote e fuses; requer `PACKAGED_EXE` |
 | `npm run verify:binaries`    | Presença e hash dos binários de mídia                       |
 
 ## Scripts de release
@@ -121,7 +134,11 @@ empacotamento:
 | `npm run release:gate`    | Bloqueia release com componente não aprovado               |
 | `npm run release:assets`  | Gera SBOM, licenças, NOTICE e fontes de binários           |
 | `npm run smoke:package`   | Smoke test do pacote Windows empacotado                    |
-| `npm run smoke:installed` | Smoke test do aplicativo instalado (defina `PACKAGED_EXE`) |
+
+Para verificar um executável instalado, use `smoke:package` com `PACKAGED_EXE`
+apontando para ele. O antigo `smoke:installed` duplicava esse teste e foi removido.
+Esses testes verificam o runtime em um perfil temporário; não validam o instalador
+nem comprovam compatibilidade com uma máquina limpa.
 
 ---
 

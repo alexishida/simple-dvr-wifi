@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
-import { mkdirSync, copyFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { SCHEMA_MIGRATIONS_DDL, SCHEMA_V1_DDL } from './schema.js'
 
@@ -27,14 +28,19 @@ export interface MigrationResult {
 function currentVersion(db: Database.Database): number {
   db.exec(SCHEMA_MIGRATIONS_DDL)
   const row = db
-    .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations')
+    .prepare(
+      'SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations',
+    )
     .get() as {
     version: number
   }
   return row.version
 }
 
-export function integrityCheck(db: Database.Database): { ok: boolean; results: string[] } {
+export function integrityCheck(db: Database.Database): {
+  ok: boolean
+  results: string[]
+} {
   const rows = db.pragma('integrity_check') as { integrity_check: string }[]
   const results = rows.map((row) => row.integrity_check)
   return { ok: results.every((r) => r === 'ok'), results }
@@ -54,16 +60,14 @@ export function runMigrations(
 
   for (const migration of pending) {
     if (migration.destructive && options.dbPath && options.backupDir) {
-      backupPath = createBackup(options.dbPath, options.backupDir, migration.version)
+      backupPath = createBackup(db, options.backupDir, migration.version)
     }
 
     db.transaction(() => {
       migration.up(db)
-      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
-        migration.version,
-        migration.name,
-        new Date().toISOString(),
-      )
+      db.prepare(
+        'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)',
+      ).run(migration.version, migration.name, new Date().toISOString())
     })()
 
     applied.push(migration.version)
@@ -72,11 +76,19 @@ export function runMigrations(
   return { applied, backupPath }
 }
 
-export function createBackup(dbPath: string, backupDir: string, forVersion: number): string {
+export function createBackup(
+  db: Database.Database,
+  backupDir: string,
+  forVersion: number,
+): string {
   const resolvedDir = dirname(join(backupDir, 'placeholder'))
   mkdirSync(resolvedDir, { recursive: true })
-  const target = join(backupDir, `db-v${forVersion}-${Date.now()}.sqlite`)
-  copyFileSync(dbPath, target)
+  const target = join(
+    backupDir,
+    `db-v${forVersion}-${Date.now()}-${randomUUID()}.sqlite`,
+  )
+  // Copy the live SQLite snapshot, including committed pages still in the WAL.
+  db.prepare('VACUUM INTO ?').run(target)
   return target
 }
 

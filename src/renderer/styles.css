@@ -1837,6 +1837,160 @@ p {
   opacity: 0.5;
 }
 
+.snapshot-list {
+  grid-template-columns: repeat(auto-fill, 18rem);
+  justify-content: start;
+}
+
+.snapshot-card {
+  width: 18rem;
+  height: 19rem;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  overflow: hidden;
+}
+
+.snapshot-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  cursor: pointer;
+}
+
+.snapshot-preview:hover {
+  border-color: var(--color-accent);
+}
+
+.snapshot-preview-image {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+}
+
+.snapshot-preview-image.is-loaded {
+  opacity: 1;
+}
+
+.snapshot-preview-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.snapshot-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.snapshot-card .library-item-icon {
+  width: 36px;
+  height: 36px;
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface));
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 25%,
+    var(--color-border)
+  );
+}
+
+.snapshot-card-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.snapshot-card-label {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.snapshot-card-title {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshot-card-capture {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.snapshot-card-capture time {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.snapshot-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.snapshot-card-actions .btn {
+  min-height: 2.25rem;
+  white-space: nowrap;
+}
+
+.snapshot-card-actions .btn svg {
+  flex-shrink: 0;
+}
+
+.snapshot-card-open {
+  flex: 1;
+  color: var(--color-accent);
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 30%,
+    var(--color-border)
+  );
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface));
+}
+
+.snapshot-card-open:hover {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 15%, var(--color-surface));
+}
+
+.snapshot-card-delete {
+  background: transparent;
+  border-color: transparent;
+}
+
+.snapshot-card-delete:hover {
+  border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+}
+
+.snapshot-card-actions .btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .library-pagination {
   display: flex;
   align-items: center;
@@ -1956,6 +2110,11 @@ p {
   .library-list {
     grid-template-columns: 1fr;
     padding: var(--space-4);
+  }
+
+  .snapshot-list {
+    grid-template-columns: 18rem;
+    justify-content: center;
   }
 
   .library-pagination {

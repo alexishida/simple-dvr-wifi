@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
+import { connect as createTlsConnection } from "node:tls";
 
 export type ProbeResult =
   "ok" | "unreachable" | "timeout" | "auth_error" | "unsupported";
@@ -99,12 +100,16 @@ export async function probeRtsp(
         checkOptions.timeoutMs,
       );
       try {
-        const connection = await probeRtspTcp(checkOptions, controller.signal);
-        clearTimeout(timer);
-        return connection;
+        const signal = checkOptions.signal
+          ? AbortSignal.any([checkOptions.signal, controller.signal])
+          : controller.signal;
+        return await probeRtspTcp(checkOptions, signal);
       } catch {
+        return controller.signal.aborted || checkOptions.signal?.aborted
+          ? "timeout"
+          : "unreachable";
+      } finally {
         clearTimeout(timer);
-        return "unreachable";
       }
     });
 
@@ -126,38 +131,64 @@ async function probeRtspTcp(
   const uri = `${url.protocol}//${url.host}${path}`;
   const username = (options.username ?? url.username) || null;
   const password = (options.password ?? url.password) || null;
+  signal.throwIfAborted();
 
   const socket = await new Promise<import("node:net").Socket>(
     (resolve, reject) => {
-      const sock = createConnection({
-        host: url.hostname,
-        port: Number(url.port || 554),
-      });
+      const connectionOptions = {
+        host: url.hostname.replace(/^\[|\]$/g, ""),
+        port: Number(url.port || (url.protocol === "rtsps:" ? 322 : 554)),
+        signal,
+      };
+      const secure = url.protocol === "rtsps:";
+      const sock = secure
+        ? createTlsConnection(connectionOptions)
+        : createConnection(connectionOptions);
       sock.setTimeout(options.timeoutMs);
-      sock.once("connect", () => {
+      const onClose = (): void => reject(new Error("closed"));
+      const onTimeout = (): void => {
+        sock.destroy();
+        reject(new Error("timeout"));
+      };
+      sock.once("close", onClose);
+      sock.once("timeout", onTimeout);
+      sock.once(secure ? "secureConnect" : "connect", () => {
         sock.removeListener("error", reject);
+        sock.removeListener("close", onClose);
+        sock.removeListener("timeout", onTimeout);
         resolve(sock);
       });
       sock.once("error", reject);
-      signal.addEventListener("abort", () => sock.destroy(), { once: true });
     },
   );
 
   try {
+    let sequence = 0;
     const describe = (
       authorization: string | null,
     ): Promise<{ status: number; text: string }> =>
       new Promise((resolve, reject) => {
         const headers = [
           `DESCRIBE ${uri} RTSP/1.0`,
-          "CSeq: 1",
+          `CSeq: ${++sequence}`,
           "User-Agent: SimpleDvrWifi",
           "Accept: application/sdp",
         ];
         if (authorization) headers.push(`Authorization: ${authorization}`);
-        socket.write(headers.join("\r\n") + "\r\n\r\n");
+        let received = Buffer.alloc(0);
         const onData = (data: Buffer): void => {
-          const text = data.toString("utf8");
+          if (received.length + data.length > 1024 * 1024) {
+            onError();
+            return;
+          }
+          received = Buffer.concat([received, data]);
+          const headerEnd = received.indexOf("\r\n\r\n");
+          if (headerEnd < 0) return;
+          const text = received.subarray(0, headerEnd).toString("utf8");
+          const bodyLength = Number(
+            /Content-Length:\s*(\d+)/i.exec(text)?.[1] ?? 0,
+          );
+          if (received.length < headerEnd + 4 + bodyLength) return;
           cleanup();
           const statusMatch = /^RTSP\/1\.0 (\d{3})/.exec(text);
           resolve({ status: statusMatch ? Number(statusMatch[1]) : 0, text });
@@ -184,6 +215,7 @@ async function probeRtspTcp(
         socket.once("error", onError);
         socket.once("timeout", onTimeout);
         socket.once("close", onClose);
+        socket.write(headers.join("\r\n") + "\r\n\r\n");
       });
 
     const first = await describe(null);

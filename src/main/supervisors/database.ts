@@ -16,9 +16,28 @@ type Pending = {
 export class DatabaseSupervisor {
   private readonly pending = new Map<string, Pending>()
   private sequence = 0
+  private closed = false
 
   constructor(private readonly transport: DatabaseWorkerTransport) {
     this.transport.onMessage((response) => this.resolve(response))
+    this.transport.onExit(() => this.finishPending())
+  }
+
+  private unavailable(id: string): DbResponse {
+    return {
+      id,
+      ok: false,
+      error: {
+        code: 'STORAGE_ERROR',
+        message: 'Worker de banco indisponível.',
+        retryable: false,
+      },
+    }
+  }
+
+  private finishPending(): void {
+    this.closed = true
+    for (const id of this.pending.keys()) this.resolve(this.unavailable(id))
   }
 
   private resolve(response: DbResponse): void {
@@ -29,9 +48,14 @@ export class DatabaseSupervisor {
     entry.resolve(response)
   }
 
-  request(op: string, payload: unknown, timeoutMs = 5_000): Promise<DbResponse> {
+  request(
+    op: string,
+    payload: unknown,
+    timeoutMs = 5_000,
+  ): Promise<DbResponse> {
     const id = `${++this.sequence}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
     const request: DbRequest = { id, op, payload }
+    if (this.closed) return Promise.resolve(this.unavailable(id))
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -39,23 +63,33 @@ export class DatabaseSupervisor {
         resolve({
           id,
           ok: false,
-          error: { code: 'NETWORK_ERROR', message: 'Timeout do worker de banco.', retryable: true },
+          error: {
+            code: 'NETWORK_ERROR',
+            message: 'Timeout do worker de banco.',
+            retryable: true,
+          },
         })
       }, timeoutMs)
       this.pending.set(id, { resolve, timer })
-      this.transport.postMessage(request)
+      try {
+        this.transport.postMessage(request)
+      } catch {
+        this.resolve(this.unavailable(id))
+      }
     })
   }
 
   async healthCheck(timeoutMs = 2_000): Promise<boolean> {
     const response = await this.request('health', undefined, timeoutMs)
-    return response.ok && (response as { value?: { ready?: boolean } }).value?.ready === true
+    return (
+      response.ok &&
+      (response as { value?: { ready?: boolean } }).value?.ready === true
+    )
   }
 
   async close(timeoutMs = 2_000): Promise<void> {
     await this.request('close', undefined, timeoutMs)
-    for (const entry of this.pending.values()) clearTimeout(entry.timer)
-    this.pending.clear()
+    this.finishPending()
   }
 
   async shutdown(timeoutMs = 2_000): Promise<void> {
@@ -67,7 +101,9 @@ export class DatabaseSupervisor {
   }
 }
 
-export function createInMemoryTransport(worker: SqliteWorker): DatabaseWorkerTransport {
+export function createInMemoryTransport(
+  worker: SqliteWorker,
+): DatabaseWorkerTransport {
   const listeners: Array<(response: DbResponse) => void> = []
   let closed = false
 
@@ -86,7 +122,11 @@ export function createInMemoryTransport(worker: SqliteWorker): DatabaseWorkerTra
               listener({
                 id: request.id,
                 ok: false,
-                error: { code: 'INTERNAL_ERROR', message: 'Falha do worker.', retryable: false },
+                error: {
+                  code: 'INTERNAL_ERROR',
+                  message: 'Falha do worker.',
+                  retryable: false,
+                },
               })
             }
           }

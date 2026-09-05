@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, relative, isAbsolute } from "node:path";
 
 const root = process.cwd();
 
@@ -30,6 +31,17 @@ if (!executable) {
 }
 
 const userData = mkdtempSync(join(tmpdir(), "swc-pkg-"));
+process.once("exit", () => {
+  const childPath = relative(tmpdir(), userData);
+  if (childPath && !childPath.startsWith("..") && !isAbsolute(childPath)) {
+    rmSync(userData, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  }
+});
 const environment = {
   ...process.env,
   ELECTRON_SECURITY_SMOKE: "1",
@@ -68,9 +80,9 @@ child.once("exit", (code) => {
   }
   const capabilities = JSON.parse(marker[1]);
   const checks = {
-    hasRequire: !capabilities.hasRequire,
-    hasProcess: !capabilities.hasProcess,
-    hasIpcRenderer: !capabilities.hasIpcRenderer,
+    hasRequire: capabilities.hasRequire === false,
+    hasProcess: capabilities.hasProcess === false,
+    hasIpcRenderer: capabilities.hasIpcRenderer === false,
     inlineScriptBlocked: capabilities.inlineScriptBlocked,
     remoteResourceBlocked: capabilities.remoteResourceBlocked,
     databaseWorkerOk: capabilities.databaseWorkerOk,
@@ -78,12 +90,31 @@ child.once("exit", (code) => {
   };
 
   const resources = packagedResourcesDir(executable);
-  const mediaBinaries = {
-    mediamtx: existsSync(join(resources, "mediamtx", "win32", "mediamtx.exe")),
-    ffmpeg: existsSync(join(resources, "ffmpeg", "win32", "ffmpeg.exe")),
-  };
+  const manifest = JSON.parse(
+    readFileSync(join(resources, "media-binaries.json"), "utf8"),
+  );
+  for (const component of manifest.components) {
+    const path = join(
+      resources,
+      component.id,
+      component.platform,
+      component.fileName,
+    );
+    if (component.status !== "approved") {
+      checks[`${component.id}:não redistribuído sem aprovação`] =
+        !existsSync(path);
+      continue;
+    }
+    checks[`${component.id}:hash`] =
+      existsSync(path) &&
+      Boolean(component.fileSha256) &&
+      createHash("sha256")
+        .update(readFileSync(path))
+        .digest("hex")
+        .toLowerCase() === component.fileSha256.toLowerCase();
+  }
 
-  const failed = Object.entries(checks).filter(([, ok]) => !ok);
+  const failed = Object.entries(checks).filter(([, ok]) => ok !== true);
   if (failed.length > 0) {
     console.error("--- falhas de smoke test ---");
     for (const [name, ok] of failed) console.error(`${name}: ${ok}`);
@@ -91,17 +122,6 @@ child.once("exit", (code) => {
   }
 
   console.log(
-    `Smoke test do pacote Windows passou. MediaMTX presente: ${mediaBinaries.mediamtx}; FFmpeg presente: ${mediaBinaries.ffmpeg}.`,
+    "Smoke test do pacote passou: renderer, CSP, preload, banco e hashes dos binários aprovados.",
   );
-  if (!mediaBinaries.mediamtx) {
-    console.warn(
-      "Aviso: binário MediaMTX ausente no pacote. A validação de hash é gate obrigatório (verify-media-binaries).",
-    );
-  }
-  if (!mediaBinaries.ffmpeg) {
-    console.warn(
-      "Aviso: FFmpeg ausente; redistribuição permanece pendente de aprovação de licença.",
-    );
-  }
-  rmSync(userData, { recursive: true, force: true });
 });

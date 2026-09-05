@@ -9,6 +9,8 @@
     "node": ">=22 <26"
   },
   "scripts": {
+    "test": "node scripts/run-regression-tests.mjs",
+    "test:all": "npm run build && npm test && node scripts/verify-ptz-onvif.mjs && node scripts/electron-security-smoke.mjs && npm run verify:binaries && npm run lint",
     "dev": "node scripts/dev.mjs",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
@@ -25,7 +27,6 @@
     "rebuild:native": "node scripts/rebuild-native.mjs",
     "verify:binaries": "node scripts/verify-media-binaries.mjs",
     "smoke:package": "node scripts/package-smoke.mjs",
-    "smoke:installed": "node scripts/installed-smoke.mjs",
     "security:checklist": "node scripts/security-checklist.mjs",
     "release:assets": "node scripts/generate-release-assets.mjs",
     "release:gate": "node scripts/release-gate.mjs"

@@ -1,10 +1,11 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { resolve, isAbsolute } from 'node:path'
+import { resolve, isAbsolute, relative, sep } from 'node:path'
 
 export class FfmpegError extends Error {
   constructor(
     message: string,
-    public readonly code: 'TIMEOUT' | 'FORCED_KILL' | 'EXIT' | 'INVALID_ARG' | 'CONFINED',
+    public readonly code:
+      'TIMEOUT' | 'FORCED_KILL' | 'EXIT' | 'INVALID_ARG' | 'CONFINED',
   ) {
     super(message)
   }
@@ -27,27 +28,38 @@ export interface FfmpegRunResult {
   durationMs: number
 }
 
-const SHELL_METACHARACTERS = /[;&|`$(){}<>*\n\r]/
-
 export function assertSafeArguments(args: string[]): void {
   for (const arg of args) {
-    if (SHELL_METACHARACTERS.test(arg)) {
-      throw new FfmpegError('Argumento contém metacaracteres de shell.', 'INVALID_ARG')
+    if (arg.includes('\0')) {
+      throw new FfmpegError('Argumento contém caractere nulo.', 'INVALID_ARG')
     }
   }
 }
 
-export function assertConfinedOutputPath(path: string, allowedOutputDirs: string[]): string {
+export function assertConfinedOutputPath(
+  path: string,
+  allowedOutputDirs: string[],
+): string {
   const resolved = resolve(path)
   if (!isAbsolute(path)) {
     throw new FfmpegError('Caminho de saída deve ser absoluto.', 'CONFINED')
   }
   const ok = allowedOutputDirs.some((dir) => {
     const root = resolve(dir)
-    return resolved === root || resolved.startsWith(root + '\\') || resolved.startsWith(root + '/')
+    const fromRoot = relative(root, resolved)
+    return (
+      fromRoot !== '' &&
+      fromRoot !== '..' &&
+      !fromRoot.startsWith(`..${sep}`) &&
+      !isAbsolute(fromRoot) &&
+      !fromRoot.includes(':')
+    )
   })
   if (!ok) {
-    throw new FfmpegError('Caminho de saída fora dos diretórios permitidos.', 'CONFINED')
+    throw new FfmpegError(
+      'Caminho de saída fora dos diretórios permitidos.',
+      'CONFINED',
+    )
   }
   return resolved
 }
@@ -69,8 +81,8 @@ export class FfmpegRunner {
     const startedAt = Date.now()
 
     assertSafeArguments(input.args)
+    assertConfinedOutputPath(input.args.at(-1) ?? '', input.allowedOutputDirs)
     for (const arg of input.args) {
-      if (arg.startsWith('-') || arg.includes(':')) continue
       if (isAbsolute(arg)) {
         assertConfinedOutputPath(arg, input.allowedOutputDirs)
       }
@@ -85,43 +97,44 @@ export class FfmpegRunner {
     const key = `${child.pid ?? Math.random()}`
     this.running.set(key, child)
 
-    let output = ''
+    const outputChunks: Buffer[] = []
+    let outputBytes = 0
     const onData = (chunk: Buffer): void => {
-      output += chunk.toString('utf8')
-      if (Buffer.byteLength(output, 'utf8') > maxOutputBytes) {
-        output = output.slice(0, maxOutputBytes)
+      const remaining = maxOutputBytes - outputBytes
+      if (remaining > 0) {
+        const part = chunk.subarray(0, remaining)
+        outputChunks.push(part)
+        outputBytes += part.length
       }
     }
     child.stdout?.on('data', onData)
     child.stderr?.on('data', onData)
 
-    const timedOut = await new Promise<boolean>((resolveTimeout) => {
-      const timer = setTimeout(() => {
-        child.kill()
-        resolveTimeout(true)
-      }, timeoutMs)
-
-      child.once('exit', () => {
-        clearTimeout(timer)
-        resolveTimeout(false)
-      })
-    })
-
-    // If timed out, wait for grace then force kill
-    if (timedOut) {
-      await new Promise((resolveGrace) => {
-        const grace = setTimeout(() => {
-          child.kill('SIGKILL')
-          resolveGrace(null)
-        }, killGraceMs)
-        child.once('exit', () => {
-          clearTimeout(grace)
-          resolveGrace(null)
+    let timedOut = false
+    try {
+      await new Promise<void>((resolveClose, reject) => {
+        let grace: NodeJS.Timeout | undefined
+        const timer = setTimeout(() => {
+          timedOut = true
+          child.kill()
+          grace = setTimeout(() => child.kill('SIGKILL'), killGraceMs)
+        }, timeoutMs)
+        const cleanup = (): void => {
+          clearTimeout(timer)
+          if (grace) clearTimeout(grace)
+        }
+        child.once('error', () => {
+          cleanup()
+          reject(new FfmpegError('Não foi possível executar o FFmpeg.', 'EXIT'))
+        })
+        child.once('close', () => {
+          cleanup()
+          resolveClose()
         })
       })
+    } finally {
+      this.running.delete(key)
     }
-
-    this.running.delete(key)
 
     const exitCode = child.exitCode ?? null
     const killed = timedOut || child.signalCode !== null
@@ -134,7 +147,7 @@ export class FfmpegRunner {
       exitCode,
       killed,
       timedOut,
-      output,
+      output: Buffer.concat(outputChunks, outputBytes).toString('utf8'),
       durationMs: Date.now() - startedAt,
     }
   }

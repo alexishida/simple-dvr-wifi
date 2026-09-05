@@ -36,6 +36,42 @@ function formatDuration(durationMs: number | null): string {
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+function SnapshotPreview({
+  snapshotId,
+  cameraName,
+}: {
+  snapshotId: string;
+  cameraName: string;
+}): React.JSX.Element {
+  const [status, setStatus] = useState<"loading" | "loaded" | "error">(
+    "loading",
+  );
+
+  return (
+    <>
+      {status !== "error" && (
+        <img
+          className={`snapshot-preview-image${status === "loaded" ? " is-loaded" : ""}`}
+          src={`app://renderer/media/snapshots/${encodeURIComponent(snapshotId)}`}
+          alt={`Snapshot da câmera ${cameraName}`}
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setStatus("loaded")}
+          onError={() => setStatus("error")}
+        />
+      )}
+      {status !== "loaded" && (
+        <span className="snapshot-preview-placeholder" role="status">
+          <ImageIcon size={28} />
+          <span>
+            {status === "loading" ? "Carregando foto…" : "Foto indisponível"}
+          </span>
+        </span>
+      )}
+    </>
+  );
+}
+
 function RecordingPreview({
   recordingId,
   cameraName,
@@ -118,17 +154,23 @@ export function LibraryView({
       mode === "snapshots"
         ? window.api.library.snapshots(cameraId)
         : window.api.library.recordings(cameraId);
-    void request.then((result) => {
-      if (!active) return;
-      if (!result.ok) {
-        setError(result.error.message);
-      } else if (mode === "snapshots") {
-        setSnapshots(result.value as SnapshotRecord[]);
-      } else {
-        setRecordings(result.value as RecordingLibraryItem[]);
-      }
-      setLoading(false);
-    });
+    void request
+      .then((result) => {
+        if (!active) return;
+        if (!result.ok) {
+          setError(result.error.message);
+        } else if (mode === "snapshots") {
+          setSnapshots(result.value as SnapshotRecord[]);
+        } else {
+          setRecordings(result.value as RecordingLibraryItem[]);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setError("Não foi possível carregar a biblioteca.");
+        setLoading(false);
+      });
     return () => {
       active = false;
     };
@@ -149,35 +191,10 @@ export function LibraryView({
       return;
     }
 
-    let active = true;
-    let objectUrl: string | null = null;
-    setPlaybackUrl(null);
     setPlaybackError(null);
-
-    void window.api.library
-      .readRecording(playingRecording.id)
-      .then((result) => {
-        if (!active) return;
-        if (!result.ok) {
-          setPlaybackError(result.error.message);
-          return;
-        }
-        objectUrl = URL.createObjectURL(
-          new Blob([Uint8Array.from(result.value.data)], {
-            type: result.value.mimeType,
-          }),
-        );
-        setPlaybackUrl(objectUrl);
-      })
-      .catch(() => {
-        if (active)
-          setPlaybackError("Não foi possível carregar o arquivo de vídeo.");
-      });
-
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
+    setPlaybackUrl(
+      `app://renderer/media/recordings/${encodeURIComponent(playingRecording.id)}`,
+    );
   }, [playingRecording]);
 
   const cameraNames = useMemo(
@@ -364,35 +381,56 @@ export function LibraryView({
         </div>
       ) : (
         <>
-          <ul className="library-list">
+          <ul
+            className={`library-list${mode === "snapshots" ? " snapshot-list" : ""}`}
+          >
             {mode === "snapshots"
               ? visibleSnapshots.map((snapshot) => (
-                  <li key={snapshot.id} className="library-item">
-                    <div className="library-item-top">
+                  <li key={snapshot.id} className="library-item snapshot-card">
+                    <button
+                      type="button"
+                      className="snapshot-preview"
+                      aria-label={`Abrir foto de ${cameraNames.get(snapshot.cameraId) ?? "Câmera removida"}, capturada em ${formatDate(snapshot.capturedAt)}`}
+                      onClick={() =>
+                        void window.api.library.openSnapshot(snapshot.path)
+                      }
+                    >
+                      <SnapshotPreview
+                        snapshotId={snapshot.id}
+                        cameraName={
+                          cameraNames.get(snapshot.cameraId) ??
+                          "Câmera removida"
+                        }
+                      />
+                    </button>
+                    <div className="snapshot-card-header">
                       <span className="library-item-icon">
-                        <ImageIcon size={20} />
+                        <CameraIcon size={20} />
                       </span>
-                      <span className="library-item-kind">Snapshot</span>
-                    </div>
-                    <div className="library-item-body">
-                      <p className="library-item-detail">
-                        <span>Câmera</span>
-                        <strong>
+                      <div className="snapshot-card-heading">
+                        <span className="snapshot-card-label">Câmera</span>
+                        <h3
+                          className="snapshot-card-title"
+                          title={
+                            cameraNames.get(snapshot.cameraId) ??
+                            "Câmera removida"
+                          }
+                        >
                           {cameraNames.get(snapshot.cameraId) ??
                             "Câmera removida"}
-                        </strong>
-                      </p>
-                      <p className="library-item-detail">
-                        <span>Capturada em</span>
-                        <time dateTime={snapshot.capturedAt}>
-                          {formatDate(snapshot.capturedAt)}
-                        </time>
-                      </p>
+                        </h3>
+                        <div className="snapshot-card-capture">
+                          <span>Capturada em</span>
+                          <time dateTime={snapshot.capturedAt}>
+                            {formatDate(snapshot.capturedAt)}
+                          </time>
+                        </div>
+                      </div>
                     </div>
-                    <div className="library-item-actions">
+                    <div className="snapshot-card-actions">
                       <button
                         type="button"
-                        className="btn btn-secondary library-item-action"
+                        className="btn btn-secondary snapshot-card-open"
                         onClick={() =>
                           void window.api.library.openSnapshot(snapshot.path)
                         }
@@ -402,7 +440,7 @@ export function LibraryView({
                       </button>
                       <button
                         type="button"
-                        className="btn btn-danger library-item-action"
+                        className="btn btn-secondary btn-danger snapshot-card-delete"
                         disabled={deletingId === snapshot.id}
                         onClick={() => void deleteSnapshot(snapshot)}
                       >

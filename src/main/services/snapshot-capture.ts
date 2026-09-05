@@ -1,4 +1,9 @@
-import { fetchSnapshot, saveSnapshot, SnapshotError, type SnapshotSaveResult } from './snapshot.js'
+import {
+  fetchSnapshot,
+  saveSnapshot,
+  SnapshotError,
+  type SnapshotSaveResult,
+} from './snapshot.js'
 import type { SnapshotFetchOptions } from './snapshot.js'
 import type { FfmpegRunner } from '../../workers/media/ffmpeg-runner.js'
 
@@ -49,7 +54,10 @@ export async function captureSnapshot(
   }
 
   if (!options.rtspUrl) {
-    throw new SnapshotError('Nenhum endpoint de snapshot disponível.', 'FETCH_FAILED')
+    throw new SnapshotError(
+      'Nenhum endpoint de snapshot disponível.',
+      'FETCH_FAILED',
+    )
   }
 
   const saved = await captureFrameFromStream({
@@ -72,30 +80,52 @@ async function captureFrameFromStream(options: {
   ffmpegRunner?: FfmpegRunner
 }): Promise<SnapshotSaveResult> {
   const { FfmpegRunner } = await import('../../workers/media/ffmpeg-runner.js')
-  const { mkdtempSync } = await import('node:fs')
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
 
-  const runner = options.ffmpegRunner ?? new FfmpegRunner(options.ffmpegBinary ?? 'ffmpeg')
-  const outputDir = options.outputDir ?? mkdtempSync(join(tmpdir(), 'swc-frame-'))
+  const runner =
+    options.ffmpegRunner ?? new FfmpegRunner(options.ffmpegBinary ?? 'ffmpeg')
+  const outputDir = await mkdtemp(
+    join(options.outputDir ?? tmpdir(), 'swc-frame-'),
+  )
 
-  const outputPath = join(outputDir, 'frame.jpg')
-  const result = await runner.run({
-    binaryPath: options.ffmpegBinary ?? 'ffmpeg',
-    args: ['-i', options.rtspUrl, '-frames:v', '1', '-q:v', '2', '-y', outputPath],
-    allowedOutputDirs: [outputDir],
-    timeoutMs: 10_000,
-  })
+  try {
+    const outputPath = join(outputDir, 'frame.jpg')
+    const result = await runner.run({
+      binaryPath: options.ffmpegBinary ?? 'ffmpeg',
+      args: [
+        '-i',
+        options.rtspUrl,
+        '-frames:v',
+        '1',
+        '-q:v',
+        '2',
+        '-y',
+        outputPath,
+      ],
+      allowedOutputDirs: [outputDir],
+      timeoutMs: 10_000,
+    })
 
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw new SnapshotError('Falha ao capturar frame via FFmpeg.', 'FETCH_FAILED')
+    if (result.exitCode !== 0 || result.timedOut) {
+      throw new SnapshotError(
+        'Falha ao capturar frame via FFmpeg.',
+        'FETCH_FAILED',
+      )
+    }
+
+    const buffer = await readFile(outputPath)
+    if (buffer.byteLength === 0) {
+      throw new SnapshotError('Frame capturado está vazio.', 'FETCH_FAILED')
+    }
+
+    return await saveSnapshot(buffer, {
+      cameraId: options.cameraId,
+      libraryRoot: options.libraryRoot,
+    })
+  } finally {
+    // Only remove the unique directory created for this capture.
+    await rm(outputDir, { recursive: true, force: true })
   }
-
-  const { readFile } = await import('node:fs/promises')
-  const buffer = await readFile(outputPath)
-  if (buffer.byteLength === 0) {
-    throw new SnapshotError('Frame capturado está vazio.', 'FETCH_FAILED')
-  }
-
-  return saveSnapshot(buffer, { cameraId: options.cameraId, libraryRoot: options.libraryRoot })
 }

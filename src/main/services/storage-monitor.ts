@@ -1,4 +1,4 @@
-import { stat, access, constants } from 'node:fs/promises'
+import { stat, statfs, access, constants } from 'node:fs/promises'
 
 export interface StorageStatus {
   path: string
@@ -18,22 +18,11 @@ export interface StorageProbe {
 }
 
 const SYSTEM_PROBE: StorageProbe = {
-  stat: async (path) => (await stat(path)) as unknown as ReturnType<StorageProbe['stat']>,
+  stat,
   access: (path, mode) => access(path, mode),
   diskFree: async (path) => {
-    const { execFile } = await import('node:child_process')
-    const { promisify } = await import('node:util')
-    const run = promisify(execFile)
-    if (process.platform === 'win32') {
-      const { stdout } = await run('powershell', [
-        '-NoProfile',
-        '-Command',
-        `Get-PSDrive -Name (Split-Path -Qualifier '${path}') | Select-Object -ExpandProperty Free`,
-      ])
-      const free = Number.parseFloat(stdout.trim()) || 0
-      return { free, total: free }
-    }
-    return { free: 0, total: 0 }
+    const disk = await statfs(path)
+    return { free: disk.bavail * disk.bsize, total: disk.blocks * disk.bsize }
   },
 }
 
@@ -96,7 +85,9 @@ export async function checkStorageStatus(
 }
 
 export function shouldAllowWrite(status: StorageStatus): boolean {
-  return status.exists && status.isDirectory && status.writable && !status.lowSpace
+  return (
+    status.exists && status.isDirectory && status.writable && !status.lowSpace
+  )
 }
 
 export function describeStorageProblem(status: StorageStatus): string | null {

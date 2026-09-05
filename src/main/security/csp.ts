@@ -7,8 +7,8 @@ export const CSP_DIRECTIVES = [
   "form-action 'none'",
   "script-src 'self'",
   "style-src 'self'",
-  "img-src 'self' data: blob:",
-  "media-src 'self' blob: http://127.0.0.1:* ws://127.0.0.1:*",
+  "img-src 'self' app://renderer data: blob:",
+  "media-src 'self' app://renderer blob: http://127.0.0.1:* ws://127.0.0.1:*",
   "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*",
 ].join("; ");
 

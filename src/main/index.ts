@@ -42,6 +42,7 @@ import { CameraManagementService } from "./services/camera-management.js";
 import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
 import { PtzControllerRegistry } from "./services/ptz-registry.js";
+import { recordingFileResponse } from "./services/recording-stream.js";
 import { AppConfigSchema, type AppConfig } from "../shared/config.js";
 import type { CameraEditDetails, CameraSummary } from "../shared/contracts.js";
 import type {
@@ -398,6 +399,17 @@ const projectRoot = resolve(__dirname, "../..");
 function registerApplicationProtocol(): void {
   protocol.handle("app", async (request) => {
     const url = new URL(request.url);
+    const snapshotMatch = url.pathname.match(
+      /^\/media\/snapshots\/([0-9a-f-]+)$/i,
+    );
+    if (
+      url.hostname === "renderer" &&
+      snapshotMatch &&
+      !url.search &&
+      !url.hash
+    ) {
+      return snapshotResponse(request, snapshotMatch[1]!);
+    }
     const recordingMatch = url.pathname.match(
       /^\/media\/recordings\/([0-9a-f-]+)$/i,
     );
@@ -420,6 +432,47 @@ function registerApplicationProtocol(): void {
     headers.set("X-Content-Type-Options", "nosniff");
     return new Response(response.body, { status: response.status, headers });
   });
+}
+
+async function snapshotResponse(
+  request: GlobalRequest,
+  id: string,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return new Response("Method not allowed", {
+      status: 405,
+      headers: { Allow: "GET" },
+    });
+  }
+  if (!z.string().uuid().safeParse(id).success || !database || !config) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  try {
+    const result = await database.request("snapshot.get", { id });
+    const snapshot = result.ok ? (result.value as SnapshotRecord | null) : null;
+    if (!snapshot) return new Response("Not found", { status: 404 });
+
+    const root = resolve(
+      config.snapshotDir || resolve(userDataPath, "snapshots"),
+    );
+    const target = await resolveLibraryFile(
+      root,
+      snapshot.path,
+      new Set([".jpg", ".jpeg", ".png"]),
+    );
+    const response = await net.fetch(pathToFileURL(target).toString());
+    const headers = new Headers(response.headers);
+    headers.set(
+      "Content-Type",
+      extname(target).toLowerCase() === ".png" ? "image/png" : "image/jpeg",
+    );
+    headers.set("X-Content-Type-Options", "nosniff");
+    headers.set("Cache-Control", "no-store");
+    return new Response(response.body, { status: response.status, headers });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
 }
 
 async function recordingResponse(
@@ -451,65 +504,10 @@ async function recordingResponse(
       first.path,
       new Set([".mp4", ".m4s"]),
     );
-    const contents = await readFile(target);
-    const range = parseByteRange(request.headers.get("range"), contents.length);
-    const headers = new Headers({
-      "Accept-Ranges": "bytes",
-      "Content-Type":
-        extname(target).toLowerCase() === ".mp4"
-          ? "video/mp4"
-          : "video/iso.segment",
-    });
-
-    if (range === null) {
-      headers.set("Content-Length", String(contents.length));
-      return new Response(contents, { status: 200, headers });
-    }
-    if (range === "invalid") {
-      headers.set("Content-Range", `bytes */${contents.length}`);
-      return new Response(null, { status: 416, headers });
-    }
-
-    const { start, end } = range;
-    headers.set("Content-Length", String(end - start + 1));
-    headers.set("Content-Range", `bytes ${start}-${end}/${contents.length}`);
-    return new Response(contents.subarray(start, end + 1), {
-      status: 206,
-      headers,
-    });
+    return await recordingFileResponse(request, target);
   } catch {
     return new Response("Not found", { status: 404 });
   }
-}
-
-function parseByteRange(
-  value: string | null,
-  size: number,
-): { start: number; end: number } | "invalid" | null {
-  if (!value) return null;
-  const match = /^bytes=(\d*)-(\d*)$/i.exec(value);
-  if (!match || size === 0) return "invalid";
-
-  const [, startValue, endValue] = match;
-  if (!startValue && !endValue) return "invalid";
-  if (!startValue) {
-    const suffixLength = Number(endValue);
-    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return "invalid";
-    return { start: Math.max(0, size - suffixLength), end: size - 1 };
-  }
-
-  const start = Number(startValue);
-  const end = endValue ? Number(endValue) : size - 1;
-  if (
-    !Number.isSafeInteger(start) ||
-    !Number.isSafeInteger(end) ||
-    start < 0 ||
-    end < start ||
-    start >= size
-  ) {
-    return "invalid";
-  }
-  return { start, end: Math.min(end, size - 1) };
 }
 
 function configureSessionSecurity(): void {
@@ -579,9 +577,6 @@ function runSecuritySmokeIfRequested(window: BrowserWindow): void {
 
       await new Promise((resolve) => setTimeout(resolve, 500))
       result.inlineScriptBlocked = globalThis.__cspInlineSentinel === 'blocked'
-      result.remoteImageBlocked = remoteImage.readyState === 'uninitialized'
-      result.remoteScriptBlocked = remoteScript.readyState === 'uninitialized'
-      result.remoteFetchBlocked = true
       return JSON.stringify(result)
     })()`;
 
@@ -596,6 +591,7 @@ function runSecuritySmokeIfRequested(window: BrowserWindow): void {
           probeResult.databaseWorkerOk = health;
         }
         console.log(`__SECURITY_SMOKE__${JSON.stringify(probeResult)}`);
+        await performShutdown();
         app.exit(0);
       })
       .catch((error: unknown) => {
@@ -1513,9 +1509,12 @@ function registerIpcHandlers(): void {
       if (!response.ok || !response.value)
         throw new Error("Gravação não encontrada.");
 
-      const segmentsResponse = await database.request("recording.segment.list", {
-        recordingId: id,
-      });
+      const segmentsResponse = await database.request(
+        "recording.segment.list",
+        {
+          recordingId: id,
+        },
+      );
       const first = segmentsResponse.ok
         ? (segmentsResponse.value as RecordingSegmentRecord[])[0]
         : undefined;

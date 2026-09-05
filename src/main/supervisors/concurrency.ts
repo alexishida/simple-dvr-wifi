@@ -22,10 +22,19 @@ export async function withConcurrencyLimit<T>(
 
 export class TaskPool {
   private active = 0
-  private readonly queue: Array<() => void> = []
+  private readonly queue: Array<{
+    start: () => void
+    reject: (error: Error) => void
+  }> = []
   private readonly controller = new AbortController()
 
-  constructor(private readonly limit: number) {}
+  constructor(private readonly limit: number) {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RangeError(
+        'O limite de concorrência deve ser um inteiro positivo.',
+      )
+    }
+  }
 
   get activeCount(): number {
     return this.active
@@ -39,24 +48,26 @@ export class TaskPool {
     if (this.controller.signal.aborted) {
       throw new ConcurrencyLimitExceededError()
     }
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const tryStart = (): void => {
         if (this.active < this.limit) {
           this.active++
           resolve()
         } else {
-          this.queue.push(tryStart)
+          this.queue.push({ start: tryStart, reject })
         }
       }
       tryStart()
     })
 
     try {
+      if (this.controller.signal.aborted)
+        throw new ConcurrencyLimitExceededError()
       return await task(this.controller.signal)
     } finally {
       this.active--
       const next = this.queue.shift()
-      if (next) next()
+      if (next) next.start()
     }
   }
 
@@ -75,6 +86,8 @@ export class TaskPool {
 
   abort(): void {
     this.controller.abort()
-    this.queue.splice(0)
+    for (const entry of this.queue.splice(0)) {
+      entry.reject(new ConcurrencyLimitExceededError())
+    }
   }
 }

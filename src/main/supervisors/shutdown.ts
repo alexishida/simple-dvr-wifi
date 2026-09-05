@@ -25,8 +25,9 @@ export class ShutdownCoordinator {
     if (this.shuttingDown) return []
     this.shuttingDown = true
 
+    let timer: NodeJS.Timeout
     const timeout = new Promise<'timeout'>((resolve) => {
-      setTimeout(() => resolve('timeout'), timeoutMs).unref()
+      timer = setTimeout(() => resolve('timeout'), timeoutMs)
     })
 
     const stopped: string[] = []
@@ -35,21 +36,16 @@ export class ShutdownCoordinator {
         await processHandle.stop()
         stopped.push(processHandle.name)
       } catch {
-        stopped.push(processHandle.name)
+        console.error(`Falha ao encerrar recurso: ${processHandle.name}`)
       }
     })
 
-    const result = await Promise.race([Promise.all(stopping).then(() => 'done'), timeout])
-
-    if (result === 'timeout') {
-      for (const processHandle of this.managed.values()) {
-        processHandle.stop()
-      }
-    }
+    await Promise.race([Promise.all(stopping), timeout])
+    clearTimeout(timer!)
 
     this.managed.clear()
     this.shuttingDown = false
-    return stopped
+    return [...stopped]
   }
 }
 

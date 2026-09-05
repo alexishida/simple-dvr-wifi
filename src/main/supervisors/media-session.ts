@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   generateMediaMtxConfig,
@@ -57,7 +58,6 @@ export class MediaSession {
   };
   private circuitOpen = false;
   private circuitTimer: NodeJS.Timeout | null = null;
-  private healthTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
   private configResult: ReturnType<typeof generateMediaMtxConfig> | null = null;
   private startPromise: Promise<MediaSessionStatus> | null = null;
@@ -76,7 +76,14 @@ export class MediaSession {
           pid: child.pid,
           kill: () => child.kill(),
           onExit: (callback) => {
-            child.once("exit", () => callback());
+            let notified = false;
+            const notify = (): void => {
+              if (notified) return;
+              notified = true;
+              callback();
+            };
+            child.once("error", notify);
+            child.once("exit", notify);
           },
         };
       },
@@ -108,7 +115,10 @@ export class MediaSession {
 
   async start(): Promise<MediaSessionStatus> {
     if (this.startPromise) return this.startPromise;
-    const attempt = this.startInternal();
+    const attempt = this.startInternal().catch(async () => {
+      await this.handleCrash("Não foi possível preparar a sessão MediaMTX.");
+      return this.status;
+    });
     this.startPromise = attempt;
     try {
       return await attempt;
@@ -129,11 +139,11 @@ export class MediaSession {
     }
 
     // Validate hash before executing the binary
-    const { readFileSync } = await import("node:fs");
     let binaryBuffer: Buffer;
     try {
-      binaryBuffer = readFileSync(this.options.binaryPath);
+      binaryBuffer = await readFile(this.options.binaryPath);
     } catch {
+      if (this.stopped) return this.status;
       this.status = {
         state: "crashed",
         restarts: this.status.restarts,
@@ -142,6 +152,7 @@ export class MediaSession {
       return this.status;
     }
 
+    if (this.stopped) return this.status;
     if (
       this.options.expectedHash &&
       sha256OfFile(binaryBuffer).toLowerCase() !==
@@ -157,6 +168,8 @@ export class MediaSession {
 
     const tokens = generateSessionTokens();
     const httpPort = await availablePortBlock();
+    if (this.stopped) return this.status;
+    this.cleanupConfig();
     this.configResult = generateMediaMtxConfig({
       rtspUrl: this.options.rtspUrl,
       path: this.options.path,
@@ -199,9 +212,10 @@ export class MediaSession {
     if (!this.options.processFactory) {
       const ready = await waitForHttpListener(
         httpPort,
-        () => this.exited,
+        () => this.exited || this.stopped,
         this.configResult.apiToken,
       );
+      if (this.stopped || this.process !== processHandle) return this.status;
       if (!ready) {
         await this.handleCrash(
           "MediaMTX não iniciou; verifique a configuração e o log do sidecar.",
@@ -215,7 +229,6 @@ export class MediaSession {
       restarts: this.status.restarts,
       error: null,
     };
-    this.startHealthCheck();
     return this.status;
   }
 
@@ -271,14 +284,6 @@ export class MediaSession {
     return false;
   }
 
-  private startHealthCheck(): void {
-    if (this.healthTimer) clearInterval(this.healthTimer);
-    this.healthTimer = setInterval(() => {
-      // no-op; real liveness is driven by onExit events
-    }, 1_000);
-    this.healthTimer.unref?.();
-  }
-
   private async handleCrash(error: string): Promise<void> {
     if (this.stopped || this.status.state === "stopping") return;
     this.status = {
@@ -315,10 +320,6 @@ export class MediaSession {
   }
 
   private cleanupProcess(): void {
-    if (this.healthTimer) {
-      clearInterval(this.healthTimer);
-      this.healthTimer = null;
-    }
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -353,7 +354,7 @@ export class MediaSession {
   }
 
   kill(): void {
-    this.cleanupProcess();
+    void this.stop();
   }
 }
 
@@ -390,7 +391,7 @@ async function availablePortBlock(): Promise<number> {
     const ports = [base, base + 1, base + 3, base + 4];
     const servers = ports.map(() => createServer());
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         servers.map(
           (server, index) =>
             new Promise<void>((resolve, reject) => {
@@ -399,6 +400,7 @@ async function availablePortBlock(): Promise<number> {
             }),
         ),
       );
+      if (results.some((result) => result.status === "rejected")) continue;
       return base;
     } catch {
       // retry another block
@@ -475,8 +477,8 @@ export class MediaSessionSupervisor {
   async release(cameraId: string): Promise<void> {
     const session = this.sessions.get(cameraId);
     if (!session) return;
-    await session.stop();
     this.sessions.delete(cameraId);
+    await session.stop();
   }
 
   async shutdown(): Promise<void> {

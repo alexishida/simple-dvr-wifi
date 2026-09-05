@@ -37,7 +37,7 @@ for (const component of manifest.components) {
     continue;
   }
   if (!component.fileSha256) {
-    warnings.push(
+    failures.push(
       `${component.id} (${component.platform}) presente, mas sem fileSha256 registrado; hash efetivo ${sha256OfFile(
         binaryPath,
       )} deve ser fixado no manifesto.`,

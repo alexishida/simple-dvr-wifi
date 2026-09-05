@@ -1,7 +1,10 @@
 import type { CameraStatus, FailureCategory } from './camera-state-machine.js'
 import { CameraStateMachine } from './camera-state-machine.js'
 import { ExponentialBackoff, type BackoffClock } from './backoff.js'
-import type { MediaSessionSupervisor, MediaSessionStatus } from './media-session.js'
+import type {
+  MediaSessionSupervisor,
+  MediaSessionStatus,
+} from './media-session.js'
 
 export interface ReconnectMediaSessionOptions {
   cameraId: string
@@ -66,6 +69,7 @@ export class ReconnectingMediaSession {
         this.options.rtspUrl,
         this.options.path,
       )
+      if (this.cancelled) return this.stateMachine.current
 
       if (this.mediaState.state === 'running') {
         this.stateMachine.transition({ type: 'connect_success' })
@@ -87,26 +91,27 @@ export class ReconnectingMediaSession {
 
   private scheduleReconnect(): void {
     if (this.cancelled) return
-    this.stateMachine.transition({ type: 'reconnect_start' })
+    this.clearStabilityTimer()
     const delay = this.backoff.schedule(() => {
       void this.connect()
     })
-    void delay
+    if (delay !== null)
+      this.stateMachine.transition({ type: 'reconnect_start' })
   }
 
   private scheduleStabilityReset(): void {
-    if (this.stabilityTimer !== null && this.options.clock) {
-      this.options.clock.clearTimeout(this.stabilityTimer)
-    }
+    this.clearStabilityTimer()
     const stabilityMs = this.options.stabilityMs ?? 30_000
     const clock = this.options.clock
     if (clock) {
       this.stabilityTimer = clock.setTimeout(() => {
+        this.stabilityTimer = null
         this.backoff.reset()
         this.stateMachine.transition({ type: 'stable' })
       }, stabilityMs)
     } else {
       this.stabilityTimer = setTimeout(() => {
+        this.stabilityTimer = null
         this.backoff.reset()
         this.stateMachine.transition({ type: 'stable' })
       }, stabilityMs)
@@ -116,15 +121,18 @@ export class ReconnectingMediaSession {
   onPipelineFailure(category: FailureCategory): void {
     if (this.cancelled) return
     this.stateMachine.transition({ type: 'failure', category })
-    this.stateMachine.transition({ type: 'reconnect_start' })
-    this.backoff.schedule(() => {
-      void this.connect()
-    })
+    this.scheduleReconnect()
   }
 
   async stop(): Promise<void> {
     this.cancelled = true
     this.backoff.cancel()
+    this.clearStabilityTimer()
+    this.stateMachine.transition({ type: 'disable' })
+    await this.options.supervisor.release(this.options.cameraId)
+  }
+
+  private clearStabilityTimer(): void {
     if (this.stabilityTimer !== null) {
       if (this.options.clock) {
         this.options.clock.clearTimeout(this.stabilityTimer)
@@ -133,8 +141,6 @@ export class ReconnectingMediaSession {
       }
       this.stabilityTimer = null
     }
-    this.stateMachine.transition({ type: 'disable' })
-    await this.options.supervisor.release(this.options.cameraId)
   }
 
   private categoryForMediaState(state: MediaSessionStatus): FailureCategory {
