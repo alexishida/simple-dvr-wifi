@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, relative, isAbsolute } from 'node:path'
 
@@ -17,6 +17,10 @@ if (!existsSync(electronExecutable) || !existsSync(mainEntry)) {
 
 const testRoot = tmpdir()
 const userData = mkdtempSync(join(testRoot, 'dvr-security-smoke-'))
+const softwareRendering = process.argv.includes('--software-rendering')
+if (softwareRendering) {
+  writeFileSync(join(userData, 'hardware-acceleration.json'), JSON.stringify({ enabled: false }))
+}
 const environment = {
   ...process.env,
   ELECTRON_SECURITY_SMOKE: '1',
@@ -70,7 +74,10 @@ child.once('exit', (code) => {
   }
 
   const capabilities = JSON.parse(marker[1])
+  console.log('GPU features:', JSON.stringify(capabilities.gpuFeatureStatus))
   if (
+    capabilities.hardwareAccelerationRequested !== !softwareRendering ||
+    (softwareRendering && capabilities.gpuFeatureStatus.gpu_compositing === 'enabled') ||
     capabilities.hasRequire !== false ||
     capabilities.hasProcess !== false ||
     capabilities.hasIpcRenderer !== false ||

@@ -1,6 +1,15 @@
 import { randomBytes, createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createReadStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
+
+export async function sha256OfPath(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  // Bounded chunks avoid retaining one full executable per camera and yield
+  // between reads so simultaneous stream startup does not freeze the main loop.
+  await pipeline(createReadStream(path), hash);
+  return hash.digest("hex");
+}
 
 export const LOOPBACK_ADDRESS = "127.0.0.1";
 

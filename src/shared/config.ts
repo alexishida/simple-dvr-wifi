@@ -48,7 +48,7 @@ export const CONFIG_DEFAULTS: AppConfig = {
   streams: {
     behavior: 'sub-first',
     maxTranscodes: 2,
-    enableHardwareAcceleration: false,
+    enableHardwareAcceleration: true,
   },
   log: {
     level: 'info',

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { CameraIcon, WifiIcon } from '../icons.js'
 
 interface LiveVideoProps {
@@ -10,6 +10,15 @@ interface LiveVideoProps {
 
 type PlayerState = 'connecting' | 'playing' | 'error'
 const pendingReleases = new Map<string, Promise<unknown>>()
+
+function subscribeVisibility(onChange: () => void): () => void {
+  document.addEventListener('visibilitychange', onChange)
+  return () => document.removeEventListener('visibilitychange', onChange)
+}
+
+function isVisible(): boolean {
+  return document.visibilityState !== 'hidden'
+}
 
 function waitForIceGathering(
   peer: RTCPeerConnection,
@@ -42,7 +51,7 @@ function waitForIceGathering(
   })
 }
 
-export function LiveVideo({
+export const LiveVideo = memo(function LiveVideo({
   cameraId,
   cameraName,
   profile,
@@ -53,8 +62,11 @@ export function LiveVideo({
   const [state, setState] = useState<PlayerState>('connecting')
   const [message, setMessage] = useState('Conectando ao stream…')
   const [retryAttempt, setRetryAttempt] = useState(0)
+  const visible = useSyncExternalStore(subscribeVisibility, isVisible)
 
   useEffect(() => {
+    // Release only the viewer. Main keeps any recording session alive.
+    if (!visible) return
     let cancelled = false
     let peer: RTCPeerConnection | null = null
     let sessionUrl: string | null = null
@@ -91,7 +103,6 @@ export function LiveVideo({
       bearerToken = endpoint.value.token
       peer = new RTCPeerConnection({ iceServers: [] })
       peer.addTransceiver('video', { direction: 'recvonly' })
-      peer.addTransceiver('audio', { direction: 'recvonly' })
       peer.addEventListener('track', (event) => {
         if (cancelled || !videoRef.current) return
         videoRef.current.srcObject =
@@ -174,7 +185,7 @@ export function LiveVideo({
         })
       pendingReleases.set(cameraId, release)
     }
-  }, [cameraId, profile, retryAttempt])
+  }, [cameraId, profile, retryAttempt, visible, videoRef])
 
   return (
     <div className="live-video">
@@ -207,4 +218,4 @@ export function LiveVideo({
       )}
     </div>
   )
-}
+})

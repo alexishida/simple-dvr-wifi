@@ -1,12 +1,11 @@
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   generateMediaMtxConfig,
   generateSessionTokens,
   mediaMtxBinaryPath,
-  sha256OfFile,
+  sha256OfPath,
 } from "../../workers/media/mediamtx-config.js";
 import { sanitizeSidecarOutput } from "../logging/sanitizer.js";
 
@@ -139,9 +138,9 @@ export class MediaSession {
     }
 
     // Validate hash before executing the binary
-    let binaryBuffer: Buffer;
+    let binaryHash: string;
     try {
-      binaryBuffer = await readFile(this.options.binaryPath);
+      binaryHash = await sha256OfPath(this.options.binaryPath);
     } catch {
       if (this.stopped) return this.status;
       this.status = {
@@ -155,7 +154,7 @@ export class MediaSession {
     if (this.stopped) return this.status;
     if (
       this.options.expectedHash &&
-      sha256OfFile(binaryBuffer).toLowerCase() !==
+      binaryHash.toLowerCase() !==
         this.options.expectedHash.toLowerCase()
     ) {
       this.status = {

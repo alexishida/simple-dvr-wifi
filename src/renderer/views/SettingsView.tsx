@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { CheckIcon } from '../icons.js'
 import {
   CONFIG_DEFAULTS,
   type AppConfig,
@@ -9,9 +10,10 @@ import {
 
 interface SettingsViewProps {
   initialConfig: AppConfig | null
+  onSaved: (config: AppConfig) => void
 }
 
-export function SettingsView({ initialConfig }: SettingsViewProps): React.JSX.Element {
+export function SettingsView({ initialConfig, onSaved }: SettingsViewProps): React.JSX.Element {
   const [config, setConfig] = useState<AppConfig>(initialConfig ?? CONFIG_DEFAULTS)
   const [saved, setSaved] = useState(false)
 
@@ -22,6 +24,7 @@ export function SettingsView({ initialConfig }: SettingsViewProps): React.JSX.El
   async function persist(): Promise<void> {
     const result = await window.api.config.save(config)
     if (result.ok && result.value.saved) {
+      onSaved(config)
       setSaved(true)
       setTimeout(() => setSaved(false), 2_000)
     }
@@ -218,13 +221,15 @@ export function SettingsView({ initialConfig }: SettingsViewProps): React.JSX.El
                 })
               }
             />
-            Aceleração de hardware
+            Aceleração de hardware quando disponível
           </label>
+          <p className="field-hint">Usa a GPU compatível para reprodução e interface. Alterações entram em vigor ao reiniciar o aplicativo.</p>
         </div>
       </section>
 
       <div className="settings-actions">
         <button className="btn btn-primary" type="button" onClick={() => void persist()}>
+          <CheckIcon size={16} />
           {saved ? 'Salvo' : 'Salvar configurações'}
         </button>
       </div>

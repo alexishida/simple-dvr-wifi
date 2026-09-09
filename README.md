@@ -41,6 +41,14 @@ localmente. Credenciais permanecem cifradas no computador do usuário.
 
 ### Limitações conhecidas
 
+- A aceleração de hardware fica habilitada por padrão e usa a GPU quando o
+  Chromium e o driver suportam o codec. A opção em **Configurações** passa a
+  valer após reiniciar o aplicativo. Sem suporte, a reprodução usa software.
+- Ao minimizar a janela, os players ao vivo são suspensos para economizar
+  recursos e reconectados ao restaurar. Gravações em andamento continuam.
+- O monitoramento é silencioso e negocia somente vídeo, evitando receber e
+  decodificar áudio que não seria reproduzido.
+
 - O substream depende de a câmera informar um perfil secundário via ONVIF; caso
   contrário, o aplicativo usa o stream principal.
 - O fallback de snapshot por RTSP requer `ffmpeg` disponível no `PATH`. O FFmpeg
@@ -69,6 +77,9 @@ npm run lint
 
 # Testes de regressão (inclui SQLite na ABI do Electron)
 npm test
+
+# Ciclo de vida do player: minimizar/restaurar, troca de perfil e cancelamento
+npm run test:player
 
 # Suíte local completa: build, regressões, PTZ, segurança, binários e lint
 npm run test:all

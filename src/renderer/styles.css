@@ -645,6 +645,12 @@ p {
   color: var(--color-text-secondary);
 }
 
+.field-hint {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
 .field-optional {
   margin-left: var(--space-1);
   color: var(--color-text-muted);

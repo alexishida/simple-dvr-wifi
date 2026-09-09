@@ -38,6 +38,10 @@ import { createUtilityProcessTransport } from "./supervisors/database-utility-pr
 import { CredentialService } from "./services/credentials.js";
 import { SafeStorageMasterKeyStore } from "./security/vault.js";
 import { ConfigRepository } from "./services/config.js";
+import {
+  loadHardwareAcceleration,
+  saveHardwareAcceleration,
+} from "./services/hardware-acceleration.js";
 import { CameraManagementService } from "./services/camera-management.js";
 import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
@@ -380,6 +384,8 @@ app.enableSandbox();
 if (process.env.SWC_TEST_USER_DATA) {
   app.setPath("userData", resolve(process.env.SWC_TEST_USER_DATA));
 }
+const hardwareAccelerationEnabled = loadHardwareAcceleration(app.getPath("userData"));
+if (!hardwareAccelerationEnabled) app.disableHardwareAcceleration();
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "app",
@@ -585,6 +591,8 @@ function runSecuritySmokeIfRequested(window: BrowserWindow): void {
       .then(async (result) => {
         await new Promise((resolve) => setTimeout(resolve, 200));
         const probeResult = JSON.parse(result as string);
+        probeResult.hardwareAccelerationRequested = hardwareAccelerationEnabled;
+        probeResult.gpuFeatureStatus = app.getGPUFeatureStatus();
         probeResult.remoteResourceBlocked = remoteRequests.size === 0;
         if (database) {
           const health = await database.healthCheck(3_000);
@@ -1651,6 +1659,10 @@ function registerIpcHandlers(): void {
       const parsed = AppConfigSchema.safeParse(incoming);
       if (!parsed.success) return { saved: false };
       await configRepository.save(parsed.data);
+      await saveHardwareAcceleration(
+        userDataPath,
+        parsed.data.streams.enableHardwareAcceleration,
+      );
       config = parsed.data;
       return { saved: true };
     },
@@ -1709,6 +1721,9 @@ async function initializeDatabase(): Promise<void> {
   cameraManagement = new CameraManagementService(database, credentials);
   configRepository = new ConfigRepository(database);
   config = await configRepository.load();
+  // This startup preference is authoritative; older versions only stored an
+  // unused checkbox in SQLite. Preserve their actual automatic GPU behavior.
+  config.streams.enableHardwareAcceleration = hardwareAccelerationEnabled;
   const cameraList = await database.request("camera.list", undefined);
   if (cameraList.ok) {
     for (const camera of cameraList.value as CameraRecord[]) {

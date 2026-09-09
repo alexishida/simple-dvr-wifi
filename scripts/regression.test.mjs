@@ -26,6 +26,72 @@ import { buildCameraSlots } from "../src/renderer/camera-layout.ts";
 import { recordingFileResponse } from "../src/main/services/recording-stream.ts";
 import { ShutdownCoordinator } from "../src/main/supervisors/shutdown.ts";
 import { sanitizeSidecarOutput } from "../src/main/logging/sanitizer.ts";
+import { createHash } from "node:crypto";
+import { sha256OfPath } from "../src/workers/media/mediamtx-config.ts";
+import {
+  loadHardwareAcceleration,
+  saveHardwareAcceleration,
+} from "../src/main/services/hardware-acceleration.ts";
+
+test("hardware preference defaults to automatic and persists opt-out across starts", async (t) => {
+  const directory = await temporaryDirectory(t);
+  assert.equal(loadHardwareAcceleration(directory), true);
+  await saveHardwareAcceleration(directory, false);
+  assert.equal(loadHardwareAcceleration(directory), false);
+  await saveHardwareAcceleration(directory, true);
+  assert.equal(loadHardwareAcceleration(directory), true);
+  await writeFile(join(directory, "hardware-acceleration.json"), "broken");
+  assert.equal(loadHardwareAcceleration(directory), true);
+  await writeFile(
+    join(directory, "hardware-acceleration.json"),
+    '{"enabled":"false"}',
+  );
+  assert.equal(loadHardwareAcceleration(directory), true);
+  assert.deepEqual(await readdir(directory), ["hardware-acceleration.json"]);
+});
+
+test("streamed executable hashing matches SHA-256 across chunk boundaries", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = join(directory, "fake.exe");
+  const contents = Buffer.alloc(256 * 1024 + 17, 0xa5);
+  await writeFile(binary, contents);
+  assert.equal(
+    await sha256OfPath(binary),
+    createHash("sha256").update(contents).digest("hex"),
+  );
+  await assert.rejects(sha256OfPath(join(directory, "missing.exe")));
+});
+
+test("media startup refuses a changed executable on every start", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = join(directory, "fake.exe");
+  await writeFile(binary, "original");
+  const expectedHash = await sha256OfPath(binary);
+  let spawned = 0;
+  const options = {
+    cameraId: "camera",
+    rtspUrl: "rtsp://camera/live",
+    path: "camera",
+    binaryPath: binary,
+    expectedHash,
+    configDir: directory,
+    processFactory: {
+      spawn() {
+        spawned++;
+        return { pid: 1, kill() {}, onExit() {} };
+      },
+    },
+  };
+  const first = new MediaSession(options);
+  t.after(() => first.stop());
+  assert.equal((await first.start()).state, "running");
+  await first.stop();
+  await writeFile(binary, "tampered");
+  const second = new MediaSession(options);
+  t.after(() => second.stop());
+  assert.equal((await second.start()).state, "crashed");
+  assert.equal(spawned, 1);
+});
 
 test("sidecar sanitization redacts injected secrets and preserves diagnostic context", () => {
   const output = sanitizeSidecarOutput(

@@ -213,7 +213,7 @@ export function App(): React.JSX.Element {
         {section === "snapshots" && (
           <LibraryView cameras={cameras} mode="snapshots" />
         )}
-        {section === "settings" && <SettingsView initialConfig={config} />}
+        {section === "settings" && <SettingsView initialConfig={config} onSaved={setConfig} />}
       </main>
     </div>
   );
