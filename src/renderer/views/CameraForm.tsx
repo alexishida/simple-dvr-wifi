@@ -1,5 +1,9 @@
 import { useState } from "react";
 import { parseHttpUrl, parseRtspUrl } from "../../shared/camera-urls.js";
+import {
+  CAMERA_PRESETS,
+  buildPresetRtspUrl,
+} from "../../shared/camera-presets.js";
 import { ActivityIcon, CheckIcon, CloseIcon } from "../icons.js";
 import type { CameraFormProps } from "./camera-types.js";
 
@@ -13,7 +17,14 @@ export function CameraForm({
   const [host, setHost] = useState(initial?.host ?? "");
   const [port, setPort] = useState(initial?.port?.toString() ?? "");
   const [onvifUrl, setOnvifUrl] = useState(initial?.onvifUrl ?? "");
-  const [rtspUrl, setRtspUrl] = useState(initial?.rtspUrl ?? "");
+  const [manualRtspUrl, setRtspUrl] = useState(initial?.rtspUrl ?? "");
+  const [presetId, setPresetId] = useState("");
+  const [channel, setChannel] = useState("1");
+  const [stream, setStream] = useState<"main" | "sub">("main");
+  const preset = CAMERA_PRESETS.find((item) => item.id === presetId);
+  const rtspUrl = preset
+    ? (buildPresetRtspUrl(preset, host, port, channel, stream) ?? "")
+    : manualRtspUrl;
   const [username, setUsername] = useState(initial?.username ?? "");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState<{
@@ -23,6 +34,25 @@ export function CameraForm({
   const [duplicate, setDuplicate] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+
+  function selectPreset(id: string): void {
+    // Keep the generated URL when switching to custom configuration.
+    if (!id) setRtspUrl(rtspUrl);
+    setPresetId(id);
+    setChannel("1");
+    setStream("main");
+    setMessage(null);
+    if (id) setPort((current) => current.trim() || "554");
+  }
+
+  function validatePreset(): boolean {
+    if (!preset || rtspUrl) return true;
+    setMessage({
+      kind: "error",
+      text: "Informe um IP ou hostname válido, porta de 1 a 65535 e canal de 1 a 999 para gerar a URL RTSP.",
+    });
+    return false;
+  }
 
   function applyRtspCredentials(raw: string): void {
     const parsed = parseRtspUrl(raw);
@@ -34,6 +64,8 @@ export function CameraForm({
   function applyRtspDetails(raw: string): void {
     const parsed = parseRtspUrl(raw);
     if (!parsed) return;
+
+    if (preset) return;
 
     setRtspUrl(parsed.sanitizedUrl);
     setHost((current) => current.trim() || parsed.host);
@@ -50,8 +82,13 @@ export function CameraForm({
 
   function applyOnvifDetails(raw: string): void {
     if (parseRtspUrl(raw)) {
+      setPresetId("");
       setOnvifUrl("");
-      applyRtspDetails(raw);
+      const parsed = parseRtspUrl(raw)!;
+      setRtspUrl(parsed.sanitizedUrl);
+      setHost((current) => current.trim() || parsed.host);
+      setPort((current) => current.trim() || String(parsed.port));
+      applyRtspCredentials(raw);
       setMessage({
         kind: "info",
         text: "URL RTSP movida para o campo RTSP; credenciais preenchidas.",
@@ -76,6 +113,7 @@ export function CameraForm({
   async function handleSubmit(event: React.FormEvent): Promise<void> {
     event.preventDefault();
     if (saving) return;
+    if (!validatePreset()) return;
     setMessage(null);
     setSaving(true);
 
@@ -114,6 +152,8 @@ export function CameraForm({
 
       const result = await window.api.cameras.create({
         name: name.trim(),
+        manufacturer: preset?.manufacturer ?? initial?.manufacturer ?? null,
+        model: preset?.model ?? initial?.model ?? null,
         host: host.trim() || parsedRtsp?.host || "",
         port: port ? Number(port) : (parsedRtsp?.port ?? null),
         epr: initial?.epr ?? null,
@@ -147,6 +187,7 @@ export function CameraForm({
 
   async function handleTestConnection(): Promise<void> {
     if (testing) return;
+    if (!validatePreset()) return;
     const rawRtspUrl = rtspUrl.trim();
     const parsedRtsp = rawRtspUrl ? parseRtspUrl(rawRtspUrl) : null;
     if (rawRtspUrl && !parsedRtsp) {
@@ -294,6 +335,83 @@ export function CameraForm({
         </section>
 
         <section className="camera-form-column" aria-label="URLs da câmera">
+          {!editingId && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="cam-model">
+                  Modelo / família
+                </label>
+                <select
+                  id="cam-model"
+                  className="field-input"
+                  value={presetId}
+                  onChange={(event) => selectPreset(event.target.value)}
+                  aria-describedby="cam-model-help"
+                >
+                  <option value="">Outro modelo / URL manual</option>
+                  {Array.from(
+                    new Set(CAMERA_PRESETS.map((item) => item.manufacturer)),
+                  ).map((manufacturer) => (
+                    <optgroup key={manufacturer} label={manufacturer}>
+                      {CAMERA_PRESETS.filter(
+                        (item) => item.manufacturer === manufacturer,
+                      ).map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {manufacturer} — {item.model}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <p id="cam-model-help" className="field-hint">
+                  {preset
+                    ? "URL preenchida automaticamente. Teste a conexão para confirmar a compatibilidade com o firmware. Editar a URL muda para configuração manual."
+                    : "Selecione o modelo para montar a URL RTSP com o endereço e a porta informados."}
+                  {preset?.hint && ` ${preset.hint}`}
+                </p>
+              </div>
+              {preset && (
+                <div className="field-row">
+                  {preset.channels && (
+                    <div className="field field-narrow">
+                      <label className="field-label" htmlFor="cam-channel">
+                        Canal
+                      </label>
+                      <input
+                        id="cam-channel"
+                        className="field-input"
+                        type="number"
+                        min={1}
+                        max={999}
+                        step={1}
+                        required
+                        value={channel}
+                        onChange={(event) => setChannel(event.target.value)}
+                      />
+                    </div>
+                  )}
+                  <div className="field">
+                    <label className="field-label" htmlFor="cam-stream">
+                      Stream
+                    </label>
+                    <select
+                      id="cam-stream"
+                      className="field-input"
+                      value={stream}
+                      onChange={(event) =>
+                        setStream(event.target.value as "main" | "sub")
+                      }
+                    >
+                      <option value="main">Principal</option>
+                      {preset.subPath && (
+                        <option value="sub">Secundário</option>
+                      )}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           <div className="field">
             <label className="field-label" htmlFor="cam-rtsp">
               URL RTSP <span className="field-optional">Opcional</span>
@@ -304,6 +422,7 @@ export function CameraForm({
               placeholder="rtsp://camera/stream"
               value={rtspUrl}
               onChange={(event) => {
+                setPresetId("");
                 setRtspUrl(event.target.value);
                 applyRtspCredentials(event.target.value);
               }}

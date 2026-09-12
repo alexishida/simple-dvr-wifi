@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { CameraIcon, WifiIcon } from '../icons.js'
 
 interface LiveVideoProps {
@@ -10,15 +10,6 @@ interface LiveVideoProps {
 
 type PlayerState = 'connecting' | 'playing' | 'error'
 const pendingReleases = new Map<string, Promise<unknown>>()
-
-function subscribeVisibility(onChange: () => void): () => void {
-  document.addEventListener('visibilitychange', onChange)
-  return () => document.removeEventListener('visibilitychange', onChange)
-}
-
-function isVisible(): boolean {
-  return document.visibilityState !== 'hidden'
-}
 
 function waitForIceGathering(
   peer: RTCPeerConnection,
@@ -62,11 +53,9 @@ export const LiveVideo = memo(function LiveVideo({
   const [state, setState] = useState<PlayerState>('connecting')
   const [message, setMessage] = useState('Conectando ao stream…')
   const [retryAttempt, setRetryAttempt] = useState(0)
-  const visible = useSyncExternalStore(subscribeVisibility, isVisible)
 
   useEffect(() => {
     // Release only the viewer. Main keeps any recording session alive.
-    if (!visible) return
     let cancelled = false
     let peer: RTCPeerConnection | null = null
     let sessionUrl: string | null = null
@@ -185,7 +174,7 @@ export const LiveVideo = memo(function LiveVideo({
         })
       pendingReleases.set(cameraId, release)
     }
-  }, [cameraId, profile, retryAttempt, visible, videoRef])
+  }, [cameraId, profile, retryAttempt, videoRef])
 
   return (
     <div className="live-video">

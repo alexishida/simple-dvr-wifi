@@ -9,6 +9,8 @@
     "node": ">=22 <26"
   },
   "scripts": {
+    "predev": "node scripts/generate-build-resources.mjs",
+    "prebuild": "node scripts/generate-build-resources.mjs",
     "test": "node scripts/run-regression-tests.mjs",
     "test:all": "npm run build && npm test && npm run test:player && node scripts/verify-ptz-onvif.mjs && node scripts/electron-security-smoke.mjs && npm run verify:binaries && npm run lint",
     "test:player": "node scripts/live-video-smoke.mjs",

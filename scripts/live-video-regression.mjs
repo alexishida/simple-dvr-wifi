@@ -94,26 +94,26 @@ export async function run() {
     render();
     check(acquisitions.length === 1, "Unchanged render restarted the stream");
     setVisibility("hidden");
-    await waitFor(() => releases.length === 1);
+    check(releases.length === 0, "Hidden player released the stream");
     check(
-      peers[0].connectionState === "closed",
-      "Hidden player retained its decoder",
+      peers[0].connectionState === "connected",
+      "Hidden player closed its connection",
     );
     setVisibility("visible");
-    await waitFor(() => peers[1]?.connectionState === "connected");
+    check(acquisitions.length === 1, "Visible player restarted the stream");
     render("main");
-    await waitFor(() => peers[2]?.connectionState === "connected");
+    await waitFor(() => peers[1]?.connectionState === "connected");
     check(
-      releases[1].profile === "sub",
+      releases[0].profile === "sub",
       "Profile change released the wrong session",
     );
     check(
-      acquisitions[2].profile === "main",
+      acquisitions[1].profile === "main",
       "Profile change ignored main stream",
     );
 
-    // Minimize/restore while acquire is pending: a late acquisition must be
-    // released before the replacement viewer starts (main uses a Set of viewers).
+    // Losing visibility while acquire is pending must not cancel or duplicate
+    // the viewer connection.
     delayAcquire = true;
     render("sub", "slow-camera");
     await waitFor(() => pendingAcquire);
@@ -121,17 +121,17 @@ export async function run() {
     setVisibility("visible");
     delayAcquire = false;
     pendingAcquire();
-    await waitFor(() => peers[3]?.connectionState === "connected");
+    await waitFor(() => peers[2]?.connectionState === "connected");
     check(
-      acquisitions.length === 5,
-      "Restore did not serialize pending acquisition",
+      acquisitions.length === 3,
+      "Visibility change duplicated pending acquisition",
     );
     check(
-      releases.some((item) => item.cameraId === "slow-camera"),
-      "Late acquisition leaked",
+      !releases.some((item) => item.cameraId === "slow-camera"),
+      "Visibility change released pending acquisition",
     );
     flushSync(() => root.unmount());
-    await waitFor(() => releases.length === 5);
+    await waitFor(() => releases.length === 3);
     check(
       peers.every((peer) => peer.connectionState === "closed"),
       "Unmount leaked a peer",

@@ -19,13 +19,11 @@ import {
   RecIcon,
   SettingsIcon,
 } from "./icons.js";
+import wordmarkUrl from "../../docs/logo/simple-dvr-wifi-wordmark.svg";
+import logoUrl from "../../docs/logo/simple-dvr-wifi-logo.svg";
 
 type Section =
-  | "dashboard"
-  | "cameras"
-  | "recordings"
-  | "snapshots"
-  | "settings";
+  "dashboard" | "cameras" | "recordings" | "snapshots" | "settings";
 
 const NAV_ITEMS: Array<{
   id: Section;
@@ -44,7 +42,7 @@ const SECTION_DESCRIPTIONS: Record<Section, string> = {
   cameras: "Gerencie câmeras cadastradas, edite e teste conexões.",
   recordings: "Gravações locais por câmera, data e horário.",
   snapshots: "Snapshots capturados por câmera.",
-  settings: "Tema, diretórios, reconexão e comportamento de streams.",
+  settings: "Ajuste as preferências do aplicativo, organizadas por categoria.",
 };
 
 function sectionTitle(section: Section): string {
@@ -130,6 +128,11 @@ export function App(): React.JSX.Element {
     });
   }, []);
 
+  useEffect(() => {
+    const favicon = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+    if (favicon) favicon.href = logoUrl;
+  }, []);
+
   if (fullscreenCamera) {
     return <FullscreenView camera={fullscreenCamera} />;
   }
@@ -138,13 +141,11 @@ export function App(): React.JSX.Element {
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <span className="sidebar-brand-icon" aria-hidden="true">
-            <CameraIcon size={20} />
-          </span>
-          <div>
-            <p className="sidebar-brand-name">Simple DVR Wi-Fi</p>
-            <p className="sidebar-brand-sub">Monitoramento local</p>
-          </div>
+          <img
+            className="sidebar-brand-wordmark"
+            src={wordmarkUrl}
+            alt="Simple DVR Wi-Fi"
+          />
         </div>
 
         <nav className="sidebar-nav" aria-label="Navegação principal">
@@ -213,7 +214,9 @@ export function App(): React.JSX.Element {
         {section === "snapshots" && (
           <LibraryView cameras={cameras} mode="snapshots" />
         )}
-        {section === "settings" && <SettingsView initialConfig={config} onSaved={setConfig} />}
+        {section === "settings" && (
+          <SettingsView initialConfig={config} onSaved={setConfig} />
+        )}
       </main>
     </div>
   );

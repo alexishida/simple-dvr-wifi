@@ -384,7 +384,9 @@ app.enableSandbox();
 if (process.env.SWC_TEST_USER_DATA) {
   app.setPath("userData", resolve(process.env.SWC_TEST_USER_DATA));
 }
-const hardwareAccelerationEnabled = loadHardwareAcceleration(app.getPath("userData"));
+const hardwareAccelerationEnabled = loadHardwareAcceleration(
+  app.getPath("userData"),
+);
 if (!hardwareAccelerationEnabled) app.disableHardwareAcceleration();
 protocol.registerSchemesAsPrivileged([
   {
@@ -617,6 +619,7 @@ function createMainWindow(): BrowserWindow {
     minHeight: 640,
     show: false,
     backgroundColor: "#101418",
+    icon: is.dev ? resolve(app.getAppPath(), "build", "icon.png") : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.cjs"),
       sandbox: true,

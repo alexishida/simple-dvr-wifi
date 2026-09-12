@@ -1,5 +1,81 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  CAMERA_PRESETS,
+  buildPresetRtspUrl,
+} from "../src/shared/camera-presets.ts";
+
+test("camera presets generate channel and stream conventions without credentials", () => {
+  const build = (
+    id,
+    channel = "1",
+    stream = "main",
+    host = "camera.local",
+    port = "",
+  ) =>
+    buildPresetRtspUrl(
+      CAMERA_PRESETS.find((preset) => preset.id === id),
+      host,
+      port,
+      channel,
+      stream,
+    );
+  assert.equal(
+    build("intelbras", "4", "sub"),
+    "rtsp://camera.local:554/cam/realmonitor?channel=4&subtype=1",
+  );
+  assert.equal(
+    build("hikvision", "12", "sub"),
+    "rtsp://camera.local:554/Streaming/Channels/1202",
+  );
+  assert.equal(
+    build("hanwha-nvr", "1"),
+    "rtsp://camera.local:554/LiveChannel/0/media.smp",
+  );
+  assert.equal(build("luxvision-ip", "2"), "rtsp://camera.local:554/ch02/0");
+  assert.equal(
+    build("tapo", "1", "sub", "192.168.1.20", "8554"),
+    "rtsp://192.168.1.20:8554/stream2",
+  );
+  assert.equal(
+    build("mibo"),
+    "rtsp://camera.local:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif",
+  );
+  assert.equal(
+    build("tapo", "1", "main", "2001:db8::1"),
+    "rtsp://[2001:db8::1]:554/stream1",
+  );
+  assert.equal(
+    build("tapo", "1", "main", "[2001:db8::1]"),
+    "rtsp://[2001:db8::1]:554/stream1",
+  );
+  for (const host of [
+    "",
+    "user:secret@camera",
+    "camera/path",
+    "camera?x=1",
+    "rtsp://camera",
+    "camera:554",
+    "bad host",
+    "camera#fragment",
+    "camera\\path",
+  ]) {
+    assert.equal(build("intelbras", "1", "main", host), null, host);
+  }
+  for (const port of ["0", "65536", "1.5", "no-port"]) {
+    assert.equal(build("tapo", "1", "main", "camera", port), null);
+  }
+  for (const channel of ["", "0", "-1", "1.5", "1000"]) {
+    assert.equal(build("intelbras", channel), null);
+  }
+  assert.equal(build("yoosee", "1", "sub"), null);
+  for (const preset of CAMERA_PRESETS) {
+    const url = new URL(build(preset.id));
+    assert.equal(url.username, "");
+    assert.equal(url.password, "");
+    assert.equal(url.href.includes("{"), false);
+  }
+});
 import { mkdtemp, readdir, rm, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
