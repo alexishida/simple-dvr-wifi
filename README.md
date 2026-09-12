@@ -1,210 +1,162 @@
-# Simple DVR Wi-Fi
+<p align="center">
+  <img src="docs/logo/simple-dvr-wifi-wordmark.svg" alt="Simple DVR Wi-Fi" width="560" />
+</p>
 
-Monitoramento local de câmeras IP/Wi-Fi no Windows. O aplicativo é um desktop
-Electron + React + TypeScript para cadastrar câmeras ONVIF/RTSP, acompanhar
-vídeo ao vivo, controlar PTZ compatível, capturar snapshots e gravar
-localmente. Credenciais permanecem cifradas no computador do usuário.
+<p align="center">Monitoramento local de câmeras IP e Wi-Fi no Windows.</p>
 
-> **Escopo atual:** Windows 10/11 (x64). A arquitetura preserva fronteiras de
-> plataforma para uma futura porta Linux, mas o suporte Linux **não faz parte**
-> desta versão.
+Simple DVR Wi-Fi é um aplicativo desktop para cadastrar câmeras ONVIF/RTSP,
+assistir ao vídeo ao vivo, controlar PTZ quando disponível, capturar snapshots e
+gravar localmente. Ele opera na rede local: não envia telemetria nem exige uma
+conta em nuvem.
 
----
+> Status: MVP em desenvolvimento. Consulte o [changelog](CHANGELOG.md) para as
+> mudanças entregues e as limitações conhecidas antes de usar em produção.
 
-## Funcionalidades
+## Recursos
 
-- **Cadastro e edição manual** por endereço, URL RTSP e URL ONVIF, com
-  verificação de conexão e persistência dos endpoints configurados.
-- **Interoperabilidade ONVIF/RTSP** tolerante a implementações incompletas:
-  capacidades e perfis normalizados como `supported` / `unsupported` / `unknown` / `error`.
-- **Vídeo ao vivo de baixa latência** (WebRTC/WHEP via MediaMTX em loopback),
-  com grades 2×2, 3×3 e 4×4, fullscreen e troca main/substream.
-- **Organização da Live**: mova cards de câmera entre posições ocupadas ou
-  vazias; a ordem é salva separadamente para cada grade.
-- **Controle PTZ** condicionado às capacidades: movimentação contínua, zoom e
-  parada de segurança com lease renovável.
-- **Snapshots** pelo endpoint da câmera ou fallback FFmpeg.
-- **Gravação local** segmentada (fMP4) com sessões catalogadas e recuperação
-  após falhas.
-- **Persistência segura**: SQLite com migrações, backup pré-migração e
-  credenciais cifradas com AES-256-GCM sob chave envolvida pelo `safeStorage`
-  do sistema.
-- **Operação 100% local**: sem telemetria, sem atualizações automáticas, sem
-  tráfego externo além das câmeras configuradas.
+- Cadastro manual com presets de fabricante/modelo que geram a URL RTSP a partir
+  do endereço, porta, canal e perfil escolhidos.
+- Configuração manual de URL RTSP e ONVIF, com teste de conexão antes de salvar.
+- Vídeo ao vivo em grades 2×2, 3×3 e 4×4, tela cheia e seleção de stream
+  principal ou secundário.
+- Organização persistida da grade, snapshots e gravação local segmentada.
+- Descoberta e uso de capacidades ONVIF, incluindo PTZ quando a câmera oferece
+  o recurso.
+- Biblioteca local para reproduzir gravações e consultar snapshots.
+- Dados em SQLite, migrações com backup prévio e credenciais cifradas no
+  computador do usuário.
+
+## Telas
+
+<p align="center">
+  <img src="docs/screenshots/live-grid-2x2.png" alt="Área Live com quatro câmeras organizadas em uma grade 2×2" width="760" />
+</p>
+
+<p align="center"><em>Monitoramento ao vivo com quatro câmeras em grade 2×2.</em></p>
 
 ## Requisitos
 
-- Windows 10 ou 11 (x64)
-- 4 GB de RAM recomendados; a necessidade cresce conforme a quantidade e o codec dos streams
-- Espaço em disco conforme a política de gravação e snapshots
-- Nenhuma ferramenta de desenvolvimento é necessária no uso final
+- Windows 10 ou 11, arquitetura x64.
+- 4 GB de RAM ou mais; a demanda cresce com o número, resolução e codec dos
+  streams.
+- Espaço em disco suficiente para a retenção desejada de snapshots e gravações.
+- Câmeras acessíveis pela rede local, com RTSP e/ou ONVIF configurados.
 
-### Limitações conhecidas
+O projeto exige Node.js `>=22 <26` e npm somente para desenvolvimento.
 
-- A aceleração de hardware fica habilitada por padrão e usa a GPU quando o
-  Chromium e o driver suportam o codec. A opção em **Configurações** passa a
-  valer após reiniciar o aplicativo. Sem suporte, a reprodução usa software.
-- Ao minimizar a janela, os players ao vivo são suspensos para economizar
-  recursos e reconectados ao restaurar. Gravações em andamento continuam.
-- O monitoramento é silencioso e negocia somente vídeo, evitando receber e
-  decodificar áudio que não seria reproduzido.
+## Começar a monitorar
 
-- O substream depende de a câmera informar um perfil secundário via ONVIF; caso
-  contrário, o aplicativo usa o stream principal.
-- O fallback de snapshot por RTSP requer `ffmpeg` disponível no `PATH`. O FFmpeg
-  ainda não é redistribuído junto ao aplicativo.
-- A compatibilidade ONVIF, RTSP, codecs e PTZ varia por fabricante e firmware.
+1. Abra **Câmeras** e escolha **Adicionar manualmente**.
+2. Informe nome, endereço e credenciais da câmera.
+3. Selecione o modelo ou família quando disponível. O aplicativo monta a URL
+   RTSP automaticamente; ajuste canal, stream ou URL se o firmware exigir.
+4. Clique em **Testar conexão** e confirme o cadastro quando a comunicação for
+   validada.
+5. Em **Live**, organize as câmeras na grade e use os controles para tela cheia,
+   snapshot ou gravação.
 
----
+Os presets aceleram a configuração, mas não substituem a validação. Endpoints
+RTSP podem variar conforme modelo, OEM, firmware e região. As credenciais são
+salvas separadamente da URL; evite inseri-las diretamente no endereço RTSP.
 
-## Começando (desenvolvimento)
+### Fabricantes e famílias predefinidos
 
-Pré-requisitos: Node.js `>=22 <26` e npm.
+Os presets atuais cobrem famílias Intelbras e Mibo, TP-Link Tapo, Hikvision,
+Dahua, Axis, Foscam, Vivotek, Hanwha/Samsung Techwin, Luxvision, Tecvoz, D-Link,
+GeoVision, LG, Multilaser, Ubiquiti, Zavio, YooSee, Haiz e Greatek. Para um
+modelo não listado, selecione **Outro modelo / URL manual**.
+
+## Limitações conhecidas
+
+- Compatibilidade de RTSP, ONVIF, codecs e PTZ depende do equipamento e do
+  firmware; o teste de conexão é necessário para cada instalação.
+- O substream depende de a câmera expor um perfil secundário. Caso contrário, o
+  aplicativo usa o stream principal.
+- A aceleração de hardware é habilitada por padrão. Se o driver ou codec não for
+  compatível, o Chromium usa decodificação por software. Alterações nessa opção
+  exigem reiniciar o aplicativo.
+- Ao minimizar a janela, os players ao vivo são suspensos para reduzir consumo;
+  gravações em andamento continuam.
+- O aplicativo reproduz somente vídeo. O áudio dos streams não é negociado nem
+  decodificado.
+- O fallback de snapshot por RTSP requer um `ffmpeg` acessível no `PATH`.
+  FFmpeg ainda não é redistribuído com o aplicativo.
+
+## Desenvolvimento
 
 ```bash
-# Instalar dependências
 npm ci
-
-# Reconstruir o driver SQLite nativo para a ABI do Electron
 npm run rebuild:native
-
-# Rodar em modo desenvolvimento
 npm run dev
-
-# Typecheck e lint
-npm run typecheck
-npm run lint
-
-# Testes de regressão (inclui SQLite na ABI do Electron)
-npm test
-
-# Ciclo de vida do player: minimizar/restaurar, troca de perfil e cancelamento
-npm run test:player
-
-# Suíte local completa: build, regressões, PTZ, segurança, binários e lint
-npm run test:all
-
-# Build (typecheck + electron-vite)
-npm run build
 ```
 
-## Uso básico
+Os ícones de janela e instalação são gerados automaticamente a partir de
+`docs/logo/` antes de iniciar ou criar um build.
 
-1. Em **Câmeras**, selecione **Adicionar manualmente** e informe o nome, endereço e porta.
-2. Configure a URL RTSP quando ela estiver disponível. A URL ONVIF é opcional e
-   permite identificar capacidades como PTZ e perfis de stream.
-3. Salve a câmera e use **Testar conexão** para verificar a configuração.
-4. Abra **Live** para assistir às câmeras; use **Organizar posição** no card para
-   mover uma câmera para qualquer posição disponível na grade.
-5. Use os controles do card para snapshot, gravação e tela cheia. Os arquivos
-   ficam nos diretórios configurados em **Configurações**.
+### Verificação
 
-## Empacotamento Windows
+| Comando                              | Finalidade                                                                                |
+| ------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `npm run typecheck`                  | Verifica os tipos dos processos principal, preload e renderer.                            |
+| `npm run lint`                       | Executa as regras de qualidade do código.                                                 |
+| `npm test`                           | Executa regressões de SQLite, RTSP, snapshots, gravações, segurança e presets.            |
+| `npm run test:player`                | Exercita o ciclo de vida do player ao vivo.                                               |
+| `node scripts/camera-form-smoke.mjs` | Valida o formulário de câmera e seus presets em uma janela Electron isolada.              |
+| `node scripts/settings-smoke.mjs`    | Valida os fluxos e o layout de configurações.                                             |
+| `npm run test:all`                   | Executa a suíte local completa, incluindo build, testes, PTZ e verificações de segurança. |
+
+Os testes automatizados usam simuladores, servidores locais e diretórios
+temporários. Eles não substituem o teste com as câmeras e firmwares que serão
+usados na operação.
+
+## Empacotamento
 
 ```bash
-# Reconstruir módulo nativo e empacotar instalador NSIS
 npm run rebuild:native
 npm run build:win
 ```
 
-O instalador é gerado em `dist/Simple DVR Wi-Fi-<versão>-setup.exe`. Durante o
-empacotamento:
+O instalador Windows é criado em
+`dist/Simple DVR Wi-Fi-<versão>-setup.exe`. O processo inclui o ícone do
+aplicativo, reconstrói o SQLite para a ABI do Electron e valida os binários de
+mídia incluídos.
 
-- o driver SQLite é reconstruído para a ABI do Electron (`npm run rebuild:native`);
-- o binário MediaMTX é validado por hash contra
-  [resources/media-binaries.json](resources/media-binaries.json) antes de ser
-  incluído (`npm run verify:binaries`);
-- o gate de release bloqueia a publicação de componentes não aprovados
-  (`npm run release:gate`);
-- SBOM, inventário de licenças e NOTICE são gerados em `dist/release`
-  (`npm run release:assets`);
-- o smoke test do pacote valida abertura, banco, mídia e ausência de tráfego
-  externo (`npm run smoke:package`).
-
-## Verificações operacionais
-
-`npm test` verifica encerramento de processos, RTSP,
-snapshots, leitura parcial de gravações, posições da grade e backups SQLite
-com dados no WAL, persistência cifrada e remoção de segredos em diagnósticos.
-Os testes usam diretórios temporários e servidores locais;
-o teste de segurança também mantém seus dados separados do banco do usuário.
-As verificações automatizadas não substituem a validação com câmeras reais.
-
-| Comando                      | O que verifica                                              |
-| ---------------------------- | ----------------------------------------------------------- |
-| `npm run security:smoke`     | Abertura, CSP, preload e banco no renderer empacotado       |
-| `npm run security:checklist` | Runtime, hashes do pacote e fuses; requer `PACKAGED_EXE` |
-| `npm run verify:binaries`    | Presença e hash dos binários de mídia                       |
-
-## Scripts de release
-
-| Comando                   | Descrição                                                  |
+| Comando                   | Finalidade                                                 |
 | ------------------------- | ---------------------------------------------------------- |
-| `npm run rebuild:native`  | Rebuild do driver SQLite para a ABI Electron               |
-| `npm run verify:binaries` | Valida presença e hash dos binários de mídia               |
-| `npm run release:gate`    | Bloqueia release com componente não aprovado               |
-| `npm run release:assets`  | Gera SBOM, licenças, NOTICE e fontes de binários           |
-| `npm run smoke:package`   | Smoke test do pacote Windows empacotado                    |
+| `npm run verify:binaries` | Confere a presença e o hash dos binários de mídia.         |
+| `npm run release:gate`    | Bloqueia releases com componentes sem aprovação.           |
+| `npm run release:assets`  | Gera SBOM, licenças, NOTICE e fontes de binários.          |
+| `npm run smoke:package`   | Faz smoke test de um pacote Windows usando `PACKAGED_EXE`. |
 
-Para verificar um executável instalado, use `smoke:package` com `PACKAGED_EXE`
-apontando para ele. O antigo `smoke:installed` duplicava esse teste e foi removido.
-Esses testes verificam o runtime em um perfil temporário; não validam o instalador
-nem comprovam compatibilidade com uma máquina limpa.
+Detalhes sobre MediaMTX, FFmpeg e suas licenças estão em
+[resources/README.md](resources/README.md).
 
----
+## Arquitetura e segurança
 
-## Arquitetura
-
-```
+```text
 src/
-├── main/          # ciclo de vida, janelas, autorização IPC e supervisão
-│   ├── ipc/       # registro central de handlers validados
-│   ├── security/  # CSP, navegação, paths, TLS, URLs, vault
-│   ├── services/  # câmeras, credenciais, descoberta, PTZ, snapshots, gravação
-│   ├── supervisors/# workers, sessões de mídia, shutdown coordenado
-│   └── logging/   # logger estruturado e sanitizador
-├── preload/       # API estreita exposta via contextBridge (sem ipcRenderer)
-├── renderer/      # React + Zustand (estado de apresentação)
-├── workers/       # database (SQLite), camera (ONVIF),
-│   │              # media (MediaMTX/FFmpeg)
-└── shared/        # contratos, schemas (zod), estados e erros tipados
+├── main/       janela, IPC validado, serviços e supervisores
+├── preload/    API mínima exposta ao renderer por contextBridge
+├── renderer/   interface React e estado de apresentação
+├── shared/     contratos, schemas e tipos compartilhados
+└── workers/    SQLite, ONVIF, RTSP, MediaMTX e FFmpeg
 ```
 
-Princípios de segurança:
-
-- `sandbox`, `contextIsolation`, `nodeIntegration: false`, `webSecurity: true`
-  e CSP restritiva em toda janela.
-- IPC tipado com validação de schema, sender e limite de payload; o preload
-  **não** expõe `ipcRenderer` nem canais arbitrários.
-- MediaMTX roda em sessões locais por câmera e perfil, ligado apenas a
-  `127.0.0.1`, com portas efêmeras, credenciais aleatórias por sessão e hash
-  validado antes de executar.
-- Credenciais persistidas apenas cifradas (AES-256-GCM); a chave fica envolvida
-  pelo `safeStorage` e nunca é gravada em claro.
-- FFmpeg executado sem shell, com argumentos validados e diretórios confinados.
-- XML ONVIF parseado com DTD/entidades externas desabilitadas e limites de
-  bytes/profundidade.
+- O renderer roda em sandbox, com `contextIsolation`, `nodeIntegration: false`,
+  CSP restritiva e sem acesso direto ao sistema operacional.
+- O preload expõe apenas operações específicas e validadas; ele não expõe
+  `ipcRenderer`.
+- As credenciais são cifradas com AES-256-GCM e a chave é protegida pelo
+  `safeStorage` do sistema.
+- MediaMTX é executado por sessão local, limitado a loopback e validado por hash
+  antes de iniciar.
+- FFmpeg é chamado sem shell, com argumentos e caminhos validados.
 
 ## Documentação
 
-- [Binários de mídia (MediaMTX/FFmpeg)](resources/README.md)
-- Especificações e mudanças OpenSpec em [openspec/](openspec/)
-
-## Licenciamento e cadeia de suprimentos
-
-- Electron, React e as dependências npm têm suas licenças registradas no SBOM
-  gerado por `npm run release:assets`.
-- **MediaMTX** (MIT) está integrado e seu hash é validado em runtime.
-- **FFmpeg** ainda **não** é redistribuído: a inclusão está bloqueada até a
-  aprovação de um build LGPL sem `--enable-gpl`/`--enable-nonfree`.
-
-Veja o gate e os avisos em [resources/media-binaries.json](resources/media-binaries.json)
-e o inventário gerado em `dist/release/`.
-
-## Status
-
-MVP em desenvolvimento. A versão estável depende de validação operacional no
-Windows e da matriz de câmeras reais por categoria.
+- [Changelog](CHANGELOG.md)
+- [Especificações e mudanças OpenSpec](openspec/)
+- [Política de binários de mídia](resources/README.md)
 
 ## Licença
 
