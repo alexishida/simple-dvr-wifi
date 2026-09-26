@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIcon,
+  CalendarIcon,
   CheckIcon,
   CloseIcon,
   EditIcon,
@@ -24,6 +25,12 @@ interface SettingsViewProps {
 }
 
 const CATEGORIES = [
+  {
+    id: "schedule",
+    label: "Gravação agendada",
+    description: "Defina períodos semanais para cada câmera ativa.",
+    icon: CalendarIcon,
+  },
   {
     id: "appearance",
     label: "Aparência",
@@ -61,10 +68,26 @@ const FIELD_CATEGORIES: Record<string, Category> = {
   theme: "appearance",
   snapshotDir: "storage",
   recordingsDir: "storage",
+  retention: "storage",
   streams: "video",
   reconnect: "connection",
   log: "diagnostics",
 };
+
+const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "Indisponível";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
 
 function SettingRow({
   id,
@@ -116,6 +139,19 @@ export function SettingsView({
     "idle",
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [storageUsage, setStorageUsage] = useState<{
+    freeBytes: number | null;
+    totalBytes: number | null;
+    usedBytes: number;
+    byCamera: Array<{ cameraId: string; bytes: number }>;
+  } | null>(null);
+  const [alerts, setAlerts] = useState<Array<{ id: string; message: string; count: number }>>([]);
+  const [retentionStatus, setRetentionStatus] = useState<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean } | null>(null);
+  const [scheduleCameraId, setScheduleCameraId] = useState("");
+  const [schedulePeriods, setSchedulePeriods] = useState<Array<{ weekday: number; start: string; end: string; enabled: boolean }>>([]);
+  const [scheduleCameras, setScheduleCameras] = useState<Array<{ id: string; name: string; active: boolean }>>([]);
+  const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
+  const [scheduleStatus, setScheduleStatus] = useState<{ source: "manual" | "scheduled" | null; blocked: string | null; nextAt: string | null } | null>(null);
   const saving = useRef(false);
   const pendingFocus = useRef<string | null>(null);
   const form = useRef<HTMLFormElement>(null);
@@ -127,6 +163,61 @@ export function SettingsView({
     setConfig(initialConfig ?? CONFIG_DEFAULTS);
     setBaseline(initialConfig ?? CONFIG_DEFAULTS);
   }, [initialConfig]);
+
+  useEffect(() => {
+    if (category !== "storage") return;
+    let active = true;
+    void window.api.library.storageUsage().then((result) => {
+      if (active && result.ok) setStorageUsage(result.value);
+    }).catch(() => active && setStorageUsage(null));
+    void window.api.retention.status().then((result) => {
+      if (active && result.ok) setRetentionStatus(result.value);
+    });
+    return () => { active = false; };
+  }, [category, config.recordingsDir, config.snapshotDir]);
+
+  useEffect(() => {
+    if (category !== "diagnostics") return;
+    let active = true;
+    void window.api.alerts.list().then((result) => {
+      if (active && result.ok) setAlerts(result.value);
+    });
+    return () => { active = false; };
+  }, [category]);
+
+  useEffect(() => {
+    if (category !== "schedule") return;
+    let active = true;
+    void window.api.cameras.list().then((result) => {
+      if (!active || !result.ok) return;
+      const cameras = result.value.map(({ id, name, active: cameraActive }) => ({ id, name, active: cameraActive }));
+      setScheduleCameras(cameras);
+      setScheduleCameraId((current) => current || cameras[0]?.id || "");
+    });
+    return () => { active = false; };
+  }, [category]);
+
+  useEffect(() => {
+    if (!scheduleCameraId) return;
+    let active = true;
+    void window.api.schedules.list(scheduleCameraId).then((result) => {
+      if (active && result.ok) setSchedulePeriods(result.value.map(({ weekday, start, end, enabled }) => ({ weekday, start, end, enabled })));
+    });
+    void window.api.schedules.status(scheduleCameraId).then((result) => {
+      if (active && result.ok) setScheduleStatus(result.value);
+    });
+    return () => { active = false; };
+  }, [scheduleCameraId]);
+
+  async function saveSchedule(): Promise<void> {
+    if (!scheduleCameraId) return;
+    if (schedulePeriods.some((period) => period.start === period.end)) {
+      setScheduleMessage("O início e o fim não podem ser iguais.");
+      return;
+    }
+    const result = await window.api.schedules.replace({ cameraId: scheduleCameraId, periods: schedulePeriods });
+    setScheduleMessage(result.ok && result.value.saved ? "Agenda salva e aplicada." : result.ok ? "Não foi possível salvar a agenda." : result.error.message);
+  }
 
   useEffect(() => {
     if (!pendingFocus.current) return;
@@ -178,6 +269,19 @@ export function SettingsView({
       pendingFocus.current = firstPath;
       setCategory(FIELD_CATEGORIES[firstPath.split(".")[0] ?? ""] ?? category);
       return;
+    }
+    if (!baseline.retention.enabled && parsed.data.retention.enabled) {
+      const { maxAgeDays, maxBytes } = parsed.data.retention;
+      const limits = [
+        maxAgeDays > 0 ? `${maxAgeDays} dia(s)` : null,
+        maxBytes > 0 ? `${Math.round(maxBytes / (1024 * 1024))} MB` : null,
+      ].filter(Boolean);
+      const description = limits.length > 0
+        ? `A mídia não protegida será elegível à limpeza ao ultrapassar qualquer limite configurado (${limits.join(" ou ")}).`
+        : "Nenhum limite foi definido; a retenção não excluirá mídia até que você configure idade ou tamanho.";
+      if (!window.confirm(`Ativar retenção automática?\n\n${description}\n\nMídia protegida nunca será removida.`)) {
+        return;
+      }
     }
     saving.current = true;
     setStatus("saving");
@@ -327,6 +431,81 @@ export function SettingsView({
                   }
                 />
               </SettingRow>
+              <div className="settings-note storage-usage" role="status">
+                <ActivityIcon size={18} />
+                <div>
+                  <p>
+                    Biblioteca: {formatBytes(storageUsage?.usedBytes ?? null)} · espaço livre: {formatBytes(storageUsage?.freeBytes ?? null)}
+                  </p>
+                  {storageUsage && storageUsage.byCamera.length > 0 && (
+                    <p className="field-hint">
+                      Por câmera: {storageUsage.byCamera.map((item) => `${item.cameraId.slice(0, 8)} (${formatBytes(item.bytes)})`).join(", ")}
+                    </p>
+                  )}
+                </div>
+              </div>
+              {retentionStatus?.lastRunAt && (
+                <div className="settings-note">
+                  <ActivityIcon size={18} />
+                  <p>
+                    Última retenção: {new Date(retentionStatus.lastRunAt).toLocaleString("pt-BR")} · {retentionStatus.deleted} removido(s), {formatBytes(retentionStatus.freedBytes)} liberados{retentionStatus.failures > 0 ? ` · ${retentionStatus.failures} falha(s)` : retentionStatus.noCandidates ? " · sem candidatos elegíveis" : ""}.
+                  </p>
+                </div>
+              )}
+              <SettingRow
+                id="retention.enabled"
+                label="Retenção automática"
+                hint="Desativada por padrão. A ativação exige confirmação e nunca remove mídia protegida."
+              >
+                <label className="settings-toggle" htmlFor="retention.enabled">
+                  <input
+                    id="retention.enabled"
+                    type="checkbox"
+                    checked={config.retention.enabled}
+                    onChange={(event) => update("retention", {
+                      ...config.retention,
+                      enabled: event.target.checked,
+                    })}
+                  />
+                  Ativar retenção
+                </label>
+              </SettingRow>
+              <SettingRow
+                id="retention.maxAgeDays"
+                label="Idade máxima (dias)"
+                hint="Zero desativa este limite. A mídia é elegível ao ultrapassar este ou o limite de tamanho."
+              >
+                <input
+                  id="retention.maxAgeDays"
+                  className="field-input"
+                  type="number"
+                  min="0"
+                  max="3650"
+                  value={config.retention.maxAgeDays}
+                  onChange={(event) => update("retention", {
+                    ...config.retention,
+                    maxAgeDays: Number(event.target.value),
+                  })}
+                />
+              </SettingRow>
+              <SettingRow
+                id="retention.maxBytes"
+                label="Limite de biblioteca (MB)"
+                hint="Zero desativa este limite. Se ambos forem zero, nenhuma mídia será removida."
+              >
+                <input
+                  id="retention.maxBytes"
+                  className="field-input"
+                  type="number"
+                  min="0"
+                  max="104857600"
+                  value={Math.round(config.retention.maxBytes / (1024 * 1024))}
+                  onChange={(event) => update("retention", {
+                    ...config.retention,
+                    maxBytes: Number(event.target.value) * 1024 * 1024,
+                  })}
+                />
+              </SettingRow>
               <div className="settings-note">
                 <ImageIcon size={18} />
                 <p>
@@ -474,6 +653,38 @@ export function SettingsView({
             </>
           )}
 
+          {category === "schedule" && (
+            <>
+              <div className="settings-note">
+                <CalendarIcon size={18} />
+                <p>A agenda só funciona enquanto o aplicativo estiver em execução. A gravação manual tem prioridade; parar uma gravação agendada pausa o período atual.</p>
+              </div>
+              <SettingRow id="schedule-camera" label="Câmera" hint="Câmeras desativadas permanecem na agenda, mas não iniciam gravações.">
+                <select {...inputProps("schedule-camera")} value={scheduleCameraId} onChange={(event) => { setScheduleCameraId(event.target.value); setScheduleMessage(null); }}>
+                  {scheduleCameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name}{camera.active ? "" : " (desativada)"}</option>)}
+                </select>
+              </SettingRow>
+              <div className="schedule-editor" aria-label="Períodos semanais">
+                {schedulePeriods.map((period, index) => (
+                  <div className="schedule-period" key={`${period.weekday}-${index}`}>
+                    <select aria-label="Dia da semana" className="field-input" value={period.weekday} onChange={(event) => setSchedulePeriods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, weekday: Number(event.target.value) } : item))}>{WEEKDAYS.map((day, weekday) => <option key={day} value={weekday}>{day}</option>)}</select>
+                    <input aria-label="Hora de início" className="field-input" type="time" value={period.start} onChange={(event) => setSchedulePeriods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, start: event.target.value } : item))} />
+                    <span aria-hidden="true">até</span>
+                    <input aria-label="Hora de término" className="field-input" type="time" value={period.end} onChange={(event) => setSchedulePeriods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, end: event.target.value } : item))} />
+                    <label className="settings-toggle"><input type="checkbox" checked={period.enabled} onChange={(event) => setSchedulePeriods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: event.target.checked } : item))} />Ativo</label>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSchedulePeriods((items) => items.filter((_, itemIndex) => itemIndex !== index))}><CloseIcon size={14} /> Remover</button>
+                  </div>
+                ))}
+              </div>
+              <div className="schedule-actions">
+                <button type="button" className="btn btn-secondary" onClick={() => setSchedulePeriods((items) => [...items, { weekday: new Date().getDay(), start: "08:00", end: "18:00", enabled: true }])}><CalendarIcon size={16} /> Adicionar período</button>
+                <button type="button" className="btn btn-primary" disabled={!scheduleCameraId} onClick={() => void saveSchedule()}><CheckIcon size={16} /> Salvar agenda</button>
+              </div>
+              {scheduleStatus && <div className="settings-note" role="status"><ActivityIcon size={18} /><p>{scheduleStatus.source === "scheduled" ? "Gravando pela agenda." : scheduleStatus.source === "manual" ? "Gravando manualmente; o comando manual tem prioridade." : scheduleStatus.blocked ?? "Agenda pronta."}{scheduleStatus.nextAt ? ` Próximo início: ${new Date(scheduleStatus.nextAt).toLocaleString("pt-BR")}.` : ""}</p></div>}
+              {scheduleMessage && <p className="field-hint" role="status">{scheduleMessage}</p>}
+            </>
+          )}
+
           {category === "diagnostics" && (
             <>
               <SettingRow
@@ -497,6 +708,22 @@ export function SettingsView({
                   <option value="debug">Depuração (mais detalhes)</option>
                 </select>
               </SettingRow>
+              {alerts.length > 0 && (
+                <div className="settings-note" role="status">
+                  <ActivityIcon size={18} />
+                  <div>
+                    <p>Alertas locais</p>
+                    {alerts.map((alert) => (
+                      <p key={alert.id} className="field-hint">
+                        {alert.message}{alert.count > 1 ? ` (${alert.count} ocorrências)` : ""}
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void window.api.alerts.dismiss(alert.id).then(() => setAlerts((current) => current.filter((item) => item.id !== alert.id)))}>
+                          <CloseIcon size={14} /> Dispensar
+                        </button>
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="settings-note">
                 <ActivityIcon size={18} />
                 <p>

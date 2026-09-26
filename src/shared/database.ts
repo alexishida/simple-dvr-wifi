@@ -116,3 +116,25 @@ export const SnapshotRecordSchema = z.object({
 })
 
 export type SnapshotRecord = z.infer<typeof SnapshotRecordSchema>
+
+export const MediaKindSchema = z.enum(['snapshot', 'recording'])
+export type MediaKind = z.infer<typeof MediaKindSchema>
+
+export const MediaMetadataInputSchema = z.object({
+  kind: MediaKindSchema,
+  mediaId: z.string().uuid(),
+  favorite: z.boolean(),
+  protected: z.boolean(),
+  tags: z.array(z.string().trim().min(1).max(48)).max(20),
+  note: z.string().max(2_000),
+  sourceRecordingId: z.string().uuid().nullable(),
+  sourcePositionMs: z.number().int().nonnegative().nullable(),
+})
+
+export type MediaMetadataInput = z.infer<typeof MediaMetadataInputSchema>
+
+export const MediaMetadataSchema = MediaMetadataInputSchema.extend({
+  updatedAt: z.string(),
+})
+
+export type MediaMetadata = z.infer<typeof MediaMetadataSchema>

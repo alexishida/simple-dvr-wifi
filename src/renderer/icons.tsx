@@ -66,6 +66,13 @@ export const ActivityIcon = icon(
   </>,
 );
 
+export const CalendarIcon = icon(
+  <>
+    <rect x="3" y="5" width="18" height="16" rx="2" />
+    <path d="M7 3v4M17 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01" />
+  </>,
+);
+
 export const SettingsIcon = icon(
   <>
     <circle cx="12" cy="12" r="3" />
@@ -135,6 +142,25 @@ export const TrashIcon = icon(
     <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" />
     <path d="M10 11v5M14 11v5" />
   </>,
+);
+
+export const HeartIcon = icon(
+  <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.9-8.6a5.5 5.5 0 0 0-.1-7.8Z" />,
+);
+
+export const ShieldIcon = icon(
+  <path d="M12 3 20 6v5.4c0 4.8-3.3 8.2-8 9.6-4.7-1.4-8-4.8-8-9.6V6l8-3Z" />,
+);
+
+export const ExportIcon = icon(
+  <>
+    <path d="M12 3v12M7 8l5-5 5 5" />
+    <path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" />
+  </>,
+);
+
+export const FolderIcon = icon(
+  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />,
 );
 
 export const PowerIcon = icon(

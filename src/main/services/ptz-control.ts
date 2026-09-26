@@ -102,6 +102,7 @@ export class PtzControlService {
   }
 
   private async startMoveNow(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
+    if (this.stopBlocked) throw new Error('Aguardando confirmação da parada PTZ.')
     const velocity = normalizePtzVelocity(rawVelocity)
     this.cameraId = cameraId
     await this.guard.continuousMove({
@@ -122,7 +123,7 @@ export class PtzControlService {
 
   private async renewNow(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
     const velocity = normalizePtzVelocity(rawVelocity)
-    if (this.stopBlocked) return
+    if (this.stopBlocked) throw new Error('Aguardando confirmação da parada PTZ.')
     await this.guard.continuousMove({
       profileToken: this.profileToken,
       velocity: toVelocityRecord(velocity),
@@ -172,11 +173,9 @@ export class PtzControlService {
       this.stopFailures = 0
     } catch {
       this.stopFailures++
-      this.moving = false
-      this.movingSince = null
-      if (this.stopFailures >= this.stopRetryLimit) {
-        this.stopBlocked = true
-      } else {
+      // A failed request does not confirm that the camera stopped moving.
+      this.stopBlocked = true
+      if (this.stopFailures < this.stopRetryLimit) {
         // retry with a short delay while the connection allows
         this.scheduleStopRetry(trigger)
       }
@@ -186,25 +185,8 @@ export class PtzControlService {
   private scheduleStopRetry(trigger: PtzControlTrigger): void {
     this.leaseTimer = this.clock.setTimeout(() => {
       this.leaseTimer = null
-      void this.retryStop(trigger)
+      void this.stop(trigger)
     }, 300)
-  }
-
-  private async retryStop(trigger: PtzControlTrigger): Promise<void> {
-    if (this.stopBlocked) return
-    try {
-      await this.guard.stop({ profileToken: this.profileToken, ...this.activeAxes })
-      this.stopBlocked = false
-      this.stopFailures = 0
-      this.activeAxes = null
-    } catch {
-      this.stopFailures++
-      if (this.stopFailures >= this.stopRetryLimit) {
-        this.stopBlocked = true
-      } else {
-        this.scheduleStopRetry(trigger)
-      }
-    }
   }
 
   async cameraChanged(newCameraId: string): Promise<void> {

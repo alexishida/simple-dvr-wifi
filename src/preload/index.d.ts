@@ -4,7 +4,14 @@ import type {
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
-import type { RecordingRecord, SnapshotRecord } from "../shared/database.js";
+import type {
+  MediaKind,
+  MediaMetadata,
+  MediaMetadataInput,
+  RecordingRecord,
+  RecordingSegmentRecord,
+  SnapshotRecord,
+} from "../shared/database.js";
 import type { EventListener, Unsubscribe } from "../shared/events.js";
 
 export interface MediaSessionStatus {
@@ -151,6 +158,7 @@ export interface PtzApi {
 
 export interface SnapshotCaptureResult {
   ok?: boolean;
+  snapshotId?: string;
   path?: string;
   relativePath?: string;
   bytes?: number;
@@ -191,15 +199,55 @@ export interface RecordingApi {
 
 export type RecordingLibraryItem = RecordingRecord & { path: string | null };
 
+export interface LibraryFilter {
+  cameraId?: string;
+  startAt?: string;
+  endAt?: string;
+}
+
 export interface LibraryApi {
-  snapshots: (cameraId?: string) => Promise<Result<SnapshotRecord[]>>;
-  recordings: (cameraId?: string) => Promise<Result<RecordingLibraryItem[]>>;
+  storageUsage: () => Promise<Result<{
+    freeBytes: number | null;
+    totalBytes: number | null;
+    usedBytes: number;
+    byCamera: Array<{ cameraId: string; bytes: number }>;
+  }>>;
+  snapshots: (filters?: LibraryFilter) => Promise<Result<SnapshotRecord[]>>;
+  recordings: (
+    filters?: LibraryFilter,
+  ) => Promise<Result<RecordingLibraryItem[]>>;
+  recordingSegments: (id: string) => Promise<Result<RecordingSegmentRecord[]>>;
+  metadata: (input: {
+    kind: MediaKind;
+    mediaId: string;
+  }) => Promise<Result<MediaMetadata | null>>;
+  updateMetadata: (
+    input: MediaMetadataInput,
+  ) => Promise<Result<MediaMetadata>>;
   recordingPreview: (id: string) => Promise<Result<{ dataUrl: string | null }>>;
   readRecording: (
     id: string,
   ) => Promise<Result<{ data: Uint8Array; mimeType: string }>>;
   openSnapshot: (path: string) => Promise<Result<{ opened: boolean }>>;
   openRecording: (path: string) => Promise<Result<{ opened: boolean }>>;
+  revealSnapshot: (id: string) => Promise<Result<{ revealed: boolean }>>;
+  exportSnapshot: (id: string) => Promise<Result<{ exported: boolean }>>;
+  revealRecording: (id: string) => Promise<Result<{ revealed: boolean }>>;
+  exportRecording: (
+    id: string,
+  ) => Promise<Result<{ exported: boolean; files: number }>>;
+  exportClip: (input: {
+    id: string;
+    jobId: string;
+    startAt: string;
+    endAt: string;
+  }) => Promise<Result<{
+    exported: boolean;
+    jobId: string;
+    gaps: Array<{ startsAt: string; endsAt: string }>;
+  }>>;
+  cancelClipExport: (jobId: string) => Promise<Result<{ cancelled: boolean }>>;
+  clipExportStatus: (jobId: string) => Promise<Result<{ active: boolean; percent: number }>>;
   deleteSnapshot: (id: string) => Promise<Result<{ deleted: boolean }>>;
   deleteRecording: (id: string) => Promise<Result<{ deleted: boolean }>>;
 }
@@ -213,6 +261,18 @@ export interface ExposedApi {
   recordings: RecordingApi;
   library: LibraryApi;
   shell: ShellApi;
+  alerts: {
+    list: () => Promise<Result<Array<{ id: string; kind: string; cameraId: string | null; message: string; count: number; firstOccurredAt: string; lastOccurredAt: string }>>>;
+    dismiss: (id: string) => Promise<Result<{ dismissed: boolean }>>;
+  };
+  retention: {
+    status: () => Promise<Result<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean }>>;
+  };
+  schedules: {
+    list: (cameraId: string) => Promise<Result<Array<{ id: string; weekday: number; start: string; end: string; enabled: boolean }>>>;
+    replace: (input: { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> }) => Promise<Result<{ saved: boolean }>>;
+    status: (cameraId: string) => Promise<Result<{ active: boolean; source: "manual" | "scheduled" | null; blocked: string | null; nextAt: string | null; appMustRun: boolean }>>;
+  };
 }
 
 declare global {

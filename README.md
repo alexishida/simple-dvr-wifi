@@ -77,6 +77,8 @@ modelo não listado, selecione **Outro modelo / URL manual**.
   exigem reiniciar o aplicativo.
 - Ao minimizar a janela, os players ao vivo são suspensos para reduzir consumo;
   gravações em andamento continuam.
+- Ao fechar a janela, o aplicativo permanece em execução na bandeja do sistema;
+  use a opção **Sair** no ícone para encerrá-lo por completo.
 - O aplicativo reproduz somente vídeo. O áudio dos streams não é negociado nem
   decodificado.
 - O fallback de snapshot por RTSP requer um `ffmpeg` acessível no `PATH`.

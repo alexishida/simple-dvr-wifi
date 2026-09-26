@@ -86,6 +86,7 @@ child.once("exit", (code) => {
     inlineScriptBlocked: capabilities.inlineScriptBlocked,
     remoteResourceBlocked: capabilities.remoteResourceBlocked,
     databaseWorkerOk: capabilities.databaseWorkerOk,
+    closeToTrayOk: capabilities.closeToTrayOk,
     preloadApiLoaded: capabilities.preloadApiLoaded,
   };
 

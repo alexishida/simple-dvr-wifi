@@ -18,6 +18,67 @@ export const MIGRATIONS: Migration[] = [
     destructive: false,
     up: (db) => db.exec(SCHEMA_V1_DDL),
   },
+  {
+    version: 2,
+    name: 'media-metadata',
+    destructive: false,
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE media_metadata (
+          media_kind TEXT NOT NULL CHECK (media_kind IN ('snapshot', 'recording')),
+          media_id TEXT NOT NULL,
+          favorite INTEGER NOT NULL DEFAULT 0,
+          protected INTEGER NOT NULL DEFAULT 0,
+          tags_json TEXT NOT NULL DEFAULT '[]',
+          note TEXT NOT NULL DEFAULT '',
+          source_recording_id TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (media_kind, media_id)
+        );
+        CREATE INDEX idx_media_metadata_favorite ON media_metadata (media_kind, favorite);
+        CREATE INDEX idx_media_metadata_protected ON media_metadata (media_kind, protected);
+
+        CREATE TRIGGER delete_snapshot_metadata
+        AFTER DELETE ON snapshots
+        BEGIN
+          DELETE FROM media_metadata WHERE media_kind = 'snapshot' AND media_id = OLD.id;
+        END;
+
+        CREATE TRIGGER delete_recording_metadata
+        AFTER DELETE ON recordings
+        BEGIN
+          DELETE FROM media_metadata WHERE media_kind = 'recording' AND media_id = OLD.id;
+          DELETE FROM media_metadata WHERE source_recording_id = OLD.id;
+        END;
+      `),
+  },
+  {
+    version: 3,
+    name: 'media-metadata-source-position',
+    destructive: false,
+    up: (db) =>
+      db.exec(
+        'ALTER TABLE media_metadata ADD COLUMN source_position_ms INTEGER',
+      ),
+  },
+  {
+    version: 4,
+    name: 'recording-schedules',
+    destructive: false,
+    up: (db) => db.exec(`
+      CREATE TABLE recording_schedules (
+        id TEXT PRIMARY KEY,
+        camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+        weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_recording_schedules_camera ON recording_schedules (camera_id, weekday);
+    `),
+  },
 ]
 
 export interface MigrationResult {

@@ -1,5 +1,84 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PtzControlService } from "../src/main/services/ptz-control.ts";
+
+function ptzFixture(t, failures = 1) {
+  const timers = new Map();
+  const calls = [];
+  let nextTimer = 0;
+  let attempts = 0;
+  const controller = new PtzControlService(
+    {
+      continuousMove: async () => {
+        calls.push("move");
+      },
+      stop: async () => {
+        calls.push("stop");
+        if (++attempts <= failures) throw new Error("camera unavailable");
+      },
+    },
+    "main",
+    {
+      clock: {
+        setTimeout: (callback, delay) => {
+          const id = ++nextTimer;
+          timers.set(id, { callback, delay });
+          return id;
+        },
+        clearTimeout: (id) => timers.delete(id),
+      },
+    },
+  );
+  t.after(() => controller.shutdown());
+  return { controller, timers, calls };
+}
+
+test("PTZ repeated stop retries an unconfirmed stop instead of cancelling recovery", async (t) => {
+  const { controller, timers, calls } = ptzFixture(t);
+  await controller.startMove("camera", { pan: 0.5 });
+  await controller.stop("pointer_release");
+  assert.equal(timers.size, 1);
+  await controller.stop("blur");
+  assert.deepEqual(calls, ["move", "stop", "stop"]);
+  assert.equal(timers.size, 0);
+  assert.equal(controller.isMoving, false);
+  assert.equal(controller.state.stopFailures, 0);
+});
+
+test("PTZ blocks new movement until a failed stop is confirmed", async (t) => {
+  const { controller, calls } = ptzFixture(t);
+  await controller.startMove("camera", { pan: 0.5 });
+  await controller.stop("pointer_release");
+  assert.equal(controller.isMoving, true);
+  assert.equal(controller.isStopBlocked, true);
+  await assert.rejects(controller.startMove("camera", { pan: -0.5 }));
+  await assert.rejects(controller.renew("camera", { pan: -0.5 }));
+  assert.deepEqual(calls, ["move", "stop"]);
+  await controller.stop("blur");
+  await controller.startMove("camera", { pan: -0.5 });
+  assert.deepEqual(calls, ["move", "stop", "stop", "move"]);
+  assert.equal(controller.isStopBlocked, false);
+});
+
+test("PTZ automatic stop retries are bounded and manual recovery remains available", async (t) => {
+  const { controller, timers, calls } = ptzFixture(t, 3);
+  await controller.startMove("camera", { pan: 0.5 });
+  await controller.stop("pointer_release");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const [id, timer] = [...timers][0];
+    assert.equal(timer.delay, 300);
+    timers.delete(id);
+    timer.callback();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(timers.size, 0);
+  assert.equal(controller.state.stopFailures, 3);
+  assert.equal(controller.isStopBlocked, true);
+  await controller.stop("blur");
+  assert.deepEqual(calls, ["move", "stop", "stop", "stop", "stop"]);
+  assert.equal(controller.isStopBlocked, false);
+  assert.equal(controller.isMoving, false);
+});
 import {
   CAMERA_PRESETS,
   buildPresetRtspUrl,
@@ -76,7 +155,7 @@ test("camera presets generate channel and stream conventions without credentials
     assert.equal(url.href.includes("{"), false);
   }
 });
-import { mkdtemp, readdir, rm, statfs, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
 import { createServer } from "node:net";
@@ -108,6 +187,16 @@ import {
   loadHardwareAcceleration,
   saveHardwareAcceleration,
 } from "../src/main/services/hardware-acceleration.ts";
+import { parseConfig } from "../src/shared/config.ts";
+import { LocalAlertCenter } from "../src/main/services/alert-center.ts";
+import { selectRetentionCandidates } from "../src/main/services/retention-policy.ts";
+import { isScheduledAt, nextScheduledAt } from "../src/shared/recording-schedule.ts";
+import { RecordingScheduler, shouldScheduleRecording } from "../src/main/services/recording-scheduler.ts";
+import {
+  buildConcatManifest,
+  ClipExportService,
+  planClipExport,
+} from "../src/main/services/clip-export.ts";
 
 test("hardware preference defaults to automatic and persists opt-out across starts", async (t) => {
   const directory = await temporaryDirectory(t);
@@ -124,6 +213,66 @@ test("hardware preference defaults to automatic and persists opt-out across star
   );
   assert.equal(loadHardwareAcceleration(directory), true);
   assert.deepEqual(await readdir(directory), ["hardware-acceleration.json"]);
+});
+
+test("legacy configuration gains disabled retention defaults", () => {
+  const config = parseConfig(JSON.stringify({
+    theme: "dark", snapshotDir: "", recordingsDir: "",
+    reconnect: { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 10 },
+    streams: { behavior: "sub-first", maxTranscodes: 2, enableHardwareAcceleration: true },
+    log: { level: "info", maxBytes: 4194304, maxFiles: 5 },
+  }));
+  assert.deepEqual(config.retention, { enabled: false, maxAgeDays: 0, maxBytes: 0 });
+});
+
+test("local alert centre groups repeated camera failures", () => {
+  const alerts = new LocalAlertCenter();
+  alerts.report("camera_disconnected", "Câmera desconectada.", "camera-one");
+  alerts.report("camera_disconnected", "Câmera desconectada.", "camera-one");
+  alerts.report("storage_low", "Espaço insuficiente.");
+  assert.equal(alerts.list().length, 2);
+  assert.equal(alerts.list().find((alert) => alert.cameraId === "camera-one")?.count, 2);
+  assert.equal(alerts.dismiss("camera_disconnected:camera-one"), true);
+});
+
+test("retention policy preserves protected and active media", () => {
+  const selected = selectRetentionCandidates([
+    { id: "protected", timestamp: 1, bytes: 50, protected: true, active: false },
+    { id: "active", timestamp: 2, bytes: 50, protected: false, active: true },
+    { id: "old", timestamp: 3, bytes: 50, protected: false, active: false },
+  ], { now: 1000, maxAgeDays: 0, maxBytes: 100 });
+  assert.deepEqual(selected, ["old"]);
+});
+
+test("weekly schedule supports intervals crossing midnight", () => {
+  const periods = [{ weekday: 1, start: "22:00", end: "02:00", enabled: true }];
+  assert.equal(isScheduledAt(periods, new Date(2026, 0, 5, 23, 0)), true);
+  assert.equal(isScheduledAt(periods, new Date(2026, 0, 6, 1, 0)), true);
+  assert.equal(isScheduledAt(periods, new Date(2026, 0, 6, 3, 0)), false);
+});
+
+test("weekly schedule reports the next configured start", () => {
+  const periods = [{ weekday: 2, start: "08:30", end: "09:00", enabled: true }];
+  const next = nextScheduledAt(periods, new Date(2026, 0, 5, 12, 0));
+  assert.equal(next?.getDay(), 2);
+  assert.equal(next?.getHours(), 8);
+  assert.equal(next?.getMinutes(), 30);
+});
+
+test("scheduler never overrides a manual recording", () => {
+  const periods = [{ weekday: 1, start: "08:00", end: "10:00", enabled: true }];
+  assert.equal(shouldScheduleRecording({ periods, now: new Date(2026, 0, 5, 9), cameraActive: true, manualRecording: true, scheduledRecording: false }), "none");
+  assert.equal(shouldScheduleRecording({ periods, now: new Date(2026, 0, 5, 9), cameraActive: true, manualRecording: false, scheduledRecording: false }), "start");
+});
+
+test("recording scheduler starts only one recurring loop", async () => {
+  let calls = 0;
+  const scheduler = new RecordingScheduler(async () => { calls += 1; }, 60_000);
+  scheduler.start();
+  scheduler.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  scheduler.stop();
 });
 
 test("streamed executable hashing matches SHA-256 across chunk boundaries", async (t) => {
@@ -288,6 +437,37 @@ test("disk probe reports real capacity for paths containing apostrophes", async 
   assert.equal(shouldAllowWrite(status), true);
 });
 
+test("storage monitor rejects full, inaccessible, and missing destinations", async () => {
+  const full = await checkStorageStatus("full", {
+    minFreeBytes: 256,
+    probe: {
+      stat: async () => ({ isDirectory: () => true, size: 0 }),
+      access: async () => undefined,
+      diskFree: async () => ({ free: 255, total: 1000 }),
+    },
+  });
+  assert.equal(full.lowSpace, true);
+  assert.equal(shouldAllowWrite(full), false);
+  const inaccessible = await checkStorageStatus("locked", {
+    probe: {
+      stat: async () => ({ isDirectory: () => true, size: 0 }),
+      access: async () => { throw new Error("denied"); },
+      diskFree: async () => ({ free: 1000, total: 1000 }),
+    },
+  });
+  assert.equal(inaccessible.writable, false);
+  assert.equal(shouldAllowWrite(inaccessible), false);
+  const missing = await checkStorageStatus("missing", {
+    probe: {
+      stat: async () => { throw new Error("missing"); },
+      access: async () => undefined,
+      diskFree: async () => { throw new Error("removed"); },
+    },
+  });
+  assert.equal(missing.exists, false);
+  assert.equal(shouldAllowWrite(missing), false);
+});
+
 test("FFmpeg missing executable rejects without leaking active processes", async (t) => {
   const directory = await temporaryDirectory(t);
   const runner = new FfmpegRunner(join(directory, "missing.exe"));
@@ -357,6 +537,180 @@ test("FFmpeg timeout terminates and unregisters the process", async (t) => {
     { code: "TIMEOUT" },
   );
   assert.equal(runner.activeCount, 0);
+});
+
+test("clip export plans segment boundaries and reports gaps without loading media", () => {
+  const plan = planClipExport({
+    recordingId: "recording",
+    destinationPath: "C:/exports/clip.mp4",
+    startAt: "2026-01-10T08:01:00.000Z",
+    endAt: "2026-01-10T08:14:00.000Z",
+    segments: [
+      {
+        id: "one",
+        recordingId: "recording",
+        path: "one.m4s",
+        absolutePath: "C:/library/one.m4s",
+        startedAt: "2026-01-10T08:00:00.000Z",
+        endedAt: "2026-01-10T08:05:00.000Z",
+        durationMs: 300000,
+        status: "completed",
+      },
+      {
+        id: "two",
+        recordingId: "recording",
+        path: "two.m4s",
+        absolutePath: "C:/library/two.m4s",
+        startedAt: "2026-01-10T08:12:00.000Z",
+        endedAt: "2026-01-10T08:17:00.000Z",
+        durationMs: 300000,
+        status: "completed",
+      },
+    ],
+  });
+  assert.equal(plan.durationMs, 780000);
+  assert.deepEqual(plan.gaps, [
+    { startsAt: "2026-01-10T08:05:00.000Z", endsAt: "2026-01-10T08:12:00.000Z" },
+  ]);
+  assert.match(buildConcatManifest(plan.segments), /inpoint 60\.000/);
+  assert.match(buildConcatManifest(plan.segments), /outpoint 120\.000/);
+  assert.throws(
+    () => planClipExport({
+      recordingId: "recording",
+      destinationPath: "C:/exports/clip.mp4",
+      startAt: "2026-01-10T08:00:00.000Z",
+      endAt: "2026-01-10T10:01:00.000Z",
+      segments: [],
+    }),
+    /duração máxima/,
+  );
+});
+
+test("clip export serializes work, reports progress, and cleans temporary files", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const temporaryRoot = join(directory, "temporary");
+  const destination = join(directory, "clip.mp4");
+  let release;
+  let runnerReady;
+  const ready = new Promise((resolveReady) => { runnerReady = resolveReady; });
+  const executor = {
+    run: ({ args, onProgress }) =>
+      new Promise((resolveRun) => {
+        runnerReady();
+        release = async () => {
+          onProgress(30_000);
+          await writeFile(args.at(-1), "exported-media");
+          resolveRun({ exitCode: 0, killed: false, timedOut: false, output: "", durationMs: 1 });
+        };
+      }),
+  };
+  const service = new ClipExportService(executor, "fake-ffmpeg", temporaryRoot);
+  const input = {
+    recordingId: "recording",
+    jobId: "job-one",
+    destinationPath: destination,
+    startAt: "2026-01-10T08:00:00.000Z",
+    endAt: "2026-01-10T08:01:00.000Z",
+    segments: [{
+      id: "segment",
+      recordingId: "recording",
+      path: "source.m4s",
+      absolutePath: join(directory, "source.m4s"),
+      startedAt: "2026-01-10T08:00:00.000Z",
+      endedAt: "2026-01-10T08:01:00.000Z",
+      durationMs: 60_000,
+      status: "completed",
+    }],
+  };
+  const exporting = service.export(input);
+  assert.deepEqual(service.status("job-one"), { active: true, percent: 0 });
+  await assert.rejects(service.export({ ...input, jobId: "job-two", destinationPath: join(directory, "second.mp4") }), /Já existe/);
+  await ready;
+  await release();
+  const result = await exporting;
+  assert.equal(result.destinationPath, destination);
+  assert.deepEqual(service.status("job-one"), { active: false, percent: 0 });
+  assert.equal((await readdir(temporaryRoot)).length, 0);
+  assert.equal(await readFile(destination, "utf8"), "exported-media");
+});
+
+test("clip export cancellation removes its temporary manifest", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const temporaryRoot = join(directory, "temporary");
+  let runnerReady;
+  const ready = new Promise((resolveReady) => { runnerReady = resolveReady; });
+  const executor = {
+    run: ({ signal }) => new Promise((_resolveRun, reject) => {
+      runnerReady();
+      signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+    }),
+  };
+  const service = new ClipExportService(executor, "fake-ffmpeg", temporaryRoot);
+  const exporting = service.export({
+    recordingId: "recording",
+    jobId: "cancel-me",
+    destinationPath: join(directory, "clip.mp4"),
+    startAt: "2026-01-10T08:00:00.000Z",
+    endAt: "2026-01-10T08:01:00.000Z",
+    segments: [{
+      id: "segment",
+      recordingId: "recording",
+      path: "source.m4s",
+      absolutePath: join(directory, "source.m4s"),
+      startedAt: "2026-01-10T08:00:00.000Z",
+      endedAt: "2026-01-10T08:01:00.000Z",
+      durationMs: 60_000,
+      status: "completed",
+    }],
+  });
+  await ready;
+  assert.equal(service.cancel("cancel-me"), true);
+  await assert.rejects(exporting, /cancelled/);
+  assert.equal((await readdir(temporaryRoot)).length, 0);
+  assert.equal(service.activeJobId, null);
+});
+
+test("bundled FFmpeg exports a valid MP4 clip", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("O binário empacotado desta aplicação é destinado ao Windows.");
+    return;
+  }
+  const directory = await temporaryDirectory(t);
+  const binary = join(process.cwd(), "resources", "ffmpeg", "win32", "ffmpeg.exe");
+  const source = join(directory, "source.mp4");
+  const destination = join(directory, "exported.mp4");
+  const runner = new FfmpegRunner(binary);
+  const generated = await runner.run({
+    binaryPath: binary,
+    args: [
+      "-hide_banner", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=10",
+      "-t", "1", "-c:v", "mpeg4", "-y", source,
+    ],
+    allowedOutputDirs: [directory],
+    timeoutMs: 10_000,
+  });
+  assert.equal(generated.exitCode, 0);
+  const service = new ClipExportService(runner, binary, join(directory, "temporary"));
+  const result = await service.export({
+    recordingId: "recording",
+    jobId: "31c059a2-7b50-47a8-abd3-303b75d1be98",
+    destinationPath: destination,
+    startAt: "2026-01-10T08:00:00.000Z",
+    endAt: "2026-01-10T08:00:01.000Z",
+    segments: [{
+      id: "segment",
+      recordingId: "recording",
+      path: "source.mp4",
+      absolutePath: source,
+      startedAt: "2026-01-10T08:00:00.000Z",
+      endedAt: "2026-01-10T08:00:01.000Z",
+      durationMs: 1_000,
+      status: "completed",
+    }],
+  });
+  assert.equal(result.gaps.length, 0);
+  const header = await readFile(destination);
+  assert.equal(header.subarray(4, 8).toString("ascii"), "ftyp");
 });
 
 test("stopping a starting media session never spawns a late process", async (t) => {

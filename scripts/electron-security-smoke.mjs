@@ -84,6 +84,7 @@ child.once('exit', (code) => {
     capabilities.inlineScriptBlocked !== true ||
     capabilities.remoteResourceBlocked !== true ||
     capabilities.databaseWorkerOk !== true ||
+    capabilities.closeToTrayOk !== true ||
     capabilities.preloadApiLoaded !== true
   ) {
     console.error('--- full app output ---')

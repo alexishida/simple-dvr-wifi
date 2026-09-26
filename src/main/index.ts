@@ -1,25 +1,33 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
+  Menu,
+  nativeImage,
   net,
+  powerMonitor,
   protocol,
   session,
   shell,
   safeStorage,
+  Tray,
 } from "electron";
 import { pathToFileURL } from "node:url";
-import { extname, join, relative, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { basename, extname, join, relative, resolve } from "node:path";
 import {
   copyFile,
   mkdir,
   readFile,
   readdir,
+  rename,
   realpath,
   stat,
   unlink,
 } from "node:fs/promises";
 import type { Dirent } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { is } from "@electron-toolkit/utils";
 import { z } from "zod";
 import { IpcRegistry, EmptyRequestSchema } from "./ipc/registry.js";
@@ -47,14 +55,22 @@ import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
 import { PtzControllerRegistry } from "./services/ptz-registry.js";
 import { recordingFileResponse } from "./services/recording-stream.js";
+import { ClipExportService } from "./services/clip-export.js";
+import { FfmpegRunner } from "../workers/media/ffmpeg-runner.js";
+import { LocalAlertCenter } from "./services/alert-center.js";
+import { selectRetentionCandidates } from "./services/retention-policy.js";
+import { SchedulePeriodSchema, isScheduledAt, nextScheduledAt, type SchedulePeriod } from "../shared/recording-schedule.js";
+import { RecordingScheduler, shouldScheduleRecording } from "./services/recording-scheduler.js";
 import { AppConfigSchema, type AppConfig } from "../shared/config.js";
 import type { CameraEditDetails, CameraSummary } from "../shared/contracts.js";
 import type {
   CameraRecord,
+  MediaMetadata,
   RecordingRecord,
   RecordingSegmentRecord,
   SnapshotRecord,
 } from "../shared/database.js";
+import { MediaMetadataInputSchema } from "../shared/database.js";
 import {
   parseHttpUrl,
   parseRtspUrl,
@@ -62,6 +78,8 @@ import {
 } from "../shared/camera-urls.js";
 
 let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let isQuitting = false;
 const shutdownCoordinator = new ShutdownCoordinator();
 let shutdownStarted = false;
 let database: DatabaseSupervisor | null = null;
@@ -75,8 +93,37 @@ const activeRecordings = new Map<
   string,
   { recordingId: string; startedAt: string; recordDir: string }
 >();
+const recordingSources = new Map<string, "manual" | "scheduled">();
+const scheduleSuppressedUntil = new Map<string, number>();
+let recordingScheduler: RecordingScheduler | null = null;
 const activeViewSessions = new Set<string>();
 const recordingOperations = new Map<string, Promise<void>>();
+let clipExporter: ClipExportService | null = null;
+let libraryStorageCache: {
+  key: string;
+  expiresAt: number;
+  value: {
+    freeBytes: number | null;
+    totalBytes: number | null;
+    usedBytes: number;
+    byCamera: Array<{ cameraId: string; bytes: number }>;
+  };
+} | null = null;
+let libraryMutation: Promise<void> = Promise.resolve();
+let retentionStatus = { lastRunAt: null as string | null, deleted: 0, freedBytes: 0, failures: 0, noCandidates: true };
+const localAlerts = new LocalAlertCenter();
+
+async function withLibraryMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = libraryMutation;
+  let release!: () => void;
+  libraryMutation = new Promise<void>((resolveRelease) => { release = resolveRelease; });
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
 
 async function withRecordingLock<T>(
   cameraId: string,
@@ -288,6 +335,109 @@ async function deleteLibraryFile(
   }
 }
 
+async function assertNewExportDestination(path: string): Promise<void> {
+  try {
+    await stat(path);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Já existe um arquivo com esse nome no destino escolhido.");
+}
+
+function bundledFfmpegPath(): string {
+  return app.isPackaged
+    ? resolve(process.resourcesPath, "ffmpeg", "win32", "ffmpeg.exe")
+    : resolve(process.cwd(), "resources", "ffmpeg", "win32", "ffmpeg.exe");
+}
+
+function getClipExporter(): ClipExportService {
+  if (clipExporter) return clipExporter;
+  const binaryPath = bundledFfmpegPath();
+  clipExporter = new ClipExportService(
+    new FfmpegRunner(binaryPath),
+    binaryPath,
+    resolve(userDataPath, "export-temporary"),
+  );
+  return clipExporter;
+}
+
+async function runRetentionCleanup(): Promise<{ deleted: number; freedBytes: number }> {
+  if (!config?.retention.enabled || !database) return { deleted: 0, freedBytes: 0 };
+  const { maxAgeDays, maxBytes } = config.retention;
+  if (maxAgeDays === 0 && maxBytes === 0) {
+    retentionStatus = { lastRunAt: new Date().toISOString(), deleted: 0, freedBytes: 0, failures: 0, noCandidates: true };
+    return { deleted: 0, freedBytes: 0 };
+  }
+  const recordingsRoot = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
+  const snapshotsRoot = resolve(config.snapshotDir || resolve(userDataPath, "snapshots"));
+  type Candidate = { kind: "snapshot" | "recording"; id: string; timestamp: number; bytes: number; paths: string[] };
+  const candidates: Candidate[] = [];
+  const snapshots = await database.request("snapshot.list", {});
+  if (snapshots.ok) for (const snapshot of snapshots.value as SnapshotRecord[]) {
+    const metadata = await database.request("media.metadata.get", { kind: "snapshot", mediaId: snapshot.id });
+    if (metadata.ok && (metadata.value as MediaMetadata | null)?.protected) continue;
+    try {
+      const path = await resolveLibraryFile(snapshotsRoot, snapshot.path, new Set([".jpg", ".jpeg", ".png"]));
+      candidates.push({ kind: "snapshot", id: snapshot.id, timestamp: Date.parse(snapshot.capturedAt), bytes: (await stat(path)).size, paths: [path] });
+    } catch { /* unavailable media is never removed by retention */ }
+  }
+  const recordings = await database.request("recording.library", {});
+  if (recordings.ok) for (const recording of recordings.value as RecordingRecord[]) {
+    if (activeRecordings.has(recording.cameraId) || getClipExporter().isUsingRecording(recording.id) || ["starting", "recording", "stopping"].includes(recording.status)) continue;
+    const metadata = await database.request("media.metadata.get", { kind: "recording", mediaId: recording.id });
+    if (metadata.ok && (metadata.value as MediaMetadata | null)?.protected) continue;
+    const segments = await database.request("recording.segment.list", { recordingId: recording.id });
+    if (!segments.ok) continue;
+    try {
+      const paths = await Promise.all((segments.value as RecordingSegmentRecord[]).map((segment) => resolveLibraryFile(recordingsRoot, segment.path, new Set([".mp4", ".m4s"]))));
+      const sizes = await Promise.all(paths.map(async (path) => (await stat(path)).size));
+      candidates.push({ kind: "recording", id: recording.id, timestamp: Date.parse(recording.endedAt ?? recording.startedAt), bytes: sizes.reduce((a, b) => a + b, 0), paths });
+    } catch { /* preserve catalogue when a segment cannot be verified */ }
+  }
+  const selectedIds = new Set(selectRetentionCandidates(
+    candidates.map((candidate) => ({ ...candidate, protected: false, active: false })),
+    { now: Date.now(), maxAgeDays, maxBytes },
+  ));
+  let deleted = 0;
+  let freedBytes = 0;
+  let failures = 0;
+  for (const candidate of candidates) {
+    if (!selectedIds.has(candidate.id)) continue;
+    const staged: Array<{ original: string; temporary: string }> = [];
+    let catalogueDeleted = false;
+    try {
+      for (const path of candidate.paths) {
+        const temporary = `${path}.retention-${randomUUID()}.pending`;
+        await rename(path, temporary);
+        staged.push({ original: path, temporary });
+      }
+      const response = await database.request(candidate.kind === "snapshot" ? "snapshot.delete" : "recording.delete", { id: candidate.id });
+      if (!response.ok || response.value !== true) throw new Error("catalogue delete failed");
+      catalogueDeleted = true;
+      await Promise.all(staged.map(({ temporary }) => unlink(temporary).catch(() => undefined)));
+      freedBytes += candidate.bytes;
+      deleted += 1;
+    } catch {
+      failures += 1;
+      // Restore every staged file when the catalogue was not changed.
+      if (catalogueDeleted) continue;
+      await Promise.all(staged.map(async ({ original, temporary }) => {
+        try { await rename(temporary, original); } catch { /* best effort recovery */ }
+      }));
+    }
+  }
+  retentionStatus = { lastRunAt: new Date().toISOString(), deleted, freedBytes, failures, noCandidates: candidates.length === 0 };
+  return { deleted, freedBytes };
+}
+
 async function stopActiveRecording(
   cameraId: string,
   status: "completed" | "interrupted" = "completed",
@@ -310,7 +460,11 @@ async function stopActiveRecording(
     cameraId,
     status: "idle",
   });
+  if (status === "interrupted" || !disabled || !saved) {
+    localAlerts.report("recording_interrupted", "Gravação interrompida antes de ser finalizada.", cameraId);
+  }
   activeRecordings.delete(cameraId);
+  recordingSources.delete(cameraId);
   const mainSessionId = mediaSessionId(cameraId, "main");
   if (!activeViewSessions.has(mainSessionId))
     await mediaSupervisor?.release(mainSessionId);
@@ -321,7 +475,7 @@ async function catalogRecordingFiles(active: {
   recordingId: string;
   startedAt: string;
   recordDir: string;
-}): Promise<number> {
+}, segmentStatus: "completed" | "interrupted" = "completed"): Promise<number> {
   if (!database) return 0;
   const databaseConnection = database;
   const listFiles = async (): Promise<string[]> => {
@@ -371,12 +525,86 @@ async function catalogRecordingFiles(active: {
         startedAt: info.birthtime.toISOString(),
         endedAt: info.mtime.toISOString(),
         durationMs: Math.max(0, info.mtimeMs - info.birthtimeMs),
-        status: "completed",
+        status: segmentStatus,
       },
     );
     if (result.ok) cataloged += 1;
   }
   return cataloged;
+}
+
+async function startRecording(
+  cameraId: string,
+  source: "manual" | "scheduled",
+): Promise<Record<string, unknown>> {
+  return withRecordingLock(cameraId, async () => {
+    if (!config || !database || !mediaSupervisor) return { ok: false };
+    const existing = activeRecordings.get(cameraId);
+    if (existing) {
+      if (source === "manual") recordingSources.set(cameraId, "manual");
+      return {
+        ok: true, writeAllowed: true, cameraId, recordingId: existing.recordingId,
+        startedAt: existing.startedAt, status: "recording",
+      };
+    }
+    const camera = await getCameraRecord(cameraId);
+    if (!camera) throw new Error("Câmera não encontrada.");
+    if (!camera.active) throw new Error("A câmera está desativada.");
+    const rtspUrl = await cameraRtspUrl(camera);
+    if (!rtspUrl) throw new Error("A câmera não possui um endpoint RTSP configurado.");
+    const libraryRoot = config.recordingsDir || resolve(userDataPath, "recordings");
+    await mkdir(libraryRoot, { recursive: true });
+    const { checkStorageStatus, shouldAllowWrite } = await import("./services/storage-monitor.js");
+    const storage = await checkStorageStatus(libraryRoot);
+    if (!shouldAllowWrite(storage)) {
+      localAlerts.report(storage.lowSpace ? "storage_low" : "storage_unavailable", storage.lowSpace ? "Espaço em disco insuficiente para gravar." : "Diretório de gravação indisponível.", cameraId);
+      return { ok: false, writeAllowed: false, cameraId, status: "failed" };
+    }
+    const mainSessionId = mediaSessionId(cameraId, "main");
+    const recordPath = resolve(libraryRoot, "%path", "%Y-%m-%d", "%H-%M-%S-%f");
+    const currentMediaStatus = mediaSupervisor.status(mainSessionId);
+    const mediaStatus = currentMediaStatus?.state === "running" ? currentMediaStatus : await mediaSupervisor.acquire(mainSessionId, rtspUrl, `${mediaPath(cameraId)}_main`, recordPath, false);
+    if (mediaStatus.state !== "running") throw new Error(mediaStatus.error || "Gateway de mídia indisponível.");
+    const response = await database.request("recording.create", { cameraId });
+    if (!response.ok) throw new Error("Não foi possível criar o catálogo da gravação.");
+    const recording = response.value as { id: string; startedAt: string };
+    const enabled = await mediaSupervisor.setRecording(mainSessionId, true);
+    if (!enabled) {
+      await database.request("recording.complete", { id: recording.id, status: "failed" });
+      if (!activeViewSessions.has(mainSessionId)) await mediaSupervisor.release(mainSessionId);
+      throw new Error("O gateway recusou o início da gravação.");
+    }
+    activeRecordings.set(cameraId, { recordingId: recording.id, startedAt: recording.startedAt, recordDir: resolve(libraryRoot, `${mediaPath(cameraId)}_main`) });
+    recordingSources.set(cameraId, source);
+    await database.request("camera.setRecordingStatus", { cameraId, status: "recording" });
+    await emitCameraChanged();
+    return { ok: true, writeAllowed: true, recordingId: recording.id, cameraId, status: "recording", startedAt: recording.startedAt };
+  });
+}
+
+async function reconcileScheduledRecordings(): Promise<void> {
+  if (!database) return;
+  const cameras = await database.request("camera.listAll", undefined);
+  if (!cameras.ok) return;
+  const now = new Date();
+  for (const camera of cameras.value as CameraRecord[]) {
+    const scheduled = await database.request("schedule.list", { cameraId: camera.id });
+    if (!scheduled.ok) continue;
+    const suppressed = (scheduleSuppressedUntil.get(camera.id) ?? 0) > now.getTime();
+    if (suppressed && !isScheduledAt(scheduled.value as SchedulePeriod[], now)) {
+      scheduleSuppressedUntil.delete(camera.id);
+    }
+    const action = shouldScheduleRecording({
+      periods: scheduled.value as SchedulePeriod[], now, cameraActive: camera.active,
+      manualRecording: recordingSources.get(camera.id) === "manual", scheduledRecording: recordingSources.get(camera.id) === "scheduled",
+    });
+    if (action === "start" && !suppressed) {
+      try { await startRecording(camera.id, "scheduled"); } catch { localAlerts.report("recording_interrupted", "A gravação agendada não pôde ser iniciada.", camera.id); }
+    } else if (action === "stop") {
+      await withRecordingLock(camera.id, () => stopActiveRecording(camera.id));
+      await emitCameraChanged();
+    }
+  }
 }
 
 app.setName("simple-dvr-wifi");
@@ -419,7 +647,7 @@ function registerApplicationProtocol(): void {
       return snapshotResponse(request, snapshotMatch[1]!);
     }
     const recordingMatch = url.pathname.match(
-      /^\/media\/recordings\/([0-9a-f-]+)$/i,
+      /^\/media\/recordings\/([0-9a-f-]+)(?:\/(\d{1,5}))?$/i,
     );
     if (
       url.hostname === "renderer" &&
@@ -427,7 +655,11 @@ function registerApplicationProtocol(): void {
       !url.search &&
       !url.hash
     ) {
-      return recordingResponse(request, recordingMatch[1]!);
+      return recordingResponse(
+        request,
+        recordingMatch[1]!,
+        Number(recordingMatch[2] ?? 0),
+      );
     }
 
     const assetPath = resolveRenderAsset(rendererRoot, request.url);
@@ -486,8 +718,15 @@ async function snapshotResponse(
 async function recordingResponse(
   request: GlobalRequest,
   id: string,
+  segmentIndex = 0,
 ): Promise<Response> {
-  if (!z.string().uuid().safeParse(id).success || !database || !config) {
+  if (
+    !z.string().uuid().safeParse(id).success ||
+    !Number.isSafeInteger(segmentIndex) ||
+    segmentIndex < 0 ||
+    !database ||
+    !config
+  ) {
     return new Response("Not found", { status: 404 });
   }
 
@@ -498,10 +737,10 @@ async function recordingResponse(
   const segmentsResponse = await database.request("recording.segment.list", {
     recordingId: id,
   });
-  const first = segmentsResponse.ok
-    ? (segmentsResponse.value as RecordingSegmentRecord[])[0]
+  const segment = segmentsResponse.ok
+    ? (segmentsResponse.value as RecordingSegmentRecord[])[segmentIndex]
     : undefined;
-  if (!first) return new Response("Not found", { status: 404 });
+  if (!segment) return new Response("Not found", { status: 404 });
 
   try {
     const root = resolve(
@@ -509,7 +748,7 @@ async function recordingResponse(
     );
     const target = await resolveLibraryFile(
       root,
-      first.path,
+      segment.path,
       new Set([".mp4", ".m4s"]),
     );
     return await recordingFileResponse(request, target);
@@ -535,6 +774,44 @@ function configureSessionSecurity(): void {
 
 function configureWindowSecurity(window: BrowserWindow): void {
   configureNavigationSecurity(window.webContents);
+}
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow();
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function trayIconPath(): string {
+  const extension = process.platform === "win32" ? "ico" : "png";
+  return app.isPackaged
+    ? resolve(process.resourcesPath, `tray-icon.${extension}`)
+    : resolve(projectRoot, "build", `icon.${extension}`);
+}
+
+function createTray(): Tray {
+  const icon = nativeImage.createFromPath(trayIconPath());
+  if (icon.isEmpty()) throw new Error("Ícone da bandeja não encontrado.");
+  const menuIcon = icon.resize({ width: 16, height: 16, quality: "best" });
+
+  const applicationTray = new Tray(icon);
+  applicationTray.setToolTip("Simple DVR Wi-Fi");
+  applicationTray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "Abrir Simple DVR Wi-Fi",
+        icon: menuIcon,
+        click: showMainWindow,
+      },
+      { type: "separator" },
+      { label: "Sair", role: "quit" },
+    ]),
+  );
+  applicationTray.on("click", showMainWindow);
+  return applicationTray;
 }
 
 function runSecuritySmokeIfRequested(window: BrowserWindow): void {
@@ -600,6 +877,9 @@ function runSecuritySmokeIfRequested(window: BrowserWindow): void {
           const health = await database.healthCheck(3_000);
           probeResult.databaseWorkerOk = health;
         }
+        window.close();
+        probeResult.closeToTrayOk =
+          Boolean(tray) && !window.isDestroyed() && !window.isVisible();
         console.log(`__SECURITY_SMOKE__${JSON.stringify(probeResult)}`);
         await performShutdown();
         app.exit(0);
@@ -632,6 +912,14 @@ function createMainWindow(): BrowserWindow {
   configureWindowSecurity(window);
   runSecuritySmokeIfRequested(window);
   window.on("ready-to-show", () => window.show());
+  window.on("close", (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    window.hide();
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
+  });
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -697,6 +985,17 @@ const CameraConnectionTestSchema = z.object({
   username: z.string().max(253).nullable().optional(),
   password: z.string().max(2048).nullable().optional(),
 });
+const LibraryRequestSchema = z
+  .object({
+    cameraId: z.string().uuid().optional(),
+    startAt: z.string().datetime({ offset: true }).optional(),
+    endAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .refine(
+    ({ startAt, endAt }) =>
+      !startAt || !endAt || Date.parse(startAt) < Date.parse(endAt),
+    { message: "O período selecionado é inválido." },
+  );
 
 function registerIpcHandlers(): void {
   const registry = new IpcRegistry(ipcMain, () => mainWindow?.webContents);
@@ -1013,6 +1312,9 @@ function registerIpcHandlers(): void {
         cameraId: id,
         status: finalStatus,
       });
+      if (finalStatus === "network_error" || finalStatus === "unavailable" || finalStatus === "auth_error") {
+        localAlerts.report("camera_disconnected", "Câmera desconectada ou inacessível.", id);
+      }
       await emitCameraChanged();
       return { status: finalStatus, segments };
     },
@@ -1110,6 +1412,9 @@ function registerIpcHandlers(): void {
           cameraId,
           status: status.state === "running" ? "connected" : "media_error",
         });
+        if (status.state !== "running") {
+          localAlerts.report("camera_disconnected", "Câmera desconectada durante a transmissão.", cameraId);
+        }
       }
       await emitCameraChanged();
       return status;
@@ -1278,113 +1583,24 @@ function registerIpcHandlers(): void {
         cameraId,
         libraryRoot: config.snapshotDir || resolve(userDataPath, "snapshots"),
       });
-      await database.request("snapshot.create", {
+      const snapshotResponse = await database.request("snapshot.create", {
         cameraId,
         path: result.path,
       });
-      return { ok: true, ...result, source: "video" as const };
+      if (!snapshotResponse.ok)
+        throw new Error("Não foi possível registrar o frame capturado.");
+      return {
+        ok: true,
+        ...result,
+        snapshotId: (snapshotResponse.value as SnapshotRecord).id,
+        source: "video" as const,
+      };
     },
   });
 
   registry.register("recordings:start", {
     input: z.object({ cameraId: z.string().uuid() }),
-    handle: async ({ cameraId }) =>
-      withRecordingLock(cameraId, async () => {
-        if (!config || !database || !mediaSupervisor) return { ok: false };
-        const existing = activeRecordings.get(cameraId);
-        if (existing) {
-          return {
-            ok: true,
-            writeAllowed: true,
-            cameraId,
-            recordingId: existing.recordingId,
-            startedAt: existing.startedAt,
-            status: "recording",
-          };
-        }
-
-        const camera = await getCameraRecord(cameraId);
-        if (!camera) throw new Error("Câmera não encontrada.");
-        if (!camera.active) {
-          throw new Error("A câmera está desativada.");
-        }
-        const rtspUrl = await cameraRtspUrl(camera);
-        if (!rtspUrl)
-          throw new Error("A câmera não possui um endpoint RTSP configurado.");
-
-        const libraryRoot =
-          config.recordingsDir || resolve(userDataPath, "recordings");
-        await mkdir(libraryRoot, { recursive: true });
-        const { checkStorageStatus, shouldAllowWrite } =
-          await import("./services/storage-monitor.js");
-        const storage = await checkStorageStatus(libraryRoot);
-        if (!shouldAllowWrite(storage)) {
-          return { ok: false, writeAllowed: false, cameraId, status: "failed" };
-        }
-
-        const mainSessionId = mediaSessionId(cameraId, "main");
-        const recordPath = resolve(
-          libraryRoot,
-          "%path",
-          "%Y-%m-%d",
-          "%H-%M-%S-%f",
-        );
-        const currentMediaStatus = mediaSupervisor.status(mainSessionId);
-        const mediaStatus =
-          currentMediaStatus?.state === "running"
-            ? currentMediaStatus
-            : await mediaSupervisor.acquire(
-                mainSessionId,
-                rtspUrl,
-                `${mediaPath(cameraId)}_main`,
-                recordPath,
-                false,
-              );
-        if (mediaStatus.state !== "running") {
-          throw new Error(
-            mediaStatus.error || "Gateway de mídia indisponível.",
-          );
-        }
-
-        const response = await database.request("recording.create", {
-          cameraId,
-        });
-        if (!response.ok)
-          throw new Error("Não foi possível criar o catálogo da gravação.");
-        const recording = response.value as {
-          id: string;
-          startedAt: string;
-        };
-        const enabled = await mediaSupervisor.setRecording(mainSessionId, true);
-        if (!enabled) {
-          await database.request("recording.complete", {
-            id: recording.id,
-            status: "failed",
-          });
-          if (!activeViewSessions.has(mainSessionId))
-            await mediaSupervisor.release(mainSessionId);
-          throw new Error("O gateway recusou o início da gravação.");
-        }
-
-        activeRecordings.set(cameraId, {
-          recordingId: recording.id,
-          startedAt: recording.startedAt,
-          recordDir: resolve(libraryRoot, `${mediaPath(cameraId)}_main`),
-        });
-        await database.request("camera.setRecordingStatus", {
-          cameraId,
-          status: "recording",
-        });
-        await emitCameraChanged();
-        return {
-          ok: true,
-          writeAllowed: true,
-          recordingId: recording.id,
-          cameraId,
-          status: "recording",
-          startedAt: recording.startedAt,
-        };
-      }),
+    handle: async ({ cameraId }) => startRecording(cameraId, "manual"),
   });
 
   registry.register("recordings:stop", {
@@ -1392,6 +1608,10 @@ function registerIpcHandlers(): void {
     handle: async ({ cameraId }) =>
       withRecordingLock(cameraId, async () => {
         if (!database || !mediaSupervisor) return { stopped: false };
+        if (recordingSources.get(cameraId) === "scheduled") {
+          // A parada explícita vence a agenda até que a janela atual termine.
+          scheduleSuppressedUntil.set(cameraId, Date.now() + 24 * 60 * 60 * 1_000);
+        }
         const stopped = await stopActiveRecording(cameraId);
         if (!stopped.stopped) return stopped;
         await emitCameraChanged();
@@ -1434,65 +1654,58 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("library:snapshots", {
-    input: z.object({ cameraId: z.string().uuid().optional() }),
-    handle: async ({ cameraId }) => {
+    input: LibraryRequestSchema,
+    handle: async (filters) => {
       if (!database) return [];
-      const camerasResult = cameraId
-        ? null
-        : await database.request("camera.list", undefined);
-      const cameraIds = cameraId
-        ? [cameraId]
-        : camerasResult?.ok
-          ? (camerasResult.value as CameraRecord[]).map((camera) => camera.id)
-          : [];
-      const rows = await Promise.all(
-        cameraIds.map(async (id) => {
-          const result = await database!.request("snapshot.list", {
-            cameraId: id,
-          });
-          return result.ok ? (result.value as SnapshotRecord[]) : [];
-        }),
-      );
-      return rows
-        .flat()
-        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
+      const result = await database.request("snapshot.list", filters);
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value;
     },
   });
 
   registry.register("library:recordings", {
-    input: z.object({ cameraId: z.string().uuid().optional() }),
-    handle: async ({ cameraId }) => {
+    input: LibraryRequestSchema,
+    handle: async (filters) => {
       if (!database) return [];
-      const camerasResult = cameraId
-        ? null
-        : await database.request("camera.list", undefined);
-      const cameraIds = cameraId
-        ? [cameraId]
-        : camerasResult?.ok
-          ? (camerasResult.value as CameraRecord[]).map((camera) => camera.id)
-          : [];
-      const rows = await Promise.all(
-        cameraIds.map(async (id) => {
-          const result = await database!.request("recording.list", {
-            cameraId: id,
-          });
-          return result.ok ? (result.value as RecordingRecord[]) : [];
-        }),
-      );
-      const recordings = rows.flat();
-      const withPaths = await Promise.all(
-        recordings.map(async (recording) => {
-          const segments = await database!.request("recording.segment.list", {
-            recordingId: recording.id,
-          });
-          const first = segments.ok
-            ? (segments.value as RecordingSegmentRecord[])[0]
-            : undefined;
-          return { ...recording, path: first?.path ?? null };
-        }),
-      );
-      return withPaths.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      const result = await database.request("recording.library", filters);
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value;
     },
+  });
+
+  registry.register("library:recordingSegments", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!database) return [];
+      const result = await database.request("recording.segment.list", {
+        recordingId: id,
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value as RecordingSegmentRecord[];
+    },
+  });
+
+  registry.register("library:metadata", {
+    input: MediaMetadataInputSchema.pick({ kind: true, mediaId: true }),
+    handle: async ({ kind, mediaId }) => {
+      if (!database) return null;
+      const result = await database.request("media.metadata.get", {
+        kind,
+        mediaId,
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value as MediaMetadata | null;
+    },
+  });
+
+  registry.register("library:updateMetadata", {
+    input: MediaMetadataInputSchema,
+    handle: async (input) => withLibraryMutationLock(async () => {
+      if (!database) throw new Error("Biblioteca indisponível.");
+      const result = await database.request("media.metadata.upsert", input);
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value as MediaMetadata;
+    }),
   });
 
   registry.register("library:recordingPreview", {
@@ -1551,7 +1764,7 @@ function registerIpcHandlers(): void {
 
   registry.register("library:deleteSnapshot", {
     input: z.object({ id: z.string().uuid() }),
-    handle: async ({ id }) => {
+    handle: async ({ id }) => withLibraryMutationLock(async () => {
       if (!config || !database) return { deleted: false };
       const response = await database.request("snapshot.get", { id });
       const snapshot = response.ok
@@ -1571,12 +1784,12 @@ function registerIpcHandlers(): void {
       if (!deleted.ok || deleted.value !== true)
         throw new Error("Não foi possível excluir a foto.");
       return { deleted: true };
-    },
+    }),
   });
 
   registry.register("library:deleteRecording", {
     input: z.object({ id: z.string().uuid() }),
-    handle: async ({ id }) => {
+    handle: async ({ id }) => withLibraryMutationLock(async () => {
       if (!config || !database) return { deleted: false };
       const response = await database.request("recording.get", { id });
       const recording = response.ok
@@ -1613,7 +1826,7 @@ function registerIpcHandlers(): void {
       if (!deleted.ok || deleted.value !== true)
         throw new Error("Não foi possível excluir a gravação.");
       return { deleted: true };
-    },
+    }),
   });
 
   registry.register("library:openSnapshot", {
@@ -1650,6 +1863,263 @@ function registerIpcHandlers(): void {
     },
   });
 
+  registry.register("library:revealSnapshot", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) return { revealed: false };
+      const result = await database.request("snapshot.get", { id });
+      const snapshot = result.ok ? (result.value as SnapshotRecord | null) : null;
+      if (!snapshot) throw new Error("Foto não encontrada.");
+      const target = await resolveLibraryFile(
+        resolve(config.snapshotDir || resolve(userDataPath, "snapshots")),
+        snapshot.path,
+        new Set([".jpg", ".jpeg", ".png"]),
+      );
+      shell.showItemInFolder(target);
+      return { revealed: true };
+    },
+  });
+
+  registry.register("library:exportSnapshot", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) return { exported: false };
+      const result = await database.request("snapshot.get", { id });
+      const snapshot = result.ok ? (result.value as SnapshotRecord | null) : null;
+      if (!snapshot) throw new Error("Foto não encontrada.");
+      const target = await resolveLibraryFile(
+        resolve(config.snapshotDir || resolve(userDataPath, "snapshots")),
+        snapshot.path,
+        new Set([".jpg", ".jpeg", ".png"]),
+      );
+      const dialogOptions: Electron.SaveDialogOptions = {
+        defaultPath: basename(target),
+        filters: [{ name: "Imagem", extensions: ["jpg", "jpeg", "png"] }],
+        properties: ["showOverwriteConfirmation"],
+      };
+      const destination = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions);
+      if (destination.canceled || !destination.filePath) return { exported: false };
+      await assertNewExportDestination(destination.filePath);
+      await copyFile(target, destination.filePath, fsConstants.COPYFILE_EXCL);
+      return { exported: true };
+    },
+  });
+
+  registry.register("library:revealRecording", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) return { revealed: false };
+      const result = await database.request("recording.segment.list", { recordingId: id });
+      const segment = result.ok ? (result.value as RecordingSegmentRecord[])[0] : undefined;
+      if (!segment) throw new Error("Arquivo de vídeo não encontrado.");
+      const target = await resolveLibraryFile(
+        resolve(config.recordingsDir || resolve(userDataPath, "recordings")),
+        segment.path,
+        new Set([".mp4", ".m4s"]),
+      );
+      shell.showItemInFolder(target);
+      return { revealed: true };
+    },
+  });
+
+  registry.register("library:exportRecording", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !database) return { exported: false, files: 0 };
+      const result = await database.request("recording.segment.list", { recordingId: id });
+      const segments = result.ok ? (result.value as RecordingSegmentRecord[]) : [];
+      if (segments.length === 0) throw new Error("Arquivo de vídeo não encontrado.");
+      const root = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
+      const sources = await Promise.all(
+        segments.map((segment) =>
+          resolveLibraryFile(root, segment.path, new Set([".mp4", ".m4s"])),
+        ),
+      );
+      const dialogOptions: Electron.OpenDialogOptions = {
+        properties: ["openDirectory", "createDirectory"],
+      };
+      const destination = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions);
+      if (destination.canceled || !destination.filePaths[0])
+        return { exported: false, files: 0 };
+      const destinations = sources.map((source) =>
+        join(destination.filePaths[0]!, basename(source)),
+      );
+      await Promise.all(destinations.map(assertNewExportDestination));
+      await Promise.all(
+        sources.map((source, index) =>
+          copyFile(source, destinations[index]!, fsConstants.COPYFILE_EXCL),
+        ),
+      );
+      return { exported: true, files: sources.length };
+    },
+  });
+
+  registry.register("library:exportClip", {
+    input: z.object({
+      id: z.string().uuid(),
+      jobId: z.string().uuid(),
+      startAt: z.string().datetime(),
+      endAt: z.string().datetime(),
+    }),
+    handle: async ({ id, jobId, startAt, endAt }) => {
+      if (!config || !database) return { exported: false, jobId, gaps: [] };
+      const result = await database.request("recording.segment.list", { recordingId: id });
+      if (!result.ok) throw new Error("Não foi possível consultar os segmentos.");
+      const root = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
+      const sources: Array<RecordingSegmentRecord & { absolutePath: string }> = [];
+      for (const segment of result.value as RecordingSegmentRecord[]) {
+        try {
+          sources.push({
+            ...segment,
+            absolutePath: await resolveLibraryFile(root, segment.path, new Set([".mp4", ".m4s"])),
+          });
+        } catch {
+          // Missing segments become explicit gaps in the exported time range.
+        }
+      }
+      if (sources.length === 0) throw new Error("Nenhum arquivo de vídeo está disponível.");
+      const dialogOptions: Electron.SaveDialogOptions = {
+        defaultPath: `trecho-${id.slice(0, 8)}.mp4`,
+        filters: [{ name: "Vídeo MP4", extensions: ["mp4"] }],
+        properties: ["showOverwriteConfirmation"],
+      };
+      const destination = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions);
+      if (destination.canceled || !destination.filePath) return { exported: false, jobId, gaps: [] };
+      await assertNewExportDestination(destination.filePath);
+      const exported = await getClipExporter().export({
+        recordingId: id,
+        jobId,
+        segments: sources,
+        startAt,
+        endAt,
+        destinationPath: destination.filePath,
+      });
+      return { exported: true, jobId: exported.jobId, gaps: exported.gaps };
+    },
+  });
+
+  registry.register("library:cancelClipExport", {
+    input: z.object({ jobId: z.string().uuid() }),
+    handle: ({ jobId }) => ({ cancelled: getClipExporter().cancel(jobId) }),
+  });
+
+  registry.register("library:clipExportStatus", {
+    input: z.object({ jobId: z.string().uuid() }),
+    handle: ({ jobId }) => getClipExporter().status(jobId),
+  });
+
+  registry.register("library:storageUsage", {
+    input: EmptyRequestSchema,
+    handle: async () => {
+      if (!config || !database) return { freeBytes: null, totalBytes: null, usedBytes: 0, byCamera: [] };
+      const recordingsRoot = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
+      const snapshotsRoot = resolve(config.snapshotDir || resolve(userDataPath, "snapshots"));
+      const key = `${recordingsRoot}\0${snapshotsRoot}`;
+      if (libraryStorageCache?.key === key && libraryStorageCache.expiresAt > Date.now()) {
+        return libraryStorageCache.value;
+      }
+      const bytesFor = async (root: string, path: string): Promise<number> => {
+        try {
+          const info = await stat(resolve(root, path));
+          return info.isFile() ? info.size : 0;
+        } catch {
+          return 0;
+        }
+      };
+      const totals = new Map<string, number>();
+      const add = (cameraId: string, bytes: number): void => {
+        totals.set(cameraId, (totals.get(cameraId) ?? 0) + bytes);
+      };
+      const snapshots = await database.request("snapshot.list", {});
+      if (snapshots.ok) {
+        for (const snapshot of snapshots.value as SnapshotRecord[]) {
+          add(snapshot.cameraId, await bytesFor(snapshotsRoot, snapshot.path));
+        }
+      }
+      const recordings = await database.request("recording.library", {});
+      if (recordings.ok) {
+        for (const recording of recordings.value as RecordingRecord[]) {
+          const segments = await database.request("recording.segment.list", { recordingId: recording.id });
+          if (!segments.ok) continue;
+          for (const segment of segments.value as RecordingSegmentRecord[]) {
+            add(recording.cameraId, await bytesFor(recordingsRoot, segment.path));
+          }
+        }
+      }
+      const { checkStorageStatus } = await import("./services/storage-monitor.js");
+      const disk = await checkStorageStatus(recordingsRoot);
+      const byCamera = [...totals.entries()]
+        .map(([cameraId, bytes]) => ({ cameraId, bytes }))
+        .sort((a, b) => b.bytes - a.bytes);
+      const value = {
+        freeBytes: disk.freeBytes,
+        totalBytes: disk.totalBytes,
+        usedBytes: byCamera.reduce((total, item) => total + item.bytes, 0),
+        byCamera,
+      };
+      libraryStorageCache = { key, expiresAt: Date.now() + 30_000, value };
+      return value;
+    },
+  });
+
+  registry.register("schedules:list", {
+    input: z.object({ cameraId: z.string().uuid() }),
+    handle: async ({ cameraId }) => {
+      if (!database) return [];
+      const result = await database.request("schedule.list", { cameraId });
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value;
+    },
+  });
+
+  registry.register("schedules:replace", {
+    input: z.object({ cameraId: z.string().uuid(), periods: z.array(SchedulePeriodSchema).max(56) }),
+    handle: async ({ cameraId, periods }) => {
+      if (!database) return { saved: false };
+      const result = await database.request("schedule.replace", { cameraId, periods });
+      if (!result.ok) throw new Error(result.error.message);
+      await recordingScheduler?.refresh();
+      return { saved: result.value === true };
+    },
+  });
+
+  registry.register("schedules:status", {
+    input: z.object({ cameraId: z.string().uuid() }),
+    handle: async ({ cameraId }) => {
+      const camera = await getCameraRecord(cameraId);
+      if (!camera) throw new Error("Câmera não encontrada.");
+      const periods = await database?.request("schedule.list", { cameraId });
+      const schedule = periods?.ok ? periods.value as SchedulePeriod[] : [];
+      const now = new Date();
+      const active = isScheduledAt(schedule, now);
+      const source = recordingSources.get(cameraId) ?? null;
+      const suppressed = (scheduleSuppressedUntil.get(cameraId) ?? 0) > Date.now();
+      const blocked = !camera.active ? "Câmera desativada." : suppressed ? "Pausada manualmente até o fim do período atual." : !active ? "Fora do horário programado." : source === "manual" ? "Gravação manual tem prioridade." : null;
+      return { active, source, blocked, nextAt: nextScheduledAt(schedule, now)?.toISOString() ?? null, appMustRun: true };
+    },
+  });
+
+  registry.register("alerts:list", {
+    input: EmptyRequestSchema,
+    handle: () => localAlerts.list(),
+  });
+
+  registry.register("retention:status", {
+    input: EmptyRequestSchema,
+    handle: () => retentionStatus,
+  });
+
+  registry.register("alerts:dismiss", {
+    input: z.object({ id: z.string().min(1).max(160) }),
+    handle: ({ id }) => ({ dismissed: localAlerts.dismiss(id) }),
+  });
+
   registry.register("config:get", {
     input: EmptyRequestSchema,
     handle: () => config ?? null,
@@ -1667,6 +2137,7 @@ function registerIpcHandlers(): void {
         parsed.data.streams.enableHardwareAcceleration,
       );
       config = parsed.data;
+      await withLibraryMutationLock(() => runRetentionCleanup());
       return { saved: true };
     },
   });
@@ -1741,6 +2212,12 @@ async function initializeDatabase(): Promise<void> {
           id: recording.id,
           status: "interrupted",
         });
+        const libraryRoot = config.recordingsDir || resolve(userDataPath, "recordings");
+        await catalogRecordingFiles({
+          recordingId: recording.id,
+          startedAt: recording.startedAt,
+          recordDir: resolve(libraryRoot, `${mediaPath(camera.id)}_main`),
+        }, "interrupted");
       }
       await database.request("camera.setRecordingStatus", {
         cameraId: camera.id,
@@ -1765,6 +2242,10 @@ async function initializeDatabase(): Promise<void> {
     expectedHash: expectedMediaMtxHashFromManifest(mediaManifestPath),
     configDir: mediaConfigDir,
   });
+  recordingScheduler = new RecordingScheduler(reconcileScheduledRecordings);
+  recordingScheduler.start();
+  app.on("browser-window-focus", () => void recordingScheduler?.refresh());
+  powerMonitor.on("resume", () => void recordingScheduler?.refresh());
 
   ptzRegistry = new PtzControllerRegistry({
     getAdapter: async (cameraId) => {
@@ -1810,6 +2291,7 @@ async function initializeDatabase(): Promise<void> {
   shutdownCoordinator.register({
     name: "application-resources",
     stop: async () => {
+      recordingScheduler?.stop();
       for (const cameraId of [...activeRecordings.keys()]) {
         await withRecordingLock(cameraId, () =>
           stopActiveRecording(cameraId, "interrupted"),
@@ -1828,10 +2310,10 @@ app.whenReady().then(async () => {
   await initializeDatabase();
   registerIpcHandlers();
   mainWindow = createMainWindow();
+  tray = createTray();
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0)
-      mainWindow = createMainWindow();
+    showMainWindow();
   });
 });
 
@@ -1860,7 +2342,13 @@ async function performShutdown(): Promise<void> {
 }
 
 app.on("before-quit", (event) => {
+  isQuitting = true;
   if (shutdownCoordinator.size === 0 || shutdownStarted) return;
   event.preventDefault();
   void performShutdown().finally(() => app.quit());
+});
+
+app.on("will-quit", () => {
+  tray?.destroy();
+  tray = undefined;
 });

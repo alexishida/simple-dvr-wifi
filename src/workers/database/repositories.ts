@@ -5,6 +5,9 @@ import type {
   CameraProfile,
   CameraRecord,
   EncryptedCredential,
+  MediaKind,
+  MediaMetadata,
+  MediaMetadataInput,
   RecordingRecord,
   RecordingSegmentRecord,
   SnapshotRecord,
@@ -69,6 +72,27 @@ function mapSnapshot(row: Row): SnapshotRecord {
   }
 }
 
+function mapMediaMetadata(row: Row): MediaMetadata {
+  let tags: string[] = []
+  try {
+    const parsed = JSON.parse(row.tags_json as string) as unknown
+    if (Array.isArray(parsed) && parsed.every((tag) => typeof tag === 'string')) tags = parsed
+  } catch {
+    // A corrupted metadata row should not prevent the library from loading.
+  }
+  return {
+    kind: row.media_kind as MediaKind,
+    mediaId: row.media_id as string,
+    favorite: Boolean(row.favorite),
+    protected: Boolean(row.protected),
+    tags,
+    note: row.note as string,
+    sourceRecordingId: (row.source_recording_id as string) ?? null,
+    sourcePositionMs: (row.source_position_ms as number) ?? null,
+    updatedAt: row.updated_at as string,
+  }
+}
+
 export class CameraRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -88,26 +112,25 @@ export class CameraRepository {
       `INSERT INTO cameras (id, name, host, port, manufacturer, model, serial_number, epr, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    insert.run(
-      id,
-      input.name,
-      input.host,
-      input.port ?? null,
-      input.manufacturer ?? null,
-      input.model ?? null,
-      input.serialNumber ?? null,
-      input.epr ?? null,
-      ts,
-      ts,
-    )
-
     const replaceEndpoints = this.db.prepare(
       `INSERT OR REPLACE INTO camera_endpoints (camera_id, service, url) VALUES (?, ?, ?)`,
     )
-    const insertEndpoint = this.db.transaction((endpoints: CameraEndpoint[]) => {
+    const insertCamera = this.db.transaction((endpoints: CameraEndpoint[]) => {
+      insert.run(
+        id,
+        input.name,
+        input.host,
+        input.port ?? null,
+        input.manufacturer ?? null,
+        input.model ?? null,
+        input.serialNumber ?? null,
+        input.epr ?? null,
+        ts,
+        ts,
+      )
       for (const ep of endpoints) replaceEndpoints.run(id, ep.service, ep.url)
     })
-    insertEndpoint(input.endpoints ?? [])
+    insertCamera(input.endpoints ?? [])
 
     return this.getById(id) as CameraRecord
   }
@@ -465,6 +488,37 @@ export class RecordingRepository {
     return rows.map(mapRecording)
   }
 
+  listLibrary(filters: {
+    cameraId?: string
+    startAt?: string
+    endAt?: string
+  } = {}): Array<RecordingRecord & { path: string | null }> {
+    const clauses: string[] = []
+    const params: string[] = []
+    if (filters.cameraId) {
+      clauses.push('r.camera_id = ?')
+      params.push(filters.cameraId)
+    }
+    if (filters.startAt) {
+      clauses.push("COALESCE(r.ended_at, r.started_at) >= ?")
+      params.push(filters.startAt)
+    }
+    if (filters.endAt) {
+      clauses.push('r.started_at < ?')
+      params.push(filters.endAt)
+    }
+    const rows = this.db.prepare(
+      `SELECT r.*, (
+         SELECT s.path FROM recording_segments s
+         WHERE s.recording_id = r.id ORDER BY s.started_at, s.rowid LIMIT 1
+       ) AS path
+       FROM recordings r
+       ${clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''}
+       ORDER BY r.started_at DESC, r.rowid DESC`,
+    ).all(...params) as Row[]
+    return rows.map((row) => ({ ...mapRecording(row), path: (row.path as string) ?? null }))
+  }
+
   addSegment(input: {
     recordingId: string
     path: string
@@ -540,11 +594,72 @@ export class SnapshotRepository {
     return this.db.prepare('DELETE FROM snapshots WHERE id = ?').run(id).changes > 0
   }
 
-  list(cameraId: string): SnapshotRecord[] {
-    const rows = this.db
-      .prepare('SELECT * FROM snapshots WHERE camera_id = ? ORDER BY captured_at DESC')
-      .all(cameraId) as Row[]
+  list(filters: {
+    cameraId?: string
+    startAt?: string
+    endAt?: string
+  } = {}): SnapshotRecord[] {
+    const clauses: string[] = []
+    const params: string[] = []
+    if (filters.cameraId) {
+      clauses.push('camera_id = ?')
+      params.push(filters.cameraId)
+    }
+    if (filters.startAt) {
+      clauses.push('captured_at >= ?')
+      params.push(filters.startAt)
+    }
+    if (filters.endAt) {
+      clauses.push('captured_at < ?')
+      params.push(filters.endAt)
+    }
+    const rows = this.db.prepare(
+      `SELECT * FROM snapshots
+       ${clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''}
+       ORDER BY captured_at DESC, rowid DESC`,
+    ).all(...params) as Row[]
     return rows.map(mapSnapshot)
+  }
+}
+
+export class MediaMetadataRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  get(kind: MediaKind, mediaId: string): MediaMetadata | null {
+    const row = this.db
+      .prepare('SELECT * FROM media_metadata WHERE media_kind = ? AND media_id = ?')
+      .get(kind, mediaId) as Row | undefined
+    return row ? mapMediaMetadata(row) : null
+  }
+
+  upsert(input: MediaMetadataInput): MediaMetadata {
+    const updatedAt = nowIso()
+    this.db
+      .prepare(
+        `INSERT INTO media_metadata
+         (media_kind, media_id, favorite, protected, tags_json, note, source_recording_id, source_position_ms, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(media_kind, media_id) DO UPDATE SET
+           favorite = excluded.favorite,
+           protected = excluded.protected,
+           tags_json = excluded.tags_json,
+           note = excluded.note,
+           source_recording_id = excluded.source_recording_id,
+           source_position_ms = excluded.source_position_ms,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.kind,
+        input.mediaId,
+        input.favorite ? 1 : 0,
+        input.protected ? 1 : 0,
+        JSON.stringify(input.tags),
+        input.note,
+        input.sourceRecordingId,
+        input.sourcePositionMs,
+        updatedAt,
+      )
+    return this.get(input.kind, input.mediaId) as MediaMetadata
   }
 }
 

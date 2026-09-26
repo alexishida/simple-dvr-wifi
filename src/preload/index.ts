@@ -8,7 +8,11 @@ import type {
 import type { AppConfig } from "../shared/config.js";
 import type {
   CameraRecord,
+  MediaKind,
+  MediaMetadata,
+  MediaMetadataInput,
   RecordingRecord,
+  RecordingSegmentRecord,
   SnapshotRecord,
 } from "../shared/database.js";
 import {
@@ -101,6 +105,7 @@ export type PtzStopTrigger =
 
 export interface SnapshotCaptureResult {
   ok?: boolean;
+  snapshotId?: string;
   path?: string;
   relativePath?: string;
   bytes?: number;
@@ -118,6 +123,12 @@ export interface RecordingSessionResult {
 }
 
 export type RecordingLibraryItem = RecordingRecord & { path: string | null };
+
+export interface LibraryFilter {
+  cameraId?: string;
+  startAt?: string;
+  endAt?: string;
+}
 
 function subscribe<C extends EventChannel>(
   channel: C,
@@ -252,10 +263,29 @@ const api = {
       ipcRenderer.invoke("recordings:savePreview", input),
   },
   library: {
-    snapshots: (cameraId?: string): Promise<Result<SnapshotRecord[]>> =>
-      ipcRenderer.invoke("library:snapshots", { cameraId }),
-    recordings: (cameraId?: string): Promise<Result<RecordingLibraryItem[]>> =>
-      ipcRenderer.invoke("library:recordings", { cameraId }),
+    storageUsage: (): Promise<Result<{
+      freeBytes: number | null;
+      totalBytes: number | null;
+      usedBytes: number;
+      byCamera: Array<{ cameraId: string; bytes: number }>;
+    }>> => ipcRenderer.invoke("library:storageUsage"),
+    snapshots: (filters: LibraryFilter = {}): Promise<Result<SnapshotRecord[]>> =>
+      ipcRenderer.invoke("library:snapshots", filters),
+    recordings: (
+      filters: LibraryFilter = {},
+    ): Promise<Result<RecordingLibraryItem[]>> =>
+      ipcRenderer.invoke("library:recordings", filters),
+    recordingSegments: (id: string): Promise<Result<RecordingSegmentRecord[]>> =>
+      ipcRenderer.invoke("library:recordingSegments", { id }),
+    metadata: (input: {
+      kind: MediaKind;
+      mediaId: string;
+    }): Promise<Result<MediaMetadata | null>> =>
+      ipcRenderer.invoke("library:metadata", input),
+    updateMetadata: (
+      input: MediaMetadataInput,
+    ): Promise<Result<MediaMetadata>> =>
+      ipcRenderer.invoke("library:updateMetadata", input),
     recordingPreview: (
       id: string,
     ): Promise<Result<{ dataUrl: string | null }>> =>
@@ -268,6 +298,30 @@ const api = {
       ipcRenderer.invoke("library:openSnapshot", { path }),
     openRecording: (path: string): Promise<Result<{ opened: boolean }>> =>
       ipcRenderer.invoke("library:openRecording", { path }),
+    revealSnapshot: (id: string): Promise<Result<{ revealed: boolean }>> =>
+      ipcRenderer.invoke("library:revealSnapshot", { id }),
+    exportSnapshot: (id: string): Promise<Result<{ exported: boolean }>> =>
+      ipcRenderer.invoke("library:exportSnapshot", { id }),
+    revealRecording: (id: string): Promise<Result<{ revealed: boolean }>> =>
+      ipcRenderer.invoke("library:revealRecording", { id }),
+    exportRecording: (
+      id: string,
+    ): Promise<Result<{ exported: boolean; files: number }>> =>
+      ipcRenderer.invoke("library:exportRecording", { id }),
+    exportClip: (input: {
+      id: string;
+      jobId: string;
+      startAt: string;
+      endAt: string;
+    }): Promise<Result<{
+      exported: boolean;
+      jobId: string;
+      gaps: Array<{ startsAt: string; endsAt: string }>;
+    }>> => ipcRenderer.invoke("library:exportClip", input),
+    cancelClipExport: (jobId: string): Promise<Result<{ cancelled: boolean }>> =>
+      ipcRenderer.invoke("library:cancelClipExport", { jobId }),
+    clipExportStatus: (jobId: string): Promise<Result<{ active: boolean; percent: number }>> =>
+      ipcRenderer.invoke("library:clipExportStatus", { jobId }),
     deleteSnapshot: (id: string): Promise<Result<{ deleted: boolean }>> =>
       ipcRenderer.invoke("library:deleteSnapshot", { id }),
     deleteRecording: (id: string): Promise<Result<{ deleted: boolean }>> =>
@@ -276,6 +330,18 @@ const api = {
   shell: {
     openExternal: (url: string): Promise<Result<{ opened: boolean }>> =>
       ipcRenderer.invoke("shell:openExternal", { url }),
+  },
+  alerts: {
+    list: () => ipcRenderer.invoke("alerts:list"),
+    dismiss: (id: string) => ipcRenderer.invoke("alerts:dismiss", { id }),
+  },
+  retention: {
+    status: () => ipcRenderer.invoke("retention:status"),
+  },
+  schedules: {
+    list: (cameraId: string) => ipcRenderer.invoke("schedules:list", { cameraId }),
+    replace: (input: { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> }) => ipcRenderer.invoke("schedules:replace", input),
+    status: (cameraId: string) => ipcRenderer.invoke("schedules:status", { cameraId }),
   },
 };
 

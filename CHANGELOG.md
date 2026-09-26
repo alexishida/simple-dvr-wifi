@@ -8,12 +8,18 @@ versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Adicionado
 
+- Agenda semanal de gravação por câmera, com editor de períodos, suporte a
+  meia-noite, prioridade do comando manual e indicação do próximo início.
+- Reconciliação de gravações agendadas no início, retorno de suspensão e em
+  execução, além de recuperação do catálogo após encerramento inesperado.
+
 - Presets de RTSP para modelos e famílias de câmeras, com geração de URL por
   endereço, porta, canal e stream.
 - Teste visual e de interação isolado para o formulário de cadastro de câmera.
 - Identidade visual com logo, wordmark, favicon e ícones de janela e instalador.
 - Geração automática dos recursos de instalação a partir de `docs/logo/`.
 - Testes de interação e responsividade para a tela de configurações.
+- Ícone na bandeja do sistema, com ações para restaurar ou encerrar o aplicativo.
 
 ### Alterado
 
@@ -21,6 +27,7 @@ versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   permite substituir o preset por uma URL RTSP manual.
 - Reprodução ao vivo otimizada para reduzir consumo de recursos e recuperar os
   players após minimizar e restaurar a janela.
+- Fechar a janela agora mantém o monitoramento em execução na bandeja do sistema.
 - Experiência de tela cheia, configurações e biblioteca de mídia refinada.
 
 ### Corrigido

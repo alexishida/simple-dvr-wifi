@@ -1,14 +1,18 @@
 import type Database from "better-sqlite3";
 import DatabaseConstructor from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import type {
   CameraRecord,
   DbRequest,
   DbResponse,
 } from "../../shared/database.js";
+import { MediaMetadataInputSchema } from "../../shared/database.js";
+import { SchedulePeriodSchema } from "../../shared/recording-schedule.js";
 import {
   CameraRepository,
   CapabilityRepository,
   CredentialRepository,
+  MediaMetadataRepository,
   PreferenceRepository,
   ProfileRepository,
   RecordingRepository,
@@ -23,6 +27,7 @@ type RepositoryBag = {
   profiles: ProfileRepository;
   recordings: RecordingRepository;
   snapshots: SnapshotRepository;
+  metadata: MediaMetadataRepository;
   preferences: PreferenceRepository;
 };
 
@@ -59,6 +64,7 @@ export class SqliteWorker {
       profiles: new ProfileRepository(db),
       recordings: new RecordingRepository(db),
       snapshots: new SnapshotRepository(db),
+      metadata: new MediaMetadataRepository(db),
       preferences: new PreferenceRepository(db),
     };
   }
@@ -303,6 +309,14 @@ export class SqliteWorker {
           const p = request.payload as { cameraId: string };
           return reply(r.recordings.list(p.cameraId));
         }
+        case "recording.library": {
+          const p = request.payload as {
+            cameraId?: string;
+            startAt?: string;
+            endAt?: string;
+          };
+          return reply(r.recordings.listLibrary(p));
+        }
         case "recording.segment.create": {
           const p = request.payload as Parameters<
             RecordingRepository["addSegment"]
@@ -312,6 +326,29 @@ export class SqliteWorker {
         case "recording.segment.list": {
           const p = request.payload as { recordingId: string };
           return reply(r.recordings.listSegments(p.recordingId));
+        }
+        case "schedule.list": {
+          const db = this.database!;
+          const p = request.payload as { cameraId: string };
+          const rows = db.prepare(
+            "SELECT id, weekday, start_time AS start, end_time AS end, enabled FROM recording_schedules WHERE camera_id = ? ORDER BY weekday, start_time",
+          ).all(p.cameraId);
+          return reply(rows);
+        }
+        case "schedule.replace": {
+          const db = this.database!;
+          const p = request.payload as { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> };
+          if (!Array.isArray(p.periods) || !p.periods.every((period) => SchedulePeriodSchema.safeParse(period).success)) {
+            return error("VALIDATION_ERROR", "Períodos de agenda inválidos.");
+          }
+          const remove = db.prepare("DELETE FROM recording_schedules WHERE camera_id = ?");
+          const insert = db.prepare("INSERT INTO recording_schedules (id, camera_id, weekday, start_time, end_time, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+          db.transaction(() => {
+            remove.run(p.cameraId);
+            const now = new Date().toISOString();
+            for (const period of p.periods) insert.run(randomUUID(), p.cameraId, period.weekday, period.start, period.end, period.enabled ? 1 : 0, now, now);
+          })();
+          return reply(true);
         }
         case "snapshot.create": {
           const p = request.payload as { cameraId: string; path: string };
@@ -326,8 +363,60 @@ export class SqliteWorker {
           return reply(r.snapshots.delete(p.id));
         }
         case "snapshot.list": {
-          const p = request.payload as { cameraId: string };
-          return reply(r.snapshots.list(p.cameraId));
+          const p = request.payload as {
+            cameraId?: string;
+            startAt?: string;
+            endAt?: string;
+          };
+          return reply(r.snapshots.list(p));
+        }
+        case "media.metadata.get": {
+          const parsed = MediaMetadataInputSchema.pick({
+            kind: true,
+            mediaId: true,
+          }).safeParse(request.payload);
+          if (!parsed.success) {
+            return error("VALIDATION_ERROR", "Metadados de mídia inválidos.");
+          }
+          return reply(r.metadata.get(parsed.data.kind, parsed.data.mediaId));
+        }
+        case "media.metadata.upsert": {
+          const parsed = MediaMetadataInputSchema.safeParse(request.payload);
+          if (!parsed.success) {
+            return error("VALIDATION_ERROR", "Metadados de mídia inválidos.");
+          }
+          const input = parsed.data;
+          const media =
+            input.kind === "snapshot"
+              ? r.snapshots.getById(input.mediaId)
+              : r.recordings.getById(input.mediaId);
+          if (!media) return error("NOT_FOUND", "Mídia não encontrada.");
+          if (
+            input.kind === "recording" &&
+            (input.sourceRecordingId || input.sourcePositionMs !== null)
+          ) {
+            return error(
+              "VALIDATION_ERROR",
+              "A gravação não pode ter uma origem ou posição de origem.",
+            );
+          }
+          if (!input.sourceRecordingId && input.sourcePositionMs !== null) {
+            return error(
+              "VALIDATION_ERROR",
+              "A posição de origem exige uma gravação de origem.",
+            );
+          }
+          if (input.sourceRecordingId) {
+            const source = r.recordings.getById(input.sourceRecordingId);
+            if (!source) return error("NOT_FOUND", "Gravação de origem não encontrada.");
+            if (source.cameraId !== media.cameraId) {
+              return error(
+                "VALIDATION_ERROR",
+                "A gravação de origem deve pertencer à mesma câmera.",
+              );
+            }
+          }
+          return reply(r.metadata.upsert(input));
         }
         case "preference.get": {
           const p = request.payload as { key: string };
