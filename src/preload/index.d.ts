@@ -154,6 +154,10 @@ export interface PtzApi {
   ) => Promise<Result<{ started: boolean }>>;
   stop: (cameraId: string, trigger: PtzStopTrigger) => Promise<Result<void>>;
   status: (cameraId: string) => Promise<Result<PtzControlSnapshot | null>>;
+  listPresets: (cameraId: string) => Promise<Result<Array<{ token: string; name: string }>>>;
+  gotoPreset: (cameraId: string, presetToken: string) => Promise<Result<{ moved: boolean }>>;
+  setPreset: (cameraId: string, name: string, presetToken?: string) => Promise<Result<{ token: string | null }>>;
+  removePreset: (cameraId: string, presetToken: string) => Promise<Result<{ removed: boolean }>>;
 }
 
 export interface SnapshotCaptureResult {

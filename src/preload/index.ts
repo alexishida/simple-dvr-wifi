@@ -236,6 +236,10 @@ const api = {
       ipcRenderer.invoke("ptz:stop", { cameraId, trigger }),
     status: (cameraId: string): Promise<Result<PtzControlSnapshot | null>> =>
       ipcRenderer.invoke("ptz:status", { cameraId }),
+    listPresets: (cameraId: string): Promise<Result<Array<{ token: string; name: string }>>> => ipcRenderer.invoke("ptz:presets:list", { cameraId }),
+    gotoPreset: (cameraId: string, presetToken: string): Promise<Result<{ moved: boolean }>> => ipcRenderer.invoke("ptz:presets:goto", { cameraId, presetToken }),
+    setPreset: (cameraId: string, name: string, presetToken?: string): Promise<Result<{ token: string | null }>> => ipcRenderer.invoke("ptz:presets:set", { cameraId, name, presetToken }),
+    removePreset: (cameraId: string, presetToken: string): Promise<Result<{ removed: boolean }>> => ipcRenderer.invoke("ptz:presets:remove", { cameraId, presetToken }),
   },
   snapshots: {
     capture: (input: {

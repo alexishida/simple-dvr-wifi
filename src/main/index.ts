@@ -1528,6 +1528,43 @@ function registerIpcHandlers(): void {
       ptzRegistry ? ptzRegistry.state(cameraId) : null,
   });
 
+  const ptzCamera = async (cameraId: string): Promise<CameraRecord> => {
+    const camera = await getCameraRecord(cameraId);
+    if (!camera || !camera.active || !camera.supportsPtz) throw new Error("PTZ indisponível para esta câmera.");
+    return camera;
+  };
+  registry.register("ptz:presets:list", {
+    input: z.object({ cameraId: z.string().uuid() }),
+    handle: async ({ cameraId }) => {
+      const camera = await ptzCamera(cameraId);
+      return ptzRegistry?.listPresets(cameraId, camera.supportsPtz) ?? [];
+    },
+  });
+  registry.register("ptz:presets:goto", {
+    input: z.object({ cameraId: z.string().uuid(), presetToken: z.string().min(1).max(512) }),
+    handle: async ({ cameraId, presetToken }) => {
+      const camera = await ptzCamera(cameraId);
+      await ptzRegistry?.gotoPreset(cameraId, presetToken, camera.supportsPtz);
+      return { moved: true };
+    },
+  });
+  registry.register("ptz:presets:set", {
+    input: z.object({ cameraId: z.string().uuid(), name: z.string().trim().min(1).max(120), presetToken: z.string().min(1).max(512).optional() }),
+    handle: async ({ cameraId, name, presetToken }) => {
+      const camera = await ptzCamera(cameraId);
+      const token = await ptzRegistry?.setPreset(cameraId, name, presetToken, camera.supportsPtz);
+      return { token: token ?? null };
+    },
+  });
+  registry.register("ptz:presets:remove", {
+    input: z.object({ cameraId: z.string().uuid(), presetToken: z.string().min(1).max(512) }),
+    handle: async ({ cameraId, presetToken }) => {
+      const camera = await ptzCamera(cameraId);
+      await ptzRegistry?.removePreset(cameraId, presetToken, camera.supportsPtz);
+      return { removed: true };
+    },
+  });
+
   registry.register("snapshots:capture", {
     input: z.object({
       cameraId: z.string().uuid(),

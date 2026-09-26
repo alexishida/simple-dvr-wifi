@@ -193,7 +193,7 @@ export function FullscreenView({
                   cameraName={camera.name}
                   supported
                   zoomSupported
-                  presetsSupported={false}
+                  presetsSupported
                 />
                 <p className="fullscreen-control-hint">
                   Mantenha uma direção pressionada para mover. Solte para parar.

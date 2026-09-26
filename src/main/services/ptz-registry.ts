@@ -112,6 +112,37 @@ export class PtzControllerRegistry {
     return controller ? controller.state : null
   }
 
+  async listPresets(cameraId: string, ptzSupported: boolean) {
+    return this.enqueue(cameraId, async () => {
+      const controller = await this.getOrCreate(cameraId, ptzSupported)
+      return controller ? controller.listPresets() : []
+    })
+  }
+
+  async gotoPreset(cameraId: string, presetToken: string, ptzSupported: boolean): Promise<void> {
+    return this.enqueue(cameraId, async () => {
+      const controller = await this.getOrCreate(cameraId, ptzSupported)
+      if (!controller) throw new Error('PTZ indisponível.')
+      await controller.gotoPreset(presetToken)
+    })
+  }
+
+  async setPreset(cameraId: string, name: string, presetToken: string | undefined, ptzSupported: boolean): Promise<string> {
+    return this.enqueue(cameraId, async () => {
+      const controller = await this.getOrCreate(cameraId, ptzSupported)
+      if (!controller) throw new Error('PTZ indisponível.')
+      return controller.setPreset(name, presetToken)
+    })
+  }
+
+  async removePreset(cameraId: string, presetToken: string, ptzSupported: boolean): Promise<void> {
+    return this.enqueue(cameraId, async () => {
+      const controller = await this.getOrCreate(cameraId, ptzSupported)
+      if (!controller) throw new Error('PTZ indisponível.')
+      await controller.removePreset(presetToken)
+    })
+  }
+
   async release(cameraId: string): Promise<void> {
     return this.enqueue(cameraId, async () => {
       await this.pendingControllers.get(cameraId)?.catch(() => undefined)

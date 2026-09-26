@@ -2215,6 +2215,21 @@ p {
   gap: var(--space-3);
 }
 
+.ptz-preset-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ptz-preset-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
 @media (max-width: 640px) {
   .ptz-btn,
   .ptz-center {

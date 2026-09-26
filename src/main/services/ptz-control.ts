@@ -210,6 +210,23 @@ export class PtzControlService {
   get isStopBlocked(): boolean {
     return this.stopBlocked
   }
+
+  async listPresets(): Promise<Array<{ token: string; name: string }>> {
+    return this.guard.listPresets({ profileToken: this.profileToken })
+  }
+
+  async gotoPreset(presetToken: string): Promise<void> {
+    if (this.stopBlocked) throw new Error('Aguardando confirmação da parada PTZ.')
+    await this.guard.gotoPreset({ profileToken: this.profileToken, presetToken })
+  }
+
+  async setPreset(name: string, presetToken?: string): Promise<string> {
+    return this.guard.setPreset({ profileToken: this.profileToken, presetToken, name })
+  }
+
+  async removePreset(presetToken: string): Promise<void> {
+    await this.guard.removePreset({ profileToken: this.profileToken, presetToken })
+  }
 }
 
 export function isPtzAdapterSupported(guard: PtzCommandGuard): boolean {

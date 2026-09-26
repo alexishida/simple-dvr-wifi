@@ -86,9 +86,9 @@ Este arquivo organiza as próximas entregas por prioridade. Começar pela fase 0
 
 **Prioridade:** média. Pode avançar após a fase 0, independentemente do agendamento.
 
-- [ ] 4.1 Integrar serviço, IPC, preload e interface dos presets PTZ já parcialmente preparados.
-- [ ] 4.2 Permitir listar, salvar, substituir, remover e ir para posições nomeadas, conforme as capacidades efetivas da câmera.
-- [ ] 4.3 Desabilitar ações não suportadas e preservar o bloqueio de novos movimentos enquanto uma parada estiver sem confirmação.
+- [x] 4.1 Integrar serviço, IPC, preload e interface dos presets PTZ já parcialmente preparados.
+- [x] 4.2 Permitir listar, salvar, substituir, remover e ir para posições nomeadas, conforme as capacidades efetivas da câmera.
+- [x] 4.3 Desabilitar ações não suportadas e preservar o bloqueio de novos movimentos enquanto uma parada estiver sem confirmação.
 - [ ] 4.4 Criar grupos de câmeras e layouts nomeados, com persistência e tratamento de câmeras removidas ou desativadas.
 - [ ] 4.5 Exibir métricas disponíveis de conexão, perfil, resolução, codec e quadros perdidos; sinalizar métricas indisponíveis sem inventar valores.
 - [ ] 4.6 Validar uso de substream na grade, stream principal em tela cheia e liberação de recursos invisíveis, preservando a gravação.

@@ -91,7 +91,7 @@ function SidebarPtz({
         cameraName={camera?.name ?? null}
         supported={Boolean(camera?.active && camera.supportsPtz)}
         zoomSupported
-        presetsSupported={false}
+        presetsSupported={Boolean(camera?.active && camera.supportsPtz)}
       />
     </section>
   );

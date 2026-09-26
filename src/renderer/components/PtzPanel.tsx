@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BoltIcon, PlusIcon } from "../icons.js";
+import { BoltIcon, CheckIcon, PlusIcon, TrashIcon } from "../icons.js";
 
 interface PtzVelocityInput {
   pan?: number;
@@ -158,14 +158,38 @@ export function PtzPanel({
   }, [cameraId, presetsSupported, connectionState]);
 
   const loadPresets = useCallback(() => {
-    // Presets listing happens through the camera adapter in main; the renderer
-    // keeps a local copy for display when supported.
-    setPresets([]);
-  }, []);
+    if (!cameraId || !presetsSupported) return;
+    void window.api.ptz.listPresets(cameraId).then((result) => {
+      if (result.ok) setPresets(result.value);
+      else setCommandError(result.error.message);
+    });
+  }, [cameraId, presetsSupported]);
+
+  useEffect(() => {
+    if (connectionState === "ready") loadPresets();
+  }, [connectionState, loadPresets]);
 
   const savePreset = (): void => {
-    void setNewPresetName("");
-    void presets;
+    if (!cameraId || !newPresetName.trim()) return;
+    void window.api.ptz.setPreset(cameraId, newPresetName.trim()).then((result) => {
+      if (!result.ok) setCommandError(result.error.message);
+      else { setNewPresetName(""); loadPresets(); }
+    });
+  };
+
+  const gotoPreset = (presetToken: string): void => {
+    if (!cameraId || controlsDisabled) return;
+    void window.api.ptz.gotoPreset(cameraId, presetToken).then((result) => {
+      if (!result.ok) setCommandError(result.error.message);
+    });
+  };
+
+  const removePreset = (presetToken: string): void => {
+    if (!cameraId) return;
+    void window.api.ptz.removePreset(cameraId, presetToken).then((result) => {
+      if (!result.ok) setCommandError(result.error.message);
+      else loadPresets();
+    });
   };
 
   const controlsDisabled = connectionState !== "ready" || blocked;
@@ -336,6 +360,16 @@ export function PtzPanel({
               Salvar
             </button>
           </div>
+          {presets.length > 0 ? (
+            <ul className="ptz-preset-list">
+              {presets.map((preset) => (
+                <li key={preset.token}>
+                  <button type="button" className="btn btn-ghost btn-sm" disabled={controlsDisabled} onClick={() => gotoPreset(preset.token)}><CheckIcon size={14} /> {preset.name}</button>
+                  <button type="button" className="btn-icon" aria-label={`Remover preset ${preset.name}`} onClick={() => removePreset(preset.token)}><TrashIcon size={14} /></button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="field-hint">Nenhum preset disponível.</p>}
         </div>
       )}
     </div>
