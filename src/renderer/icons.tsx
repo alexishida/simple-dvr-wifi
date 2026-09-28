@@ -131,6 +131,13 @@ export const MoveIcon = icon(
 
 export const CheckIcon = icon(<path d="m5 12 4 4L19 6" />);
 
+export const RefreshIcon = icon(
+  <>
+    <path d="M20 7v5h-5" />
+    <path d="M20 12a8 8 0 1 0-2.3 5.7M20 12a8 8 0 0 0-2.3-5.7" />
+  </>,
+);
+
 export const CloseIcon = icon(
   <>
     <path d="m6 6 12 12M18 6 6 18" />

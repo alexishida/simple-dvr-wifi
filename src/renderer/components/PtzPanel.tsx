@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { BoltIcon, CheckIcon, PlusIcon, TrashIcon } from "../icons.js";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  BoltIcon,
+  CloseIcon,
+  MoveIcon,
+  PlusIcon,
+  RefreshIcon,
+  TrashIcon,
+} from "../icons.js";
 
 interface PtzVelocityInput {
   pan?: number;
@@ -39,9 +47,28 @@ export function PtzPanel({
     Array<{ token: string; name: string }>
   >([]);
   const [newPresetName, setNewPresetName] = useState("");
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const presetsDialogRef = useRef<HTMLDialogElement>(null);
+  const presetsTriggerRef = useRef<HTMLButtonElement>(null);
+  const presetId = useId();
   const activeAxis = useRef<{ pan: number; tilt: number } | null>(null);
   const activeMove = useRef(false);
   const repeatTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!presetsOpen) return;
+    const dialog = presetsDialogRef.current;
+    dialog?.showModal();
+    const trigger = presetsTriggerRef.current;
+    return () => {
+      dialog?.close();
+      trigger?.focus();
+    };
+  }, [presetsOpen]);
+
+  useEffect(() => {
+    setPresetsOpen(false);
+  }, [cameraId]);
 
   const clearRepeat = useCallback(() => {
     if (repeatTimer.current !== null) {
@@ -171,10 +198,15 @@ export function PtzPanel({
 
   const savePreset = (): void => {
     if (!cameraId || !newPresetName.trim()) return;
-    void window.api.ptz.setPreset(cameraId, newPresetName.trim()).then((result) => {
-      if (!result.ok) setCommandError(result.error.message);
-      else { setNewPresetName(""); loadPresets(); }
-    });
+    void window.api.ptz
+      .setPreset(cameraId, newPresetName.trim())
+      .then((result) => {
+        if (!result.ok) setCommandError(result.error.message);
+        else {
+          setNewPresetName("");
+          loadPresets();
+        }
+      });
   };
 
   const gotoPreset = (presetToken: string): void => {
@@ -249,7 +281,7 @@ export function PtzPanel({
         role="status"
       >
         <BoltIcon size={15} />
-        {statusMessage}
+        <span>{statusMessage}</span>
       </p>
       <div className="ptz-cross">
         <div className="ptz-row">{direction(0, 1, "Cima")}</div>
@@ -332,46 +364,129 @@ export function PtzPanel({
       )}
 
       {presetsSupported && (
-        <div className="ptz-presets">
-          <div className="section-heading">
-            <span className="panel-title">Presets</span>
-            <button
-              type="button"
-              className="btn-icon"
-              aria-label="Atualizar presets"
-              onClick={loadPresets}
-            >
-              ↻
-            </button>
-          </div>
-          <div className="field-row">
-            <input
-              className="field-input"
-              placeholder="Nome do preset"
-              value={newPresetName}
-              onChange={(event) => setNewPresetName(event.target.value)}
-            />
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              onClick={savePreset}
-            >
-              <PlusIcon size={14} />
-              Salvar
-            </button>
-          </div>
-          {presets.length > 0 ? (
-            <ul className="ptz-preset-list">
-              {presets.map((preset) => (
-                <li key={preset.token}>
-                  <button type="button" className="btn btn-ghost btn-sm" disabled={controlsDisabled} onClick={() => gotoPreset(preset.token)}><CheckIcon size={14} /> {preset.name}</button>
-                  <button type="button" className="btn-icon" aria-label={`Remover preset ${preset.name}`} onClick={() => removePreset(preset.token)}><TrashIcon size={14} /></button>
-                </li>
-              ))}
-            </ul>
-          ) : <p className="field-hint">Nenhum preset disponível.</p>}
-        </div>
+        <button
+          type="button"
+          className="btn btn-secondary ptz-presets-trigger"
+          ref={presetsTriggerRef}
+          aria-haspopup="dialog"
+          onClick={() => setPresetsOpen(true)}
+        >
+          <MoveIcon size={16} />
+          Presets
+          <span className="ptz-presets-count">{presets.length}</span>
+        </button>
       )}
+
+      {presetsSupported &&
+        presetsOpen &&
+        createPortal(
+          <dialog
+            ref={presetsDialogRef}
+            className="modal ptz-presets-modal"
+            aria-labelledby={`${presetId}-title`}
+            aria-describedby={`${presetId}-camera`}
+            onCancel={() => setPresetsOpen(false)}
+            onClose={() => setPresetsOpen(false)}
+          >
+            <div className="ptz-presets">
+              <div className="ptz-presets-heading">
+                <div>
+                  <h2 className="panel-title" id={`${presetId}-title`}>
+                    Presets
+                  </h2>
+                  <p className="field-hint" id={`${presetId}-camera`}>
+                    {cameraName}
+                  </p>
+                </div>
+                <div className="ptz-presets-actions">
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    aria-label="Atualizar presets"
+                    title="Atualizar presets"
+                    onClick={loadPresets}
+                  >
+                    <RefreshIcon size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-icon"
+                    aria-label="Fechar presets"
+                    title="Fechar presets"
+                    onClick={() => setPresetsOpen(false)}
+                  >
+                    <CloseIcon size={16} />
+                  </button>
+                </div>
+              </div>
+              {commandError && (
+                <p className="form-message form-error" role="alert">
+                  {commandError}
+                </p>
+              )}
+              <form
+                className="ptz-preset-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  savePreset();
+                }}
+              >
+                <label className="field-label" htmlFor={`${presetId}-name`}>
+                  Salvar posição atual
+                </label>
+                <input
+                  id={`${presetId}-name`}
+                  className="field-input"
+                  aria-label="Nome do preset"
+                  placeholder="Nome do preset"
+                  value={newPresetName}
+                  onChange={(event) => setNewPresetName(event.target.value)}
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary ptz-preset-save"
+                  aria-label="Salvar preset"
+                  title="Salvar preset"
+                  disabled={!newPresetName.trim()}
+                >
+                  <PlusIcon size={16} />
+                  Salvar
+                </button>
+              </form>
+              {presets.length > 0 ? (
+                <ul className="ptz-preset-list" aria-label="Presets salvos">
+                  {presets.map((preset) => (
+                    <li key={preset.token}>
+                      <button
+                        type="button"
+                        className="ptz-preset-goto"
+                        aria-label={`Ir para preset ${preset.name}`}
+                        title={`Ir para preset ${preset.name}`}
+                        disabled={controlsDisabled}
+                        onClick={() => gotoPreset(preset.token)}
+                      >
+                        <MoveIcon size={14} />
+                        <span>{preset.name}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-icon ptz-preset-remove"
+                        aria-label={`Remover preset ${preset.name}`}
+                        title={`Remover preset ${preset.name}`}
+                        onClick={() => removePreset(preset.token)}
+                      >
+                        <TrashIcon size={14} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="field-hint">Nenhum preset disponível.</p>
+              )}
+            </div>
+          </dialog>,
+          document.body,
+        )}
     </div>
   );
 }

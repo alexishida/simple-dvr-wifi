@@ -931,84 +931,98 @@ export function LibraryView({
           </div>
         </div>
         <div className="library-filter">
-          <label className="library-filter-label" htmlFor={filterId}>
-            <CameraIcon size={15} />
-            Câmera
-          </label>
-          <select
-            id={filterId}
-            className="field-input"
-            value={selectedCamera}
-            onChange={(event) => {
-              setSelectedCamera(event.target.value);
-              setCurrentPage(1);
-            }}
-          >
-            <option value="">Todas as câmeras</option>
-            {cameras.map((camera) => (
-              <option key={camera.id} value={camera.id}>
-                {camera.name}
-              </option>
-            ))}
-          </select>
-          <label className="library-filter-label" htmlFor={startDateId}>
-            De
-          </label>
-          <input
-            id={startDateId}
-            className="field-input library-date-input"
-            type="date"
-            value={startDate}
-            max={endDate || undefined}
-            onChange={(event) => {
-              setStartDate(event.target.value);
-              setCurrentPage(1);
-            }}
-          />
-          <label className="library-filter-label" htmlFor={startTimeId}>
-            Hora
-          </label>
-          <input
-            id={startTimeId}
-            className="field-input library-time-input"
-            type="time"
-            value={startTime}
-            disabled={!startDate}
-            max={startDate === endDate ? endTime || undefined : undefined}
-            onChange={(event) => {
-              setStartTime(event.target.value);
-              setCurrentPage(1);
-            }}
-          />
-          <label className="library-filter-label" htmlFor={endDateId}>
-            Até
-          </label>
-          <input
-            id={endDateId}
-            className="field-input library-date-input"
-            type="date"
-            value={endDate}
-            min={startDate || undefined}
-            onChange={(event) => {
-              setEndDate(event.target.value);
-              setCurrentPage(1);
-            }}
-          />
-          <label className="library-filter-label" htmlFor={endTimeId}>
-            Hora
-          </label>
-          <input
-            id={endTimeId}
-            className="field-input library-time-input"
-            type="time"
-            value={endTime}
-            disabled={!endDate}
-            min={startDate === endDate ? startTime || undefined : undefined}
-            onChange={(event) => {
-              setEndTime(event.target.value);
-              setCurrentPage(1);
-            }}
-          />
+          <div className="library-field">
+            <label className="library-filter-label" htmlFor={filterId}>
+              <CameraIcon size={15} />
+              Câmera
+            </label>
+            <select
+              id={filterId}
+              className="field-input"
+              value={selectedCamera}
+              onChange={(event) => {
+                setSelectedCamera(event.target.value);
+                setCurrentPage(1);
+              }}
+            >
+              <option value="">Todas as câmeras</option>
+              {cameras.map((camera) => (
+                <option key={camera.id} value={camera.id}>
+                  {camera.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="library-period">
+            <div className="library-field">
+              <label className="library-filter-label" htmlFor={startDateId}>
+                De
+              </label>
+              <input
+                id={startDateId}
+                className="field-input library-date-input"
+                type="date"
+                value={startDate}
+                max={endDate || undefined}
+                onChange={(event) => {
+                  setStartDate(event.target.value);
+                  setCurrentPage(1);
+                }}
+              />
+            </div>
+            <div className="library-field">
+              <label className="library-filter-label" htmlFor={startTimeId}>
+                Hora
+              </label>
+              <input
+                id={startTimeId}
+                className="field-input library-time-input"
+                type="time"
+                value={startTime}
+                disabled={!startDate}
+                max={startDate === endDate ? endTime || undefined : undefined}
+                onChange={(event) => {
+                  setStartTime(event.target.value);
+                  setCurrentPage(1);
+                }}
+              />
+            </div>
+          </div>
+          <div className="library-period">
+            <div className="library-field">
+              <label className="library-filter-label" htmlFor={endDateId}>
+                Até
+              </label>
+              <input
+                id={endDateId}
+                className="field-input library-date-input"
+                type="date"
+                value={endDate}
+                min={startDate || undefined}
+                onChange={(event) => {
+                  setEndDate(event.target.value);
+                  setCurrentPage(1);
+                }}
+              />
+            </div>
+            <div className="library-field">
+              <label className="library-filter-label" htmlFor={endTimeId}>
+                Hora
+              </label>
+              <input
+                id={endTimeId}
+                className="field-input library-time-input"
+                type="time"
+                value={endTime}
+                disabled={!endDate}
+                min={startDate === endDate ? startTime || undefined : undefined}
+                onChange={(event) => {
+                  setEndTime(event.target.value);
+                  setCurrentPage(1);
+                }}
+              />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1016,65 +1030,73 @@ export function LibraryView({
         className="library-display-controls"
         aria-label="Exibição da biblioteca"
       >
-        <label className="library-filter-label" htmlFor={sortId}>
-          Ordenar
-        </label>
-        <select
-          id={sortId}
-          className="field-input library-control-input"
-          value={sortOrder}
-          onChange={(event) => {
-            setSortOrder(event.target.value as SortOrder);
-            setCurrentPage(1);
-          }}
-        >
-          <option value="newest">Mais recentes</option>
-          <option value="oldest">Mais antigos</option>
-        </select>
-        <label className="library-filter-label" htmlFor={layoutId}>
-          Visualização
-        </label>
-        <select
-          id={layoutId}
-          className="field-input library-control-input"
-          value={layout}
-          onChange={(event) => setLayout(event.target.value as LibraryLayout)}
-        >
-          <option value="grid">Grade</option>
-          <option value="list">Lista</option>
-        </select>
-        <label className="library-filter-label" htmlFor={densityId}>
-          Densidade
-        </label>
-        <select
-          id={densityId}
-          className="field-input library-control-input"
-          value={density}
-          onChange={(event) => setDensity(event.target.value as LibraryDensity)}
-        >
-          <option value="comfortable">Confortável</option>
-          <option value="compact">Compacta</option>
-        </select>
-        <label className="library-filter-label" htmlFor={pageSizeId}>
-          Itens por página
-        </label>
-        <select
-          id={pageSizeId}
-          className="field-input library-control-input"
-          value={pageSize}
-          onChange={(event) => {
-            setPageSize(
-              Number(event.target.value) as (typeof PAGE_SIZES)[number],
-            );
-            setCurrentPage(1);
-          }}
-        >
-          {PAGE_SIZES.map((size) => (
-            <option key={size} value={size}>
-              {size}
-            </option>
-          ))}
-        </select>
+        <div className="library-field">
+          <label className="library-filter-label" htmlFor={sortId}>
+            Ordenar
+          </label>
+          <select
+            id={sortId}
+            className="field-input library-control-input"
+            value={sortOrder}
+            onChange={(event) => {
+              setSortOrder(event.target.value as SortOrder);
+              setCurrentPage(1);
+            }}
+          >
+            <option value="newest">Mais recentes</option>
+            <option value="oldest">Mais antigos</option>
+          </select>
+        </div>
+        <div className="library-field">
+          <label className="library-filter-label" htmlFor={layoutId}>
+            Visualização
+          </label>
+          <select
+            id={layoutId}
+            className="field-input library-control-input"
+            value={layout}
+            onChange={(event) => setLayout(event.target.value as LibraryLayout)}
+          >
+            <option value="grid">Grade</option>
+            <option value="list">Lista</option>
+          </select>
+        </div>
+        <div className="library-field">
+          <label className="library-filter-label" htmlFor={densityId}>
+            Densidade
+          </label>
+          <select
+            id={densityId}
+            className="field-input library-control-input"
+            value={density}
+            onChange={(event) => setDensity(event.target.value as LibraryDensity)}
+          >
+            <option value="comfortable">Confortável</option>
+            <option value="compact">Compacta</option>
+          </select>
+        </div>
+        <div className="library-field">
+          <label className="library-filter-label" htmlFor={pageSizeId}>
+            Itens por página
+          </label>
+          <select
+            id={pageSizeId}
+            className="field-input library-control-input"
+            value={pageSize}
+            onChange={(event) => {
+              setPageSize(
+                Number(event.target.value) as (typeof PAGE_SIZES)[number],
+              );
+              setCurrentPage(1);
+            }}
+          >
+            {PAGE_SIZES.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {mode === "recordings" && (
@@ -1085,29 +1107,33 @@ export function LibraryView({
               <p>Períodos gravados, lacunas e arquivos disponíveis no dia.</p>
             </div>
             <div className="recording-timeline-filters">
-              <label className="library-filter-label" htmlFor="timeline-camera">
-                <CameraIcon size={15} /> Câmera
-              </label>
-              <select
-                id="timeline-camera"
-                className="field-input library-control-input"
-                value={timelineCameraId}
-                onChange={(event) => setTimelineCamera(event.target.value)}
-              >
-                {Array.from(new Set(sortedRecordings.map((recording) => recording.cameraId))).map((cameraId) => (
-                  <option key={cameraId} value={cameraId}>
-                    {cameraNames.get(cameraId) ?? "Câmera removida"}
-                  </option>
-                ))}
-              </select>
-              <label className="library-filter-label" htmlFor="timeline-date">Dia</label>
-              <input
-                id="timeline-date"
-                className="field-input library-date-input"
-                type="date"
-                value={effectiveTimelineDate}
-                onChange={(event) => setTimelineDate(event.target.value)}
-              />
+              <div className="library-field">
+                <label className="library-filter-label" htmlFor="timeline-camera">
+                  <CameraIcon size={15} /> Câmera
+                </label>
+                <select
+                  id="timeline-camera"
+                  className="field-input library-control-input"
+                  value={timelineCameraId}
+                  onChange={(event) => setTimelineCamera(event.target.value)}
+                >
+                  {Array.from(new Set(sortedRecordings.map((recording) => recording.cameraId))).map((cameraId) => (
+                    <option key={cameraId} value={cameraId}>
+                      {cameraNames.get(cameraId) ?? "Câmera removida"}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="library-field">
+                <label className="library-filter-label" htmlFor="timeline-date">Dia</label>
+                <input
+                  id="timeline-date"
+                  className="field-input library-date-input"
+                  type="date"
+                  value={effectiveTimelineDate}
+                  onChange={(event) => setTimelineDate(event.target.value)}
+                />
+              </div>
             </div>
           </div>
           {timelineCameraId && effectiveTimelineDate ? (
@@ -1244,7 +1270,7 @@ export function LibraryView({
                       </li>
                     )}
                     <li
-                      className={`library-item snapshot-card${selectedIds.has(snapshot.id) ? " is-selected" : ""}`}
+                      className={`library-item media-card snapshot-card${selectedIds.has(snapshot.id) ? " is-selected" : ""}`}
                     >
                       <label className="library-item-select">
                         <input
@@ -1268,14 +1294,13 @@ export function LibraryView({
                           }
                         />
                       </button>
-                      <div className="snapshot-card-header">
+                      <div className="media-card-header">
                         <span className="library-item-icon">
-                          <CameraIcon size={20} />
+                          <CameraIcon size={18} />
                         </span>
-                        <div className="snapshot-card-heading">
-                          <span className="snapshot-card-label">Câmera</span>
+                        <div className="media-card-heading">
                           <h3
-                            className="snapshot-card-title"
+                            className="media-card-title"
                             title={
                               cameraNames.get(snapshot.cameraId) ??
                               "Câmera removida"
@@ -1284,8 +1309,8 @@ export function LibraryView({
                             {cameraNames.get(snapshot.cameraId) ??
                               "Câmera removida"}
                           </h3>
-                          <div className="snapshot-card-capture">
-                            <span>Capturada em</span>
+                          <div className="media-card-capture">
+                            <span className="sr-only">Capturada em</span>
                             <time dateTime={snapshot.capturedAt}>
                               {formatDate(snapshot.capturedAt)}
                             </time>
@@ -1300,10 +1325,10 @@ export function LibraryView({
                           <span title="Protegido contra exclusão"><ShieldIcon size={14} /> Protegido</span>
                         )}
                       </div>
-                      <div className="snapshot-card-actions">
+                      <div className="media-card-actions">
                         <button
                           type="button"
-                          className="btn btn-secondary snapshot-card-open"
+                          className="btn btn-secondary media-card-open"
                           onClick={() => openSnapshotViewer(snapshot)}
                         >
                           <ImageIcon size={16} />
@@ -1312,30 +1337,31 @@ export function LibraryView({
                         <button
                           type="button"
                           className="btn btn-secondary"
+                          aria-label={exportingId === snapshot.id ? "Exportando foto" : "Exportar foto"}
+                          title={exportingId === snapshot.id ? "Exportando foto…" : "Exportar foto"}
                           disabled={exportingId === snapshot.id}
                           onClick={() => void exportSnapshot(snapshot)}
                         >
                           <ExportIcon size={16} />
-                          {exportingId === snapshot.id ? "Exportando…" : "Exportar"}
                         </button>
                         <button
                           type="button"
                           className="btn btn-secondary"
+                          aria-label="Abrir pasta da foto"
+                          title="Abrir pasta da foto"
                           onClick={() => void window.api.library.revealSnapshot(snapshot.id)}
                         >
                           <FolderIcon size={16} />
-                          Abrir pasta
                         </button>
                         <button
                           type="button"
-                          className="btn btn-secondary btn-danger snapshot-card-delete"
+                          className="btn btn-secondary btn-danger media-card-delete"
+                          aria-label={deletingId === snapshot.id ? "Excluindo foto" : "Excluir foto"}
+                          title={deletingId === snapshot.id ? "Excluindo foto…" : "Excluir foto"}
                           disabled={deletingId === snapshot.id}
                           onClick={() => void deleteSnapshot(snapshot)}
                         >
                           <TrashIcon size={16} />
-                          {deletingId === snapshot.id
-                            ? "Excluindo…"
-                            : "Excluir"}
                         </button>
                       </div>
                     </li>
@@ -1349,7 +1375,7 @@ export function LibraryView({
                       </li>
                     )}
                     <li
-                      className={`library-item${selectedIds.has(recording.id) ? " is-selected" : ""}`}
+                      className={`library-item media-card recording-card${selectedIds.has(recording.id) ? " is-selected" : ""}`}
                     >
                       <label className="library-item-select">
                         <input
@@ -1371,26 +1397,26 @@ export function LibraryView({
                           {recordingStatusLabel(recording.status)}
                         </span>
                       </div>
-                      <div className="library-item-body">
-                        <p className="library-item-detail">
-                          <span>Câmera</span>
-                          <strong>
-                            {cameraNames.get(recording.cameraId) ??
-                              "Câmera removida"}
-                          </strong>
-                        </p>
-                        <p className="library-item-detail">
-                          <span>Gravado em</span>
-                          <time dateTime={recording.startedAt}>
-                            {formatDate(recording.startedAt)}
-                          </time>
-                        </p>
-                        <p className="library-item-detail">
-                          <span>Duração</span>
-                          <strong>
-                            {formatDuration(recording.durationMs)}
-                          </strong>
-                        </p>
+                      <div className="media-card-header">
+                        <span className="library-item-icon">
+                          <CameraIcon size={18} />
+                        </span>
+                        <div className="media-card-heading">
+                          <h3
+                            className="media-card-title"
+                            title={cameraNames.get(recording.cameraId) ?? "Câmera removida"}
+                          >
+                            {cameraNames.get(recording.cameraId) ?? "Câmera removida"}
+                          </h3>
+                          <div className="media-card-capture">
+                            <time dateTime={recording.startedAt}>
+                              {formatDate(recording.startedAt)}
+                            </time>
+                            <span>Duração: {formatDuration(recording.durationMs)}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="recording-card-details">
                         <p
                           className={`library-item-file-status${recording.path ? " library-item-file-available" : " library-item-file-missing"}`}
                         >
@@ -1408,10 +1434,10 @@ export function LibraryView({
                           )}
                         </div>
                       </div>
-                      <div className="library-item-actions">
+                      <div className="media-card-actions">
                         <button
                           type="button"
-                          className="btn btn-secondary library-item-action"
+                          className="btn btn-secondary media-card-open"
                           title={
                             recording.path
                               ? "Reproduzir gravação"
@@ -1433,32 +1459,33 @@ export function LibraryView({
                         </button>
                         <button
                           type="button"
-                          className="btn btn-secondary library-item-action"
+                          className="btn btn-secondary"
+                          aria-label={exportingId === recording.id ? "Exportando gravação" : "Exportar gravação"}
+                          title={exportingId === recording.id ? "Exportando gravação…" : "Exportar gravação"}
                           disabled={exportingId === recording.id || !recording.path}
                           onClick={() => void exportRecording(recording)}
                         >
                           <ExportIcon size={16} />
-                          {exportingId === recording.id ? "Exportando…" : "Exportar"}
                         </button>
                         <button
                           type="button"
-                          className="btn btn-secondary library-item-action"
+                          className="btn btn-secondary"
+                          aria-label="Abrir pasta da gravação"
+                          title="Abrir pasta da gravação"
                           disabled={!recording.path}
                           onClick={() => void window.api.library.revealRecording(recording.id)}
                         >
                           <FolderIcon size={16} />
-                          Abrir pasta
                         </button>
                         <button
                           type="button"
-                          className="btn btn-danger library-item-action"
+                          className="btn btn-secondary btn-danger media-card-delete"
+                          aria-label={deletingId === recording.id ? "Excluindo gravação" : "Excluir gravação"}
+                          title={deletingId === recording.id ? "Excluindo gravação…" : "Excluir gravação"}
                           disabled={deletingId === recording.id}
                           onClick={() => void deleteRecording(recording)}
                         >
                           <TrashIcon size={16} />
-                          {deletingId === recording.id
-                            ? "Excluindo…"
-                            : "Excluir"}
                         </button>
                       </div>
                     </li>
