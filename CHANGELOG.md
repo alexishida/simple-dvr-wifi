@@ -8,6 +8,10 @@ versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Adicionado
 
+- Consulta e importação de gravações do cartão SD da Intelbras Mibo iM4-C na
+  biblioteca, com busca por dia, download autenticado e conversão para MP4. A tela
+  Gravações separa a biblioteca local e o cartão SD em abas.
+
 - Agenda semanal de gravação por câmera, com editor de períodos, suporte a
   meia-noite, prioridade do comando manual e indicação do próximo início.
 - Reconciliação de gravações agendadas no início, retorno de suspensão e em

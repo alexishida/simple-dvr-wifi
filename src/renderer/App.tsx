@@ -4,6 +4,7 @@ import { SettingsView } from "./views/SettingsView.js";
 import { CamerasView } from "./views/CamerasView.js";
 import { FullscreenView } from "./views/FullscreenView.js";
 import { LibraryView } from "./views/LibraryView.js";
+import { RecordingsView } from "./views/RecordingsView.js";
 import {
   LayoutSwitcher,
   MonitoringGrid,
@@ -40,7 +41,7 @@ const NAV_ITEMS: Array<{
 const SECTION_DESCRIPTIONS: Record<Section, string> = {
   dashboard: "Monitoramento ao vivo das suas câmeras.",
   cameras: "Gerencie câmeras cadastradas, edite e teste conexões.",
-  recordings: "Gravações locais por câmera, data e horário.",
+  recordings: "Consulte a biblioteca local e as gravações no cartão SD.",
   snapshots: "Snapshots capturados por câmera.",
   settings: "Ajuste as preferências do aplicativo, organizadas por categoria.",
 };
@@ -208,9 +209,7 @@ export function App(): React.JSX.Element {
             onEditCameraConsumed={() => setCameraToEditId(null)}
           />
         )}
-        {section === "recordings" && (
-          <LibraryView cameras={cameras} mode="recordings" />
-        )}
+        {section === "recordings" && <RecordingsView cameras={cameras} />}
         {section === "snapshots" && (
           <LibraryView cameras={cameras} mode="snapshots" />
         )}

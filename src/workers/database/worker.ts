@@ -293,6 +293,10 @@ export class SqliteWorker {
           const p = request.payload as { cameraId: string };
           return reply(r.recordings.create(p.cameraId));
         }
+        case "recording.importSdCard": {
+          const p = request.payload as Parameters<RecordingRepository['importSdCard']>[0];
+          return reply(r.recordings.importSdCard(p));
+        }
         case "recording.complete": {
           const p = request.payload as { id: string; status: string };
           return reply(r.recordings.complete(p.id, p.status as never));

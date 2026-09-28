@@ -30,6 +30,28 @@ function memoryDatabase(t) {
   };
 }
 
+test('importing an SD card recording preserves the camera time and is idempotent', async (t) => {
+  const { worker, request } = memoryDatabase(t)
+  const camera = await request('camera.create', { name: 'Mibo', host: '192.168.0.10' })
+  const input = {
+    cameraId: camera.id,
+    path: 'C:/recordings/sd-card/example.mp4',
+    startedAt: '2026-09-27T21:10:46.000Z',
+    endedAt: '2026-09-27T21:11:20.000Z',
+    durationMs: 34_000,
+  }
+  const first = await request('recording.importSdCard', input)
+  const second = await request('recording.importSdCard', input)
+  assert.equal(first.id, second.id)
+  assert.equal(first.startedAt, input.startedAt)
+  assert.equal(first.endedAt, input.endedAt)
+  assert.equal(first.durationMs, input.durationMs)
+  assert.equal(worker.database.prepare('SELECT COUNT(*) AS count FROM recordings').get().count, 1)
+  const segments = await request('recording.segment.list', { recordingId: first.id })
+  assert.equal(segments.length, 1)
+  assert.equal(segments[0].path, input.path)
+})
+
 test("failed camera endpoint insertion rolls back the entire camera", async (t) => {
   const { worker, request } = memoryDatabase(t);
   const response = await worker.dispatch({

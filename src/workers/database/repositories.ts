@@ -447,6 +447,33 @@ export class ProfileRepository {
 export class RecordingRepository {
   constructor(private readonly db: Database.Database) {}
 
+  importSdCard(input: {
+    cameraId: string
+    path: string
+    startedAt: string
+    endedAt: string
+    durationMs: number
+  }): RecordingRecord {
+    const existing = this.db.prepare(
+      'SELECT recording_id FROM recording_segments WHERE path = ?',
+    ).get(input.path) as { recording_id: string } | undefined
+    if (existing) return this.getById(existing.recording_id) as RecordingRecord
+    const id = randomUUID()
+    const segmentId = randomUUID()
+    const importedAt = nowIso()
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO recordings (id, camera_id, status, started_at, ended_at, duration_ms, created_at, updated_at)
+         VALUES (?, ?, 'completed', ?, ?, ?, ?, ?)`,
+      ).run(id, input.cameraId, input.startedAt, input.endedAt, input.durationMs, importedAt, importedAt)
+      this.db.prepare(
+        `INSERT INTO recording_segments (id, recording_id, path, started_at, ended_at, duration_ms, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'completed')`,
+      ).run(segmentId, id, input.path, input.startedAt, input.endedAt, input.durationMs)
+    })()
+    return this.getById(id) as RecordingRecord
+  }
+
   create(cameraId: string): RecordingRecord {
     const id = randomUUID()
     const ts = nowIso()

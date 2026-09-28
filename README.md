@@ -23,6 +23,9 @@ conta em nuvem.
 - Descoberta e uso de capacidades ONVIF, incluindo PTZ quando a câmera oferece
   o recurso.
 - Biblioteca local para reproduzir gravações e consultar snapshots.
+- Consulta e importação de gravações do cartão SD da Intelbras Mibo iM4-C na aba
+  **Gravações > Cartão SD**. Selecione a câmera e o dia, busque os vídeos e use
+  **Importar** para adicioná-los em MP4 à aba **Biblioteca local**.
 - Dados em SQLite, migrações com backup prévio e credenciais cifradas no
   computador do usuário.
 
@@ -70,6 +73,9 @@ modelo não listado, selecione **Outro modelo / URL manual**.
 
 - Compatibilidade de RTSP, ONVIF, codecs e PTZ depende do equipamento e do
   firmware; o teste de conexão é necessário para cada instalação.
+- A importação do cartão SD foi validada na Mibo iM4-C. A Tapo C200 cadastrada
+  usa uma conta de terceiros para ONVIF/RTSP; consultar seu histórico requer
+  integração e credencial próprias da conta Tapo, ainda não disponíveis no app.
 - O substream depende de a câmera expor um perfil secundário. Caso contrário, o
   aplicativo usa o stream principal.
 - A aceleração de hardware é habilitada por padrão. Se o driver ou codec não for

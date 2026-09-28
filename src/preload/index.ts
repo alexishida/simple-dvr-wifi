@@ -6,6 +6,7 @@ import type {
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
+import type { SdCardCamera, SdCardRecording } from '../shared/sd-card.js';
 import type {
   CameraRecord,
   MediaKind,
@@ -150,6 +151,11 @@ function subscribe<C extends EventChannel>(
 }
 
 const api = {
+  sdCard: {
+    cameras: (): Promise<Result<SdCardCamera[]>> => ipcRenderer.invoke('sdCard:cameras'),
+    list: (cameraId: string, date: string): Promise<Result<SdCardRecording[]>> => ipcRenderer.invoke('sdCard:list', { cameraId, date }),
+    download: (cameraId: string, id: string): Promise<Result<{ path: string; imported: boolean }>> => ipcRenderer.invoke('sdCard:download', { cameraId, id }),
+  },
   cameras: {
     list: (): Promise<Result<CameraSummary[]>> =>
       ipcRenderer.invoke("cameras:list"),

@@ -44,6 +44,7 @@ import { ShutdownCoordinator } from "./supervisors/shutdown.js";
 import { DatabaseSupervisor } from "./supervisors/database.js";
 import { createUtilityProcessTransport } from "./supervisors/database-utility-process.js";
 import { CredentialService } from "./services/credentials.js";
+import { MiboSdCardService } from "./services/mibo-sd-card.js";
 import { SafeStorageMasterKeyStore } from "./security/vault.js";
 import { ConfigRepository } from "./services/config.js";
 import {
@@ -84,6 +85,7 @@ const shutdownCoordinator = new ShutdownCoordinator();
 let shutdownStarted = false;
 let database: DatabaseSupervisor | null = null;
 let credentials: CredentialService | null = null;
+const sdCardService = new MiboSdCardService();
 let cameraManagement: CameraManagementService | null = null;
 let mediaSupervisor: MediaSessionSupervisor | null = null;
 let ptzRegistry: PtzControllerRegistry | null = null;
@@ -1707,6 +1709,54 @@ function registerIpcHandlers(): void {
       const result = await database.request("recording.library", filters);
       if (!result.ok) throw new Error(result.error.message);
       return result.value;
+    },
+  });
+
+  registry.register('sdCard:cameras', {
+    input: EmptyRequestSchema,
+    handle: async () => {
+      if (!database) return [];
+      const response = await database.request('camera.listAll', undefined);
+      if (!response.ok) throw new Error('Não foi possível listar as câmeras.');
+      return (response.value as CameraRecord[]).filter((camera) => camera.active).map((camera) => {
+        const supported = /intelbras/i.test(camera.manufacturer ?? '') && /^im4-c$/i.test(camera.model ?? '');
+        return {
+          id: camera.id,
+          name: camera.name,
+          supported,
+          detail: supported ? 'Cartão SD via API local' : 'Consulta do cartão SD indisponível para este modelo.',
+        };
+      });
+    },
+  });
+
+  registry.register('sdCard:list', {
+    input: z.object({ cameraId: z.string().uuid(), date: z.iso.date() }),
+    handle: async ({ cameraId, date }) => {
+      if (!config) throw new Error('Configuração indisponível.');
+      const camera = await getCameraRecord(cameraId);
+      if (!camera?.active || !/intelbras/i.test(camera.manufacturer ?? '') || !/^im4-c$/i.test(camera.model ?? '')) {
+        throw new Error('A consulta do cartão SD não é suportada nesta câmera.');
+      }
+      const credential = await cameraCredential(cameraId, 'onvif');
+      if (!credential?.username) throw new Error('Cadastre a credencial da câmera antes de consultar o cartão SD.');
+      return sdCardService.list(cameraId, camera.host, { username: credential.username, password: credential.password }, date, config.recordingsDir || resolve(userDataPath, 'recordings'));
+    },
+  });
+
+  registry.register('sdCard:download', {
+    input: z.object({ cameraId: z.string().uuid(), id: z.string().regex(/^[a-f0-9]{64}$/) }),
+    handle: async ({ cameraId, id }) => {
+      if (!config || !database) throw new Error('Biblioteca indisponível.');
+      const camera = await getCameraRecord(cameraId);
+      if (!camera?.active || !/intelbras/i.test(camera.manufacturer ?? '') || !/^im4-c$/i.test(camera.model ?? '')) {
+        throw new Error('O download do cartão SD não é suportado nesta câmera.');
+      }
+      const credential = await cameraCredential(cameraId, 'onvif');
+      if (!credential?.username) throw new Error('Credencial da câmera indisponível.');
+      const result = await sdCardService.download(cameraId, camera.host, { username: credential.username, password: credential.password }, id, config.recordingsDir || resolve(userDataPath, 'recordings'), bundledFfmpegPath(), database);
+      libraryStorageCache = null;
+      return result;
     },
   });
 

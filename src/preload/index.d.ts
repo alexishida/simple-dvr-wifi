@@ -4,6 +4,7 @@ import type {
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
+import type { SdCardCamera, SdCardRecording } from '../shared/sd-card.js';
 import type {
   MediaKind,
   MediaMetadata,
@@ -257,6 +258,11 @@ export interface LibraryApi {
 }
 
 export interface ExposedApi {
+  sdCard: {
+    cameras: () => Promise<Result<SdCardCamera[]>>;
+    list: (cameraId: string, date: string) => Promise<Result<SdCardRecording[]>>;
+    download: (cameraId: string, id: string) => Promise<Result<{ path: string; imported: boolean }>>;
+  };
   cameras: CameraApi;
   config: ConfigApi;
   media: MediaApi;
