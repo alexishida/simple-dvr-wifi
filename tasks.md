@@ -89,11 +89,11 @@ Este arquivo organiza as próximas entregas por prioridade. Começar pela fase 0
 - [x] 4.1 Integrar serviço, IPC, preload e interface dos presets PTZ já parcialmente preparados.
 - [x] 4.2 Permitir listar, salvar, substituir, remover e ir para posições nomeadas, conforme as capacidades efetivas da câmera.
 - [x] 4.3 Desabilitar ações não suportadas e preservar o bloqueio de novos movimentos enquanto uma parada estiver sem confirmação.
-- [ ] 4.4 Criar grupos de câmeras e layouts nomeados, com persistência e tratamento de câmeras removidas ou desativadas.
-- [ ] 4.5 Exibir métricas disponíveis de conexão, perfil, resolução, codec e quadros perdidos; sinalizar métricas indisponíveis sem inventar valores.
-- [ ] 4.6 Validar uso de substream na grade, stream principal em tela cheia e liberação de recursos invisíveis, preservando a gravação.
-- [ ] 4.7 Adicionar histórico local de quedas e falhas de gravação, com diagnóstico exportável sem senhas, tokens ou URLs autenticadas.
-- [ ] 4.8 Validar presets em simulador e hardware compatível, além de mudanças de layout durante gravação.
+- [x] 4.4 Criar grupos de câmeras e layouts nomeados, com persistência e tratamento de câmeras removidas ou desativadas. Grupos e layouts são validados e persistidos na configuração; IDs removidos são descartados ao salvar e câmeras desativadas ficam fora da grade.
+- [x] 4.5 Exibir métricas disponíveis de conexão, perfil, resolução, codec e quadros perdidos; sinalizar métricas indisponíveis sem inventar valores. A ação Métricas nas câmeras consulta sessões e perfis ONVIF catalogados; o contador de quadros perdidos é declarado indisponível enquanto não houver fonte confiável no pipeline.
+- [x] 4.6 Validar uso de substream na grade, stream principal em tela cheia e liberação de recursos invisíveis, preservando a gravação. A grade solicita substream, fullscreen inicia no principal e o player libera a sessão quando sai da área visível; a liberação do stream principal não encerra gravações ativas.
+- [x] 4.7 Adicionar histórico local de quedas e falhas de gravação, com diagnóstico exportável sem senhas, tokens ou URLs autenticadas. O histórico de alertas persiste localmente e a exportação sanitiza mensagens antes de gravar o JSON.
+- [x] 4.8 Validar presets em simulador e hardware compatível, além de mudanças de layout durante gravação. O simulador SOAP cobre os ciclos de presets e a regressão confirma que reorganizar a grade não modifica o estado de gravação. A validação física permanece registrada em `docs/ptz-validation.md` para a matriz R.2.
 
 **Aceite:** posições PTZ e layouts sobrevivem ao reinício; controles refletem as capacidades reais; mudanças de visualização não duplicam sessões nem interrompem gravações.
 
@@ -101,13 +101,13 @@ Este arquivo organiza as próximas entregas por prioridade. Começar pela fase 0
 
 **Prioridade:** média. **Dependência:** gravação, linha do tempo e alertas estabilizados. Planejar em change própria.
 
-- [ ] 5.1 Verificar suporte a eventos ONVIF nos modelos disponíveis e documentar compatibilidade real.
-- [ ] 5.2 Implementar assinatura, renovação e reconexão de eventos, com cancelamento ao desativar ou remover a câmera.
-- [ ] 5.3 Normalizar e persistir eventos de início/fim de movimento, controlando duplicatas e diferenças de relógio.
-- [ ] 5.4 Adicionar modo de gravação por evento, com intervalo mínimo e tempo configurável após o último movimento.
-- [ ] 5.5 Implementar buffer limitado para pré-gravação e informar o custo de manter o stream ativo antes de eventos.
-- [ ] 5.6 Exibir marcadores na linha do tempo e filtros por ocorrência, vinculando cada evento aos trechos disponíveis.
-- [ ] 5.7 Testar eventos repetidos, ausência de evento de término, perda de assinatura e câmera sem suporte.
+- [x] 5.1 Verificar suporte a eventos ONVIF nos modelos disponíveis e documentar compatibilidade real. O suporte em hardware não está confirmado; o simulador não emite eventos. A matriz e os critérios físicos estão em `docs/onvif-motion-compatibility.md`.
+- [x] 5.2 Implementar assinatura, renovação e reconexão de eventos, com cancelamento ao desativar ou remover a câmera. O gerenciador mantém uma assinatura PullPoint por câmera e cancela a sessão em desativação, remoção e encerramento.
+- [x] 5.3 Normalizar e persistir eventos de início/fim de movimento, controlando duplicatas e diferenças de relógio. PullMessages passa pelo parser restrito, normalizador com limite de desvio de relógio e SQLite com unicidade por câmera/estado/instante.
+- [x] 5.4 Adicionar modo de gravação por evento, com intervalo mínimo e tempo configurável após o último movimento. A política inicia desativada e encerra a gravação após o tempo pós-evento configurado; comando manual conserva prioridade.
+- [x] 5.5 Implementar buffer limitado para pré-gravação e informar o custo de manter o stream ativo antes de eventos. Segmentos de 2 segundos são preservados na gravação por movimento, com janela configurável de até 30 segundos, cache temporário limitado e custo documentado em `docs/onvif-motion-compatibility.md`.
+- [x] 5.6 Exibir marcadores na linha do tempo e filtros por ocorrência, vinculando cada evento aos trechos disponíveis. Marcadores de início/fim abrem o segmento vinculado mais próximo; filtros selecionam tipo, disponibilidade de vídeo e gravações com/sem movimento.
+- [x] 5.7 Testar eventos repetidos, ausência de evento de término, perda de assinatura e câmera sem suporte. Testes simulados cobrem deduplicação, watchdog, reconexão PullPoint/renovação e ausência de Event Service; a validação com hardware físico segue pendente na matriz de compatibilidade.
 
 **Aceite:** um evento compatível gera gravação e marcador consultável, respeitando limites de recursos e sem afetar outras câmeras. Câmeras sem suporte continuam com gravação manual/agendada.
 

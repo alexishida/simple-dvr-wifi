@@ -90,6 +90,22 @@ export type CameraStatus = z.infer<typeof CameraStatusSchema>;
 export type RecordingStatus = z.infer<typeof RecordingStatusSchema>;
 export type CameraSummary = z.infer<typeof CameraSummarySchema>;
 export type CameraEditDetails = z.infer<typeof CameraEditDetailsSchema>;
+
+export const CameraMetricsSchema = z.object({
+  connection: CameraStatusSchema,
+  mainSession: z.enum(["starting", "running", "stopping", "stopped", "crashed", "circuit_open"]).nullable(),
+  subSession: z.enum(["starting", "running", "stopping", "stopped", "crashed", "circuit_open"]).nullable(),
+  profiles: z.array(z.object({
+    streamType: StreamProfileSchema,
+    name: z.string().nullable(),
+    codec: z.string().nullable(),
+    width: z.number().int().nullable(),
+    height: z.number().int().nullable(),
+    fps: z.number().nullable(),
+  })),
+  droppedFrames: z.number().int().nullable(),
+}).strict();
+export type CameraMetrics = z.infer<typeof CameraMetricsSchema>;
 export type AppError = z.infer<typeof AppErrorSchema>;
 export type Result<T> = { ok: true; value: T } | { ok: false; error: AppError };
 

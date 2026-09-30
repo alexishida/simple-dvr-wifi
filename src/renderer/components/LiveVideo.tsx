@@ -11,6 +11,10 @@ interface LiveVideoProps {
 type PlayerState = 'connecting' | 'playing' | 'error'
 const pendingReleases = new Map<string, Promise<unknown>>()
 
+function sessionKey(cameraId: string, profile: 'main' | 'sub'): string {
+  return `${cameraId}:${profile}`
+}
+
 function waitForIceGathering(
   peer: RTCPeerConnection,
   signal: AbortSignal,
@@ -49,10 +53,22 @@ export const LiveVideo = memo(function LiveVideo({
   videoRef: externalVideoRef,
 }: LiveVideoProps): React.JSX.Element {
   const internalVideoRef = useRef<HTMLVideoElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const videoRef = externalVideoRef ?? internalVideoRef
   const [state, setState] = useState<PlayerState>('connecting')
   const [message, setMessage] = useState('Conectando ao stream…')
   const [retryAttempt, setRetryAttempt] = useState(0)
+  const [visible, setVisible] = useState(true)
+
+  useEffect(() => {
+    const target = containerRef.current
+    if (!target || !('IntersectionObserver' in window)) return
+    const observer = new IntersectionObserver(([entry]) => {
+      setVisible(entry?.isIntersecting ?? true)
+    }, { threshold: 0.01 })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     // Release only the viewer. Main keeps any recording session alive.
@@ -65,10 +81,11 @@ export const LiveVideo = memo(function LiveVideo({
     const video = videoRef.current
 
     const connect = async (): Promise<void> => {
+      if (!visible) return
       setState('connecting')
       setMessage('Conectando ao stream…')
 
-      await pendingReleases.get(cameraId)
+      await pendingReleases.get(sessionKey(cameraId, profile))
       if (cancelled) return
       const acquired = await window.api.media.acquire({ cameraId, profile })
       mediaRequested = acquired.ok && acquired.value?.state === 'running'
@@ -169,15 +186,16 @@ export const LiveVideo = memo(function LiveVideo({
         })
         .catch(() => undefined)
         .finally(() => {
-          if (pendingReleases.get(cameraId) === release)
-            pendingReleases.delete(cameraId)
+          const key = sessionKey(cameraId, profile)
+          if (pendingReleases.get(key) === release)
+            pendingReleases.delete(key)
         })
-      pendingReleases.set(cameraId, release)
+      pendingReleases.set(sessionKey(cameraId, profile), release)
     }
-  }, [cameraId, profile, retryAttempt, videoRef])
+  }, [cameraId, profile, retryAttempt, videoRef, visible])
 
   return (
-    <div className="live-video">
+    <div ref={containerRef} className="live-video">
       <video
         ref={videoRef}
         className="live-video-element"

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PtzControlService } from "../src/main/services/ptz-control.ts";
+import { decideResourceState } from "../src/workers/media/resource-policy.ts";
+import { MotionSubscriptionRegistry } from "../src/main/services/motion-subscriptions.ts";
+import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotification, parseOnvifMotionNotifications } from "../src/main/services/motion-events.ts";
 
 function ptzFixture(t, failures = 1) {
   const timers = new Map();
@@ -155,7 +158,7 @@ test("camera presets generate channel and stream conventions without credentials
     assert.equal(url.href.includes("{"), false);
   }
 });
-import { mkdtemp, readFile, readdir, rm, statfs, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, statfs, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
 import { createServer } from "node:net";
@@ -192,6 +195,7 @@ import { LocalAlertCenter } from "../src/main/services/alert-center.ts";
 import { selectRetentionCandidates } from "../src/main/services/retention-policy.ts";
 import { isScheduledAt, nextScheduledAt } from "../src/shared/recording-schedule.ts";
 import { RecordingScheduler, shouldScheduleRecording } from "../src/main/services/recording-scheduler.ts";
+import { MotionPrebufferService } from "../src/main/services/motion-prebuffer.ts";
 import {
   buildConcatManifest,
   ClipExportService,
@@ -235,6 +239,15 @@ test("local alert centre groups repeated camera failures", () => {
   assert.equal(alerts.dismiss("camera_disconnected:camera-one"), true);
 });
 
+test("diagnostic report sanitizes alert messages", () => {
+  const alerts = new LocalAlertCenter();
+  alerts.report("recording_interrupted", "RTSP rtsp://alice:secret@camera.local/live token=top-secret", "camera-one");
+  const report = JSON.stringify(alerts.diagnosticReport());
+  assert.equal(report.includes("secret"), false);
+  assert.equal(report.includes("alice"), false);
+  assert.match(report, /\[REDACTED\]/);
+});
+
 test("retention policy preserves protected and active media", () => {
   const selected = selectRetentionCandidates([
     { id: "protected", timestamp: 1, bytes: 50, protected: true, active: false },
@@ -242,6 +255,203 @@ test("retention policy preserves protected and active media", () => {
     { id: "old", timestamp: 3, bytes: 50, protected: false, active: false },
   ], { now: 1000, maxAgeDays: 0, maxBytes: 100 });
   assert.deepEqual(selected, ["old"]);
+});
+
+test("resource policy uses substream in grid, main in fullscreen, and preserves recording", () => {
+  assert.deepEqual(
+    decideResourceState({ context: "grid", layoutSize: 4, windowMinimized: false, recording: false }),
+    { profile: "sub", active: true, reason: "Grid usa substream por padrão." },
+  );
+  assert.deepEqual(
+    decideResourceState({ context: "fullscreen", layoutSize: 1, windowMinimized: false, recording: false }),
+    { profile: "main", active: true, reason: "Fullscreen usa main stream." },
+  );
+  assert.deepEqual(
+    decideResourceState({ context: "hidden", layoutSize: 4, windowMinimized: false, recording: true }),
+    { profile: "sub", active: true, reason: "Item invisível; gravação preservada." },
+  );
+  assert.equal(
+    decideResourceState({ context: "hidden", layoutSize: 4, windowMinimized: false, recording: false }).active,
+    false,
+  );
+});
+
+test("motion subscription registry cancels the camera subscription", async () => {
+  let unsubscribed = false;
+  const registry = new MotionSubscriptionRegistry({
+    getClient: async () => ({
+      subscribe: async () => ({ renewAfterMs: 60_000 }),
+      renew: async () => ({ renewAfterMs: 60_000 }),
+      unsubscribe: async () => { unsubscribed = true; },
+    }),
+  });
+  assert.equal(await registry.start("camera-one"), true);
+  await registry.stop("camera-one");
+  assert.equal(unsubscribed, true);
+});
+
+test("unsupported cameras do not create or retry a motion subscription", async (t) => {
+  let attempts = 0;
+  const registry = new MotionSubscriptionRegistry({ getClient: async (cameraId) => {
+    attempts += 1;
+    if (cameraId === "unsupported") return null;
+    return {
+      subscribe: async () => ({ renewAfterMs: 60_000 }),
+      renew: async () => ({ renewAfterMs: 60_000 }),
+      unsubscribe: async () => undefined,
+      pull: async (signal) => new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
+    };
+  } }, undefined, 5);
+  t.after(() => registry.stopAll());
+  assert.equal(await registry.start("unsupported"), false);
+  assert.equal(await registry.start("supported"), true);
+  await new Promise((done) => setTimeout(done, 20));
+  assert.equal(attempts, 2);
+});
+
+test("lost PullPoint subscriptions reconnect and stop cancels later retries", async (t) => {
+  let attempts = 0;
+  let unsubscribed = 0;
+  const registry = new MotionSubscriptionRegistry({
+    getClient: async () => {
+      const attempt = ++attempts;
+      return {
+        subscribe: async () => ({ renewAfterMs: 60_000 }),
+        renew: async () => ({ renewAfterMs: 60_000 }),
+        unsubscribe: async () => { unsubscribed += 1; },
+        pull: async (signal) => attempt === 1
+          ? Promise.reject(new Error("subscription lost"))
+          : new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
+      };
+    },
+  }, undefined, 10);
+  t.after(() => registry.stopAll());
+  assert.equal(await registry.start("camera-one"), true);
+  const deadline = Date.now() + 500;
+  while (attempts < 2 && Date.now() < deadline) await new Promise((done) => setTimeout(done, 5));
+  assert.equal(attempts, 2);
+  await registry.stop("camera-one");
+  await new Promise((done) => setTimeout(done, 30));
+  assert.equal(attempts, 2);
+  assert.equal(unsubscribed, 2);
+});
+
+test("failed renewal reconnects and a removed camera cannot be resurrected", async (t) => {
+  let attempts = 0;
+  const registry = new MotionSubscriptionRegistry({
+    getClient: async () => {
+      attempts += 1;
+      return {
+        subscribe: async () => ({ renewAfterMs: 1 }),
+        renew: async () => { throw new Error("renewal lost"); },
+        unsubscribe: async () => undefined,
+        pull: async (signal) => new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
+      };
+    },
+  }, undefined, 50, 1);
+  t.after(() => registry.stopAll());
+  assert.equal(await registry.start("camera-one"), true);
+  await new Promise((done) => setTimeout(done, 10));
+  await registry.stop("camera-one");
+  await new Promise((done) => setTimeout(done, 70));
+  assert.equal(attempts, 1);
+});
+
+test("deactivation during a pending subscription prevents late polling", async (t) => {
+  let finishSubscribe;
+  let polls = 0;
+  const registry = new MotionSubscriptionRegistry({
+    getClient: async () => ({
+      subscribe: async () => new Promise((done) => { finishSubscribe = done; }),
+      renew: async () => ({ renewAfterMs: 60_000 }),
+      unsubscribe: async () => undefined,
+      pull: async () => { polls += 1; return []; },
+    }),
+  }, undefined, 5);
+  t.after(() => registry.stopAll());
+  const starting = registry.start("camera-one");
+  while (!finishSubscribe) await new Promise((done) => setImmediate(done));
+  await registry.stop("camera-one");
+  finishSubscribe({ renewAfterMs: 60_000 });
+  assert.equal(await starting, false);
+  await new Promise((done) => setTimeout(done, 20));
+  assert.equal(polls, 0);
+});
+
+test("reactivation can start a new subscription while the old attempt settles", async (t) => {
+  let finishOld;
+  let attempts = 0;
+  const registry = new MotionSubscriptionRegistry({
+    getClient: async () => {
+      const attempt = ++attempts;
+      return {
+        subscribe: async () => attempt === 1
+          ? new Promise((done) => { finishOld = done; })
+          : { renewAfterMs: 60_000 },
+        renew: async () => ({ renewAfterMs: 60_000 }),
+        unsubscribe: async () => undefined,
+        pull: async (signal) => new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
+      };
+    },
+  });
+  t.after(() => registry.stopAll());
+  const first = registry.start("camera-one");
+  while (!finishOld) await new Promise((done) => setImmediate(done));
+  await registry.stop("camera-one");
+  assert.equal(await registry.start("camera-one"), true);
+  finishOld({ renewAfterMs: 60_000 });
+  assert.equal(await first, false);
+  assert.equal(attempts, 2);
+});
+
+test("motion events deduplicate repeated states and bound camera clock skew", () => {
+  const normalizer = new MotionEventNormalizer();
+  const receivedAt = "2026-01-01T12:00:00.000Z";
+  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, occurredAt: receivedAt, receivedAt })?.state, "started");
+  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, occurredAt: receivedAt, receivedAt }), null);
+  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: false, occurredAt: "2025-01-01T00:00:00.000Z", receivedAt })?.occurredAt, receivedAt);
+  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: false, occurredAt: receivedAt, receivedAt }), null);
+  const later = "2026-01-01T12:00:02.000Z";
+  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, receivedAt: later })?.repeated, false);
+  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, receivedAt: "2026-01-01T12:00:04.000Z" })?.repeated, true);
+});
+
+test("motion notification parser accepts explicit motion states only", () => {
+  assert.deepEqual(parseOnvifMotionNotification('<Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Name="IsMotion" Value="true"/>'), { active: true, occurredAt: null });
+  assert.equal(parseOnvifMotionNotification('<Topic>tns1:Device/Trigger</Topic><SimpleItem Value="true"/>'), null);
+  const messages = '<NotificationMessage><Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Value="true"/></NotificationMessage>'
+    + '<NotificationMessage><Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Value="false"/></NotificationMessage>';
+  assert.deepEqual(parseOnvifMotionNotifications(messages).map((event) => event.active), [true, false]);
+});
+
+test("motion timeout bounds a missing end event and can be cancelled", () => {
+  const pending = new Map();
+  const fired = [];
+  let nextId = 0;
+  const clock = {
+    setTimeout: (callback, delay) => { const id = ++nextId; pending.set(id, { callback, delay }); return id; },
+    clearTimeout: (id) => pending.delete(id),
+  };
+  const timers = new MotionRecordingTimers((cameraId, reason) => fired.push([cameraId, reason]), clock);
+  timers.arm("camera-one", "missing-end", MOTION_MISSING_END_TIMEOUT_MS);
+  assert.equal([...pending.values()][0].delay, 600_000);
+  const [id, timer] = [...pending][0];
+  pending.delete(id);
+  timer.callback();
+  assert.deepEqual(fired, [["camera-one", "missing-end"]]);
+  timers.arm("camera-one", "post-event", 30_000);
+  timers.clear("camera-one");
+  assert.equal(pending.size, 0);
+});
+
+test("reordering a live layout does not alter recording state", () => {
+  const cameras = [
+    { id: "camera-a", active: true, recordingStatus: "recording" },
+    { id: "camera-b", active: true, recordingStatus: "idle" },
+  ];
+  const slots = buildCameraSlots(cameras, ["camera-b", "camera-a"], 2);
+  assert.deepEqual(slots.slice(0, 2).map((camera) => camera?.id), ["camera-b", "camera-a"]);
+  assert.equal(cameras[0].recordingStatus, "recording");
 });
 
 test("weekly schedule supports intervals crossing midnight", () => {
@@ -365,6 +575,40 @@ async function temporaryDirectory(t) {
   });
   return directory;
 }
+
+test("motion prebuffer preserves only the requested interval and clears cache on stop", async (t) => {
+  const root = await temporaryDirectory(t);
+  const cameraId = "11111111-1111-4111-8111-111111111111";
+  const recordingId = "22222222-2222-4222-8222-222222222222";
+  const cacheRoot = join(root, "cache");
+  const libraryRoot = join(root, "library");
+  const calls = [];
+  const media = {
+    acquire: async (...args) => { calls.push(["acquire", ...args]); return { state: "running" }; },
+    setRecording: async (...args) => { calls.push(["record", ...args]); return true; },
+    release: async (...args) => { calls.push(["release", ...args]); },
+  };
+  const service = new MotionPrebufferService(media, cacheRoot, libraryRoot);
+  t.after(() => service.stopAll());
+  assert.equal(await service.start(cameraId, "rtsp://camera.local/main", 15), true);
+  assert.equal(calls[0][6], 2_000);
+  const cacheDir = join(cacheRoot, `camera_${cameraId.replaceAll("-", "")}_prebuffer`);
+  await mkdir(cacheDir, { recursive: true });
+  const oldFile = join(cacheDir, "old.mp4");
+  const recentFile = join(cacheDir, "recent.mp4");
+  await writeFile(oldFile, "old segment");
+  await writeFile(recentFile, "recent segment");
+  const now = Date.now();
+  await utimes(oldFile, new Date(now - 40_000), new Date(now - 40_000));
+  await utimes(recentFile, new Date(now - 10_000), new Date(now - 10_000));
+  const segments = await service.capture(cameraId, recordingId, new Date(now).toISOString());
+  assert.equal(segments.length, 1);
+  assert.equal(await readFile(segments[0].path, "utf8"), "recent segment");
+  assert.ok(segments[0].path.startsWith(join(libraryRoot, "motion-prebuffer", recordingId)));
+  assert.deepEqual(calls.filter((call) => call[0] === "record").map((call) => call[2]), [true, false, true]);
+  await service.stop(cameraId);
+  assert.deepEqual(await readdir(cacheDir), []);
+});
 
 function databaseTransport() {
   const requests = [];

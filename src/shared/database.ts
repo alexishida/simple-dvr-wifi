@@ -108,6 +108,23 @@ export const RecordingSegmentRecordSchema = z.object({
 
 export type RecordingSegmentRecord = z.infer<typeof RecordingSegmentRecordSchema>
 
+export interface MotionEventRecord {
+  id: string
+  cameraId: string
+  state: 'started' | 'ended'
+  occurredAt: string
+  receivedAt: string
+  recordingId: string | null
+  hasVideo: boolean
+}
+
+export interface MotionEventFilter {
+  cameraId: string
+  startAt: string
+  endAt: string
+  state?: 'started' | 'ended'
+}
+
 export const SnapshotRecordSchema = z.object({
   id: z.string().uuid(),
   cameraId: CameraIdSchema,

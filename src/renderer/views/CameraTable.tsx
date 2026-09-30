@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { CameraSummary } from "../../shared/contracts.js";
+import type { CameraMetrics, CameraSummary } from "../../shared/contracts.js";
 import type { CameraDraft } from "./camera-types.js";
 import {
   ActivityIcon,
@@ -24,6 +24,7 @@ interface CameraRowProps {
   onToggle: (camera: CameraSummary) => void;
   onRemove: (camera: CameraSummary) => void;
   onTest: (camera: CameraSummary) => void;
+  onMetrics: (camera: CameraSummary) => void;
 }
 
 function CameraRow({
@@ -32,6 +33,7 @@ function CameraRow({
   onToggle,
   onRemove,
   onTest,
+  onMetrics,
 }: CameraRowProps): React.JSX.Element {
   const active = camera.active;
   return (
@@ -81,6 +83,7 @@ function CameraRow({
           >
             <ActivityIcon size={16} />
           </button>
+          <button type="button" className="btn-icon row-action-btn" aria-label={`Ver métricas de ${camera.name}`} title="Ver métricas" onClick={() => onMetrics(camera)}><SettingsIcon size={16} /></button>
           <button
             type="button"
             className="btn-icon row-action-btn"
@@ -130,6 +133,8 @@ export function CameraTable({
   onTest,
 }: CameraTableProps): React.JSX.Element {
   const [selected, setSelected] = useState<CameraSummary | null>(null);
+  const [metrics, setMetrics] = useState<{ camera: CameraSummary; value: CameraMetrics } | null>(null);
+  const [metricsMessage, setMetricsMessage] = useState<string | null>(null);
 
   const handleRemove = (camera: CameraSummary): void => {
     setSelected(camera);
@@ -140,6 +145,14 @@ export function CameraTable({
     await window.api.cameras.remove(selected.id);
     setSelected(null);
     onRemove(selected);
+  };
+
+  const showMetrics = (camera: CameraSummary): void => {
+    setMetricsMessage(null);
+    void window.api.cameras.metrics(camera.id).then((result) => {
+      if (result.ok) setMetrics({ camera, value: result.value });
+      else setMetricsMessage(result.error.message);
+    });
   };
 
   return (
@@ -163,6 +176,7 @@ export function CameraTable({
                 onToggle={onToggle}
                 onRemove={handleRemove}
                 onTest={onTest}
+                onMetrics={showMetrics}
               />
             ))}
           </tbody>
@@ -208,6 +222,8 @@ export function CameraTable({
           </div>
         </div>
       )}
+      {metrics && <div className="modal-backdrop" role="presentation"><div className="modal camera-metrics-modal" role="dialog" aria-modal="true" aria-labelledby="metrics-title"><h3 className="panel-title" id="metrics-title"><ActivityIcon size={20} /> Métricas: {metrics.camera.name}</h3><dl className="camera-metrics-list"><div><dt>Conexão</dt><dd>{cameraStatusLabel(metrics.value.connection)}</dd></div><div><dt>Sessão principal</dt><dd>{metrics.value.mainSession ?? "Indisponível"}</dd></div><div><dt>Substream</dt><dd>{metrics.value.subSession ?? "Indisponível"}</dd></div><div><dt>Quadros perdidos</dt><dd>{metrics.value.droppedFrames === null ? "Indisponível neste stream" : metrics.value.droppedFrames}</dd></div></dl><h4>Perfis detectados</h4>{metrics.value.profiles.length === 0 ? <p className="empty-state-text">Nenhum perfil ONVIF disponível. Execute o teste de conexão para atualizar os dados.</p> : <div className="camera-metrics-profiles">{metrics.value.profiles.map((profile) => <div key={profile.streamType}><strong>{profile.streamType === "main" ? "Principal" : "Substream"}</strong><span>{profile.name ?? "Sem nome"}</span><span>Codec: {profile.codec ?? "Indisponível"}</span><span>Resolução: {profile.width && profile.height ? `${profile.width} × ${profile.height}` : "Indisponível"}</span><span>Quadros: {profile.fps === null ? "Indisponível" : `${profile.fps} fps`}</span></div>)}</div>}<div className="modal-actions"><button type="button" className="btn btn-secondary" onClick={() => setMetrics(null)}><CloseIcon size={16} />Fechar</button></div></div></div>}
+      {metricsMessage && <p className="form-message form-error" role="alert">{metricsMessage}</p>}
     </>
   );
 }

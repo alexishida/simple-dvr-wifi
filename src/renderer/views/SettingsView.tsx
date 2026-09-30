@@ -5,6 +5,7 @@ import {
   CheckIcon,
   CloseIcon,
   EditIcon,
+  ExportIcon,
   ImageIcon,
   SettingsIcon,
   VideoIcon,
@@ -30,6 +31,12 @@ const CATEGORIES = [
     label: "Gravação agendada",
     description: "Defina períodos semanais para cada câmera ativa.",
     icon: CalendarIcon,
+  },
+  {
+    id: "motion",
+    label: "Movimento ONVIF",
+    description: "Grave eventos com vídeo anterior e posterior ao movimento.",
+    icon: ActivityIcon,
   },
   {
     id: "appearance",
@@ -69,6 +76,7 @@ const FIELD_CATEGORIES: Record<string, Category> = {
   snapshotDir: "storage",
   recordingsDir: "storage",
   retention: "storage",
+  motion: "motion",
   streams: "video",
   reconnect: "connection",
   log: "diagnostics",
@@ -146,6 +154,7 @@ export function SettingsView({
     byCamera: Array<{ cameraId: string; bytes: number }>;
   } | null>(null);
   const [alerts, setAlerts] = useState<Array<{ id: string; message: string; count: number }>>([]);
+  const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
   const [retentionStatus, setRetentionStatus] = useState<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean } | null>(null);
   const [scheduleCameraId, setScheduleCameraId] = useState("");
   const [schedulePeriods, setSchedulePeriods] = useState<Array<{ weekday: number; start: string; end: string; enabled: boolean }>>([]);
@@ -394,6 +403,24 @@ export function SettingsView({
                   monitoramento.
                 </p>
               </div>
+            </>
+          )}
+
+          {category === "motion" && (
+            <>
+              <SettingRow id="motion.enabled" label="Gravação por movimento" hint="Inicia uma gravação quando a câmera envia um evento ONVIF de movimento.">
+                <div className="settings-toggle">
+                  <input {...inputProps("motion.enabled")} type="checkbox" role="switch" checked={config.motion.enabled} onChange={(event) => update("motion", { ...config.motion, enabled: event.target.checked })} />
+                  <span>{config.motion.enabled ? "Ativada" : "Desativada"}</span>
+                </div>
+              </SettingRow>
+              <SettingRow id="motion.prebufferSeconds" label="Vídeo anterior ao evento (segundos)" hint="De 0 a 30 segundos. Zero desativa o buffer; valores maiores mantêm um stream e gravação temporária ativos por câmera." error={errors["motion.prebufferSeconds"]}>
+                {numberInput("motion.prebufferSeconds", config.motion.prebufferSeconds, 0, 30, (value) => update("motion", { ...config.motion, prebufferSeconds: value }))}
+              </SettingRow>
+              <SettingRow id="motion.postRecordSeconds" label="Vídeo após o fim do movimento (segundos)" hint="Mantém a gravação por 5 a 3.600 segundos após o evento de encerramento." error={errors["motion.postRecordSeconds"]}>
+                {numberInput("motion.postRecordSeconds", config.motion.postRecordSeconds, 5, 3600, (value) => update("motion", { ...config.motion, postRecordSeconds: value }))}
+              </SettingRow>
+              <div className="settings-note"><ActivityIcon size={18} /><p>O buffer usa uma conexão RTSP adicional, processamento e até 128 MB de espaço temporário por câmera. A disponibilidade depende do suporte ONVIF e da conexão da câmera.</p></div>
             </>
           )}
 
@@ -724,6 +751,15 @@ export function SettingsView({
                   </div>
                 </div>
               )}
+              <div className="settings-note">
+                <ActivityIcon size={18} />
+                <div>
+                  <p>Histórico local</p>
+                  <p className="field-hint">Exporte quedas de conexão e falhas de gravação. Credenciais, tokens e URLs autenticadas são removidos.</p>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => void window.api.diagnostics.export().then((result) => setDiagnosticMessage(result.ok && result.value.exported ? "Diagnóstico exportado." : result.ok ? "Exportação cancelada." : result.error.message))}><ExportIcon size={14} /> Exportar diagnóstico</button>
+                  {diagnosticMessage && <p className="field-hint" role="status">{diagnosticMessage}</p>}
+                </div>
+              </div>
               <div className="settings-note">
                 <ActivityIcon size={18} />
                 <p>

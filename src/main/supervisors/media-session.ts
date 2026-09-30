@@ -27,6 +27,7 @@ export interface MediaSessionOptions {
   expectedHash: string;
   configDir: string;
   recordPath?: string;
+  recordSegmentDurationMs?: number;
   sourceOnDemand?: boolean;
   configFileName?: string;
   resourcesRoot?: string;
@@ -182,6 +183,7 @@ export class MediaSession {
       webrtcUdpPort: httpPort + 2,
       configDir: this.options.configDir,
       recordPath: this.options.recordPath,
+      recordSegmentDurationMs: this.options.recordSegmentDurationMs,
       sourceOnDemand: this.options.sourceOnDemand,
       configFileName: this.options.configFileName,
     });
@@ -434,6 +436,7 @@ export class MediaSessionSupervisor {
     path: string,
     recordPath?: string,
     sourceOnDemand?: boolean,
+    recordSegmentDurationMs?: number,
   ): Promise<MediaSessionStatus> {
     let session = this.sessions.get(cameraId);
     if (!session) {
@@ -444,6 +447,7 @@ export class MediaSessionSupervisor {
         path,
         recordPath,
         sourceOnDemand,
+        recordSegmentDurationMs,
         binaryPath: this.options.binaryPath,
         configFileName: `${cameraId}.yml`,
       });

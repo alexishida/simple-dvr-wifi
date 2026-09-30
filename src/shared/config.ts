@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { DashboardLayoutConfigSchema } from './dashboard-layout.js'
 
 export const ThemeSchema = z.enum(['dark', 'light', 'system'])
 export type Theme = z.infer<typeof ThemeSchema>
@@ -27,6 +28,8 @@ export const AppConfigSchema = z.object({
   snapshotDir: z.string().max(2048),
   recordingsDir: z.string().max(2048),
   retention: RetentionConfigSchema.default(RETENTION_DEFAULTS),
+  motion: z.object({ enabled: z.boolean(), postRecordSeconds: z.number().int().min(5).max(3600), minIntervalSeconds: z.number().int().min(0).max(3600), prebufferSeconds: z.number().int().min(0).max(30).default(0) }).default({ enabled: false, postRecordSeconds: 30, minIntervalSeconds: 5, prebufferSeconds: 0 }),
+  dashboard: DashboardLayoutConfigSchema,
   reconnect: z.object({
     initialDelayMs: z.number().int().min(500).max(60_000),
     maxDelayMs: z.number().int().min(1_000).max(300_000),
@@ -55,6 +58,8 @@ export const CONFIG_DEFAULTS: AppConfig = {
   snapshotDir: '',
   recordingsDir: '',
   retention: RETENTION_DEFAULTS,
+  motion: { enabled: false, postRecordSeconds: 30, minIntervalSeconds: 5, prebufferSeconds: 0 },
+  dashboard: { groups: [], layouts: [], selectedLayoutId: null },
   reconnect: {
     initialDelayMs: 1_000,
     maxDelayMs: 60_000,

@@ -21,6 +21,12 @@ const requests = []
 const transport = {
   post: async (_url, body) => {
     requests.push(body)
+    if (body.includes('GetPresets')) {
+      return { status: 200, body: soapResponse('<tptz:GetPresetsResponse xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:Preset token="preset-1"><tt:Name xmlns:tt="http://www.onvif.org/ver10/schema">Entrada</tt:Name></tptz:Preset></tptz:GetPresetsResponse>') }
+    }
+    if (body.includes('SetPreset')) {
+      return { status: 200, body: soapResponse('<tptz:SetPresetResponse xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:PresetToken>preset-2</tptz:PresetToken></tptz:SetPresetResponse>') }
+    }
     return { status: 200, body: successResponse }
   },
 }
@@ -44,6 +50,15 @@ const soapResponse = (body) => `<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
   <s:Body>${body}</s:Body>
 </s:Envelope>`
+const presets = await adapter.listPresets({ profileToken: 'profile-1' })
+assert.deepEqual(presets, [{ token: 'preset-1', name: 'Entrada' }])
+await adapter.gotoPreset({ profileToken: 'profile-1', presetToken: 'preset-1' })
+assert.match(requests.at(-1), /<tptz:GotoPreset>/)
+assert.match(requests.at(-1), /<tptz:PresetToken>preset-1<\/tptz:PresetToken>/)
+assert.equal(await adapter.setPreset({ profileToken: 'profile-1', name: 'Portão' }), 'preset-2')
+assert.match(requests.at(-1), /<tptz:PresetName>Portão<\/tptz:PresetName>/)
+await adapter.removePreset({ profileToken: 'profile-1', presetToken: 'preset-2' })
+assert.match(requests.at(-1), /<tptz:RemovePreset>/)
 const tapoRequests = []
 const tapoTransport = {
   post: async (_url, body) => {
@@ -140,4 +155,48 @@ await assert.rejects(
   /PTZ indisponível/,
 )
 
-console.log('PTZ ONVIF: eixos opcionais, fallback Tapo e SOAP Fault verificados.')
+const unsupportedEventAdapter = new OnvifAdapter({
+  deviceServiceUrl: 'http://camera.local/onvif/device_service',
+  transport: {
+    post: async () => ({ status: 200, body: soapResponse(
+      '<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Capabilities/></tds:GetCapabilitiesResponse>',
+    ) }),
+  },
+})
+assert.equal(await unsupportedEventAdapter.getEventServiceUrl(), null)
+
+const redirectedEventAdapter = new OnvifAdapter({
+  deviceServiceUrl: 'http://camera.local/onvif/device_service',
+  transport: {
+    post: async () => ({ status: 200, body: soapResponse(
+      '<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><tds:Capabilities><tt:Events XAddr="https://outside.example/events"/></tds:Capabilities></tds:GetCapabilitiesResponse>',
+    ) }),
+  },
+})
+await assert.rejects(() => redirectedEventAdapter.getEventServiceUrl(), /fora da câmera/)
+
+const eventRequests = []
+const eventAdapter = new OnvifAdapter({
+  deviceServiceUrl: 'http://camera.local/onvif/device_service',
+  transport: {
+    post: async (url, body, options) => {
+      eventRequests.push({ url, body, options })
+      if (body.includes('GetCapabilities')) return { status: 200, body: soapResponse(
+        '<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><tds:Capabilities><tt:Events XAddr="http://camera.local/onvif/event_service"/></tds:Capabilities></tds:GetCapabilitiesResponse>',
+      ) }
+      if (body.includes('CreatePullPointSubscription')) return { status: 200, body: soapResponse(
+        '<tev:CreatePullPointSubscriptionResponse xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:wsa="http://www.w3.org/2005/08/addressing"><tev:SubscriptionReference><wsa:Address>http://camera.local/onvif/pullpoint</wsa:Address></tev:SubscriptionReference></tev:CreatePullPointSubscriptionResponse>',
+      ) }
+      return { status: 200, body: soapResponse('<tev:PullMessagesResponse xmlns:tev="http://www.onvif.org/ver10/events/wsdl"/>') }
+    },
+  },
+})
+assert.equal(await eventAdapter.getEventServiceUrl(), 'http://camera.local/onvif/event_service')
+const subscription = await eventAdapter.createPullPointSubscription()
+assert.equal(subscription.reference, 'http://camera.local/onvif/pullpoint')
+assert.equal(eventRequests[1].url, 'http://camera.local/onvif/event_service')
+assert.match(eventRequests[1].options.headers['Content-Type'], /events\/wsdl\/CreatePullPointSubscription/)
+await eventAdapter.pullPointMessages(subscription.reference)
+assert.equal(eventRequests[2].url, subscription.reference)
+
+console.log('ONVIF: PTZ, suporte/ausência de Events e PullPoint verificados.')

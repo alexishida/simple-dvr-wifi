@@ -140,24 +140,38 @@ function soapEnvelope(
     </s:Header>`;
   }
   return `<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
 ${security}
   <s:Body>${body}</s:Body>
 </s:Envelope>`;
 }
 
 function soapAction(body: string): string | null {
-  const operation = /<(tds|trt|tr2|tptz):([A-Za-z][A-Za-z0-9]*)/.exec(body);
+  const operation = /<(tds|trt|tr2|tptz|tev):([A-Za-z][A-Za-z0-9]*)/.exec(body);
   if (!operation) return null;
   const namespace =
     operation[1] === "tds"
       ? "http://www.onvif.org/ver10/device/wsdl"
       : operation[1] === "tr2"
         ? "http://www.onvif.org/ver20/media/wsdl"
-        : operation[1] === "tptz"
-          ? "http://www.onvif.org/ver20/ptz/wsdl"
-          : "http://www.onvif.org/ver10/media/wsdl";
+      : operation[1] === "tptz"
+        ? "http://www.onvif.org/ver20/ptz/wsdl"
+        : operation[1] === "tev"
+          ? "http://www.onvif.org/ver10/events/wsdl"
+        : "http://www.onvif.org/ver10/media/wsdl";
   return `${namespace}/${operation[2]}`;
+}
+
+function cameraEventUrl(deviceUrl: string, advertisedUrl: string): string {
+  const device = new URL(deviceUrl);
+  const advertised = new URL(advertisedUrl, device);
+  if (!['http:', 'https:'].includes(advertised.protocol)
+    || advertised.hostname.toLowerCase() !== device.hostname.toLowerCase()
+    || (device.protocol === 'https:' && advertised.protocol !== 'https:')
+    || advertised.username || advertised.password) {
+    throw new Error('O serviço de eventos anunciou um endereço fora da câmera configurada.');
+  }
+  return advertised.toString();
 }
 
 function stateFromBoolean(value: boolean | null | undefined): CapabilityState {
@@ -210,6 +224,7 @@ function classifyProfile(profile: CameraProfileInfo): "main" | "sub" {
 export class OnvifAdapter implements CameraAdapter {
   private readonly options: OnvifClientOptions;
   private ptzServiceUrl: string | null = null;
+  private eventsServiceUrl: string | null = null;
   private primaryProfileToken: string | null = null;
   private useExplicitPtzSpaces = false;
   private useRelativeMoveForTapoPan = false;
@@ -465,6 +480,42 @@ export class OnvifAdapter implements CameraAdapter {
       `<tptz:RemovePreset><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken><tptz:PresetToken>${escapeXml(options.presetToken)}</tptz:PresetToken></tptz:RemovePreset>`,
       this.ptzServiceUrl ?? this.options.deviceServiceUrl,
     );
+  }
+
+  async getEventServiceUrl(): Promise<string | null> {
+    const body = await this.call('<tds:GetCapabilities><tds:Category>Events</tds:Category></tds:GetCapabilities>');
+    const node = this.parseXml(body);
+    const capabilities = queryAll(node, 'Body/GetCapabilitiesResponse/Capabilities');
+    for (const capability of capabilities) {
+      const events = capability.children.find((child) => child.name === 'Events');
+      const address = events?.attributes.XAddr ?? (events ? queryText(events, 'XAddr') : null);
+      if (address) {
+        this.eventsServiceUrl = cameraEventUrl(this.options.deviceServiceUrl, address);
+        return this.eventsServiceUrl;
+      }
+    }
+    return null;
+  }
+
+  async createPullPointSubscription(): Promise<{ reference: string; renewAfterMs: number }> {
+    const body = await this.call('<tev:CreatePullPointSubscription><tev:InitialTerminationTime>PT10M</tev:InitialTerminationTime></tev:CreatePullPointSubscription>', this.eventsServiceUrl ?? this.options.deviceServiceUrl);
+    const reference = queryText(this.parseXml(body), 'Body/CreatePullPointSubscriptionResponse/SubscriptionReference/Address');
+    if (!reference) throw new Error('A câmera não retornou referência PullPoint.');
+    return { reference: cameraEventUrl(this.options.deviceServiceUrl, reference), renewAfterMs: 8 * 60_000 };
+  }
+
+  async renewPullPointSubscription(reference: string): Promise<{ renewAfterMs: number }> {
+    await this.call('<tev:Renew><tev:TerminationTime>PT10M</tev:TerminationTime></tev:Renew>', cameraEventUrl(this.options.deviceServiceUrl, reference));
+    return { renewAfterMs: 8 * 60_000 };
+  }
+
+  async unsubscribePullPointSubscription(reference: string): Promise<void> {
+    await this.call('<tev:Unsubscribe/>', cameraEventUrl(this.options.deviceServiceUrl, reference));
+  }
+
+  async pullPointMessages(reference: string): Promise<string[]> {
+    const body = await this.call('<tev:PullMessages><tev:Timeout>PT5S</tev:Timeout><tev:MessageLimit>20</tev:MessageLimit></tev:PullMessages>', cameraEventUrl(this.options.deviceServiceUrl, reference));
+    return [body];
   }
 
   private async call(

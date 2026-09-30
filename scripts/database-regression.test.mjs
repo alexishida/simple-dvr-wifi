@@ -52,6 +52,70 @@ test('importing an SD card recording preserves the camera time and is idempotent
   assert.equal(segments[0].path, input.path)
 })
 
+test("prebuffer segments extend the recording's library interval", async (t) => {
+  const { request } = memoryDatabase(t);
+  const camera = await request("camera.create", { name: "Motion", host: "camera.local" });
+  const recording = await request("recording.create", { cameraId: camera.id });
+  const earlier = new Date(Date.parse(recording.startedAt) - 12_000).toISOString();
+  await request("recording.segment.create", {
+    recordingId: recording.id,
+    path: "C:/recordings/prebuffer.mp4",
+    startedAt: earlier,
+    endedAt: recording.startedAt,
+    durationMs: 12_000,
+    status: "completed",
+  });
+  const extended = await request("recording.extendStart", { id: recording.id, startedAt: earlier });
+  assert.equal(extended.startedAt, earlier);
+  await request("recording.complete", { id: recording.id, status: "completed" });
+  const library = await request("recording.library", { cameraId: camera.id, endAt: recording.startedAt });
+  assert.equal(library.length, 1);
+  assert.equal(library[0].path, "C:/recordings/prebuffer.mp4");
+  assert.ok(library[0].durationMs >= 12_000);
+});
+
+test("motion events link only to their camera's recording and filter the timeline", async (t) => {
+  const { request } = memoryDatabase(t);
+  const camera = await request("camera.create", { name: "Motion", host: "motion.local" });
+  const otherCamera = await request("camera.create", { name: "Other", host: "other.local" });
+  const recording = await request("recording.create", { cameraId: camera.id });
+  const unrelated = await request("recording.create", { cameraId: otherCamera.id });
+  const occurredAt = new Date().toISOString();
+  const input = { cameraId: camera.id, state: "started", occurredAt, receivedAt: occurredAt };
+  const first = await request("motionEvent.create", input);
+  const duplicate = await request("motionEvent.create", input);
+  assert.equal(first.stored, true);
+  assert.equal(duplicate.stored, false);
+  assert.equal(duplicate.id, first.id);
+  assert.equal((await request("motionEvent.link", { id: first.id, recordingId: unrelated.id })).linked, false);
+  assert.equal((await request("motionEvent.link", { id: first.id, recordingId: recording.id })).linked, true);
+  await request("recording.segment.create", {
+    recordingId: recording.id, path: "C:/recordings/motion.mp4", startedAt: occurredAt,
+    endedAt: new Date(Date.parse(occurredAt) + 2_000).toISOString(), durationMs: 2_000,
+  });
+  const filters = {
+    cameraId: camera.id,
+    startAt: new Date(Date.parse(occurredAt) - 1_000).toISOString(),
+    endAt: new Date(Date.parse(occurredAt) + 3_000).toISOString(),
+  };
+  const events = await request("motionEvent.list", filters);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].recordingId, recording.id);
+  assert.equal(events[0].hasVideo, true);
+  assert.deepEqual((await request("motionEvent.list", { ...filters, state: "ended" })), []);
+  const unlinked = await request("motionEvent.create", {
+    cameraId: camera.id, state: "ended",
+    occurredAt: new Date(Date.parse(occurredAt) - 60_000).toISOString(),
+    receivedAt: new Date(Date.parse(occurredAt) + 1_000).toISOString(),
+  });
+  assert.equal((await request("motionEvent.list", { ...filters, state: "ended" }))[0].id, unlinked.id);
+  assert.equal((await request("motionEvent.list", { ...filters, state: "ended" }))[0].hasVideo, false);
+  const quietRecording = await request("recording.create", { cameraId: camera.id });
+  assert.deepEqual((await request("recording.library", { cameraId: camera.id, occurrence: "with-motion" })).map((row) => row.id), [recording.id]);
+  assert.deepEqual((await request("recording.library", { cameraId: camera.id, occurrence: "without-motion" })).map((row) => row.id), [quietRecording.id]);
+  assert.equal((await request("recording.libraryById", { id: recording.id })).path, "C:/recordings/motion.mp4");
+});
+
 test("failed camera endpoint insertion rolls back the entire camera", async (t) => {
   const { worker, request } = memoryDatabase(t);
   const response = await worker.dispatch({
@@ -212,6 +276,23 @@ test("library date filters use snapshot instants and recording interval overlap"
   );
 });
 
+test("the timeline includes a recording still active across midnight", async (t) => {
+  const { worker, request } = memoryDatabase(t);
+  const camera = await request("camera.create", { name: "Overnight", host: "overnight.local" });
+  const recording = await request("recording.create", { cameraId: camera.id });
+  const dayStart = new Date();
+  dayStart.setUTCHours(0, 0, 0, 0);
+  const previousDay = new Date(dayStart.getTime() - 60_000).toISOString();
+  worker.database.prepare("UPDATE recordings SET started_at = ?, status = 'recording' WHERE id = ?")
+    .run(previousDay, recording.id);
+  const list = await request("recording.library", {
+    cameraId: camera.id,
+    startAt: dayStart.toISOString(),
+    endAt: new Date(dayStart.getTime() + 86_400_000).toISOString(),
+  });
+  assert.deepEqual(list.map((item) => item.id), [recording.id]);
+});
+
 test("media-library fixture covers cameras, gaps, inactive cameras, and missing files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dvr-media-library-fixture-"));
   const { worker, request } = memoryDatabase(t);
@@ -343,7 +424,7 @@ test("media metadata migration upgrades an existing version 1 database", () => {
     runMigrations(db, {}, [MIGRATIONS[0]]);
     assert.throws(() => db.prepare("SELECT * FROM media_metadata"));
     const result = runMigrations(db, {}, MIGRATIONS);
-    assert.deepEqual(result.applied, [2, 3, 4]);
+    assert.deepEqual(result.applied, [2, 3, 4, 5, 6]);
     assert.doesNotThrow(() => db.prepare("SELECT * FROM media_metadata"));
   } finally {
     db.close();

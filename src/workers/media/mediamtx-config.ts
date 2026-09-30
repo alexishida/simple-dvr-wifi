@@ -27,6 +27,7 @@ export interface MediaMtxConfigOptions {
   webrtcUdpPort?: number;
   configDir: string;
   recordPath?: string;
+  recordSegmentDurationMs?: number;
   sourceOnDemand?: boolean;
   configFileName?: string;
   readTimeoutMs?: number;
@@ -133,7 +134,7 @@ export function generateMediaMtxConfig(
           `    recordPath: ${JSON.stringify(options.recordPath)}`,
           `    recordFormat: fmp4`,
           `    recordPartDuration: 1s`,
-          `    recordSegmentDuration: 15m`,
+          `    recordSegmentDuration: ${options.recordSegmentDurationMs ?? 900_000}ms`,
           `    recordDeleteAfter: 0s`,
         ]
       : []),

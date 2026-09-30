@@ -1,14 +1,18 @@
 import type {
   CameraEditDetails,
+  CameraMetrics,
   CameraSummary,
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
+import type { DashboardGroup, DashboardLayout } from "../shared/dashboard-layout.js";
 import type { SdCardCamera, SdCardRecording } from '../shared/sd-card.js';
 import type {
   MediaKind,
   MediaMetadata,
   MediaMetadataInput,
+  MotionEventFilter,
+  MotionEventRecord,
   RecordingRecord,
   RecordingSegmentRecord,
   SnapshotRecord,
@@ -62,6 +66,7 @@ export interface CameraApi {
   list: () => Promise<Result<CameraSummary[]>>;
   onChanged: (listener: EventListener<"cameras:changed">) => Unsubscribe;
   details: (id: string) => Promise<Result<CameraEditDetails>>;
+  metrics: (id: string) => Promise<Result<CameraMetrics>>;
   create: (input: CameraCreateInput) => Promise<Result<CameraCreateResult>>;
   checkDuplicate: (input: {
     host?: string;
@@ -208,6 +213,7 @@ export interface LibraryFilter {
   cameraId?: string;
   startAt?: string;
   endAt?: string;
+  occurrence?: "all" | "with-motion" | "without-motion";
 }
 
 export interface LibraryApi {
@@ -221,6 +227,8 @@ export interface LibraryApi {
   recordings: (
     filters?: LibraryFilter,
   ) => Promise<Result<RecordingLibraryItem[]>>;
+  recordingById: (id: string) => Promise<Result<RecordingLibraryItem | null>>;
+  motionEvents: (filters: MotionEventFilter) => Promise<Result<MotionEventRecord[]>>;
   recordingSegments: (id: string) => Promise<Result<RecordingSegmentRecord[]>>;
   metadata: (input: {
     kind: MediaKind;
@@ -275,6 +283,9 @@ export interface ExposedApi {
     list: () => Promise<Result<Array<{ id: string; kind: string; cameraId: string | null; message: string; count: number; firstOccurredAt: string; lastOccurredAt: string }>>>;
     dismiss: (id: string) => Promise<Result<{ dismissed: boolean }>>;
   };
+  diagnostics: {
+    export: () => Promise<Result<{ exported: boolean }>>;
+  };
   retention: {
     status: () => Promise<Result<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean }>>;
   };
@@ -282,6 +293,12 @@ export interface ExposedApi {
     list: (cameraId: string) => Promise<Result<Array<{ id: string; weekday: number; start: string; end: string; enabled: boolean }>>>;
     replace: (input: { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> }) => Promise<Result<{ saved: boolean }>>;
     status: (cameraId: string) => Promise<Result<{ active: boolean; source: "manual" | "scheduled" | null; blocked: string | null; nextAt: string | null; appMustRun: boolean }>>;
+  };
+  dashboard: {
+    saveGroup: (group: DashboardGroup) => Promise<Result<{ saved: boolean }>>;
+    deleteGroup: (id: string) => Promise<Result<{ deleted: boolean }>>;
+    saveLayout: (layout: DashboardLayout) => Promise<Result<{ saved: boolean }>>;
+    deleteLayout: (id: string) => Promise<Result<{ deleted: boolean }>>;
   };
 }
 

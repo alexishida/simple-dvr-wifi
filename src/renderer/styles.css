@@ -2768,6 +2768,70 @@ p {
   background: var(--color-warning);
 }
 
+.recording-timeline-event {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  width: 1.25rem;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 0;
+  background: transparent;
+  color: var(--color-accent-strong);
+  cursor: pointer;
+}
+
+.recording-timeline-event::after {
+  position: absolute;
+  top: 1.1rem;
+  bottom: 0;
+  width: 2px;
+  background: currentColor;
+  content: "";
+}
+
+.recording-timeline-event.is-ended { color: var(--color-warning); }
+.recording-timeline-event.is-unavailable { color: var(--color-text-muted); }
+.recording-timeline-event:hover,
+.recording-timeline-event:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+
+.motion-event-list {
+  display: grid;
+  gap: var(--space-1);
+  max-height: 11rem;
+  margin-top: var(--space-3);
+  overflow-y: auto;
+}
+
+.motion-event-list > p {
+  margin: 0 0 var(--space-1);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.motion-event-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.motion-event-row:hover { background: var(--color-surface-hover); }
+.motion-event-row:focus-visible { outline: 2px solid var(--color-accent); }
+.motion-event-row span:last-child { margin-left: auto; font-size: var(--text-xs); }
+.motion-event-available { color: var(--color-success); }
+.motion-event-unavailable { color: var(--color-text-muted); }
+
 .recording-timeline-legend {
   flex-wrap: wrap;
   gap: var(--space-4);
@@ -3533,6 +3597,44 @@ p {
     flex-direction: column;
   }
 }
+
+.dashboard-layouts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  margin-bottom: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.camera-metrics-modal { width: min(34rem, calc(100vw - var(--space-8))); }
+.camera-metrics-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); margin: var(--space-4) 0; }
+.camera-metrics-list div, .camera-metrics-profiles > div { padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); }
+.camera-metrics-list dt { color: var(--color-text-secondary); font-size: var(--text-xs); }
+.camera-metrics-list dd { margin: var(--space-1) 0 0; color: var(--color-text); font-size: var(--text-sm); }
+.camera-metrics-profiles { display: grid; gap: var(--space-2); margin: var(--space-2) 0 var(--space-4); }
+.camera-metrics-profiles > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-1) var(--space-3); color: var(--color-text-secondary); font-size: var(--text-xs); }
+.camera-metrics-profiles strong { color: var(--color-text); font-size: var(--text-sm); }
+
+.dashboard-layouts-row, .dashboard-layouts-form, .dashboard-group-list > div {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.dashboard-layouts-select { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.dashboard-layouts-select select, .dashboard-layouts-form input { min-height: 2rem; color: var(--color-text); background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 0 var(--space-2); }
+.dashboard-layouts-details { color: var(--color-text-secondary); font-size: var(--text-sm); }
+.dashboard-layouts-details summary { cursor: pointer; }
+.dashboard-layouts-manager { display: grid; gap: var(--space-3); min-width: min(36rem, calc(100vw - 4rem)); padding-top: var(--space-3); }
+.dashboard-layouts-manager label { display: block; margin-bottom: var(--space-1); }
+.dashboard-camera-checks { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+.dashboard-camera-checks label { display: flex; align-items: center; gap: var(--space-1); margin: 0; }
+.dashboard-group-list { display: grid; gap: var(--space-1); }
+.dashboard-group-list > div { justify-content: space-between; }
 
 .snapshot-viewer-images figcaption {
   padding: var(--space-2) var(--space-3);

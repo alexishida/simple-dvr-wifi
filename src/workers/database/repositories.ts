@@ -508,6 +508,13 @@ export class RecordingRepository {
     return this.getById(id)
   }
 
+  extendStart(id: string, startedAt: string): RecordingRecord | null {
+    this.db.prepare(
+      'UPDATE recordings SET started_at = ?, updated_at = ? WHERE id = ? AND started_at > ?',
+    ).run(startedAt, nowIso(), id, startedAt)
+    return this.getById(id)
+  }
+
   list(cameraId: string): RecordingRecord[] {
     const rows = this.db
       .prepare('SELECT * FROM recordings WHERE camera_id = ? ORDER BY started_at DESC')
@@ -519,6 +526,7 @@ export class RecordingRepository {
     cameraId?: string
     startAt?: string
     endAt?: string
+    occurrence?: 'all' | 'with-motion' | 'without-motion'
   } = {}): Array<RecordingRecord & { path: string | null }> {
     const clauses: string[] = []
     const params: string[] = []
@@ -527,12 +535,17 @@ export class RecordingRepository {
       params.push(filters.cameraId)
     }
     if (filters.startAt) {
-      clauses.push("COALESCE(r.ended_at, r.started_at) >= ?")
-      params.push(filters.startAt)
+      clauses.push("COALESCE(r.ended_at, CASE WHEN r.status IN ('starting', 'recording', 'stopping') THEN ? ELSE r.started_at END) >= ?")
+      params.push(new Date().toISOString(), filters.startAt)
     }
     if (filters.endAt) {
       clauses.push('r.started_at < ?')
       params.push(filters.endAt)
+    }
+    if (filters.occurrence === 'with-motion' || filters.occurrence === 'without-motion') {
+      clauses.push(`${filters.occurrence === 'without-motion' ? 'NOT ' : ''}EXISTS (
+        SELECT 1 FROM motion_events m WHERE m.recording_id = r.id AND m.state = 'started'
+      )`)
     }
     const rows = this.db.prepare(
       `SELECT r.*, (
@@ -544,6 +557,14 @@ export class RecordingRepository {
        ORDER BY r.started_at DESC, r.rowid DESC`,
     ).all(...params) as Row[]
     return rows.map((row) => ({ ...mapRecording(row), path: (row.path as string) ?? null }))
+  }
+
+  libraryById(id: string): (RecordingRecord & { path: string | null }) | null {
+    const row = this.db.prepare(`SELECT r.*, (
+      SELECT s.path FROM recording_segments s
+      WHERE s.recording_id = r.id ORDER BY s.started_at, s.rowid LIMIT 1
+    ) AS path FROM recordings r WHERE r.id = ?`).get(id) as Row | undefined
+    return row ? { ...mapRecording(row), path: (row.path as string) ?? null } : null
   }
 
   addSegment(input: {

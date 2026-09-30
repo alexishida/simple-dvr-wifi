@@ -25,6 +25,7 @@ import {
   realpath,
   stat,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { constants as fsConstants } from "node:fs";
@@ -62,11 +63,16 @@ import { LocalAlertCenter } from "./services/alert-center.js";
 import { selectRetentionCandidates } from "./services/retention-policy.js";
 import { SchedulePeriodSchema, isScheduledAt, nextScheduledAt, type SchedulePeriod } from "../shared/recording-schedule.js";
 import { RecordingScheduler, shouldScheduleRecording } from "./services/recording-scheduler.js";
+import { MotionSubscriptionRegistry } from "./services/motion-subscriptions.js";
+import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotifications } from "./services/motion-events.js";
+import { MotionPrebufferService } from "./services/motion-prebuffer.js";
 import { AppConfigSchema, type AppConfig } from "../shared/config.js";
+import { DashboardGroupSchema, DashboardLayoutSchema } from "../shared/dashboard-layout.js";
 import type { CameraEditDetails, CameraSummary } from "../shared/contracts.js";
 import type {
   CameraRecord,
   MediaMetadata,
+  MotionEventRecord,
   RecordingRecord,
   RecordingSegmentRecord,
   SnapshotRecord,
@@ -95,9 +101,21 @@ const activeRecordings = new Map<
   string,
   { recordingId: string; startedAt: string; recordDir: string }
 >();
-const recordingSources = new Map<string, "manual" | "scheduled">();
+const recordingSources = new Map<string, "manual" | "scheduled" | "motion">();
+const motionStopTimers = new MotionRecordingTimers((cameraId, reason) => {
+  void withRecordingLock(cameraId, () => recordingSources.get(cameraId) === "motion"
+    ? stopActiveRecording(cameraId)
+    : Promise.resolve({ stopped: false, saved: false })).catch(() => {
+    localAlerts.report("recording_interrupted", "Não foi possível finalizar a gravação por movimento.", cameraId);
+  }).finally(() => {
+    if (reason === "missing-end") motionNormalizer.reset(cameraId);
+  });
+});
 const scheduleSuppressedUntil = new Map<string, number>();
 let recordingScheduler: RecordingScheduler | null = null;
+let motionSubscriptions: MotionSubscriptionRegistry | null = null;
+let motionPrebuffer: MotionPrebufferService | null = null;
+const motionNormalizer = new MotionEventNormalizer();
 const activeViewSessions = new Set<string>();
 const recordingOperations = new Map<string, Promise<void>>();
 let clipExporter: ClipExportService | null = null;
@@ -453,7 +471,8 @@ async function stopActiveRecording(
       )
     : false;
   const segmentCount = disabled ? await catalogRecordingFiles(active) : 0;
-  const saved = segmentCount > 0;
+  const buffered = await database.request("recording.segment.list", { recordingId: active.recordingId });
+  const saved = segmentCount > 0 || (buffered.ok && (buffered.value as RecordingSegmentRecord[]).length > 0);
   await database.request("recording.complete", {
     id: active.recordingId,
     status: disabled && saved ? status : "interrupted",
@@ -466,6 +485,9 @@ async function stopActiveRecording(
     localAlerts.report("recording_interrupted", "Gravação interrompida antes de ser finalizada.", cameraId);
   }
   activeRecordings.delete(cameraId);
+  if (recordingSources.get(cameraId) === "motion") {
+    motionStopTimers.clear(cameraId);
+  }
   recordingSources.delete(cameraId);
   const mainSessionId = mediaSessionId(cameraId, "main");
   if (!activeViewSessions.has(mainSessionId))
@@ -537,16 +559,17 @@ async function catalogRecordingFiles(active: {
 
 async function startRecording(
   cameraId: string,
-  source: "manual" | "scheduled",
+  source: "manual" | "scheduled" | "motion",
 ): Promise<Record<string, unknown>> {
   return withRecordingLock(cameraId, async () => {
     if (!config || !database || !mediaSupervisor) return { ok: false };
     const existing = activeRecordings.get(cameraId);
     if (existing) {
       if (source === "manual") recordingSources.set(cameraId, "manual");
+      if (source === "manual") motionStopTimers.clear(cameraId);
       return {
         ok: true, writeAllowed: true, cameraId, recordingId: existing.recordingId,
-        startedAt: existing.startedAt, status: "recording",
+        startedAt: existing.startedAt, status: "recording", newlyStarted: false,
       };
     }
     const camera = await getCameraRecord(cameraId);
@@ -580,8 +603,114 @@ async function startRecording(
     recordingSources.set(cameraId, source);
     await database.request("camera.setRecordingStatus", { cameraId, status: "recording" });
     await emitCameraChanged();
-    return { ok: true, writeAllowed: true, recordingId: recording.id, cameraId, status: "recording", startedAt: recording.startedAt };
+    return { ok: true, writeAllowed: true, recordingId: recording.id, cameraId, status: "recording", startedAt: recording.startedAt, newlyStarted: true };
   });
+}
+
+async function startMotionPrebuffer(cameraId: string): Promise<void> {
+  if (!motionPrebuffer || !config?.motion.enabled || !config.motion.prebufferSeconds) return;
+  const camera = await getCameraRecord(cameraId);
+  if (!camera?.active) return;
+  const rtspUrl = await cameraRtspUrl(camera);
+  if (!rtspUrl) return;
+  try {
+    if (!await motionPrebuffer.start(cameraId, rtspUrl, config.motion.prebufferSeconds)) {
+      localAlerts.report("recording_interrupted", "O buffer anterior ao movimento não pôde ser iniciado.", cameraId);
+    }
+  } catch {
+    localAlerts.report("recording_interrupted", "O buffer anterior ao movimento não pôde ser iniciado.", cameraId);
+  }
+}
+
+async function refreshMotionPrebuffer(cameraId: string): Promise<void> {
+  await motionPrebuffer?.stop(cameraId);
+  await startMotionPrebuffer(cameraId);
+}
+
+async function reconcileMotionPrebuffer(): Promise<void> {
+  await motionPrebuffer?.stopAll();
+  motionPrebuffer = null;
+  if (!mediaSupervisor || !config?.motion.enabled || !config.motion.prebufferSeconds || !database) return;
+  const libraryRoot = config.recordingsDir || resolve(userDataPath, "recordings");
+  motionPrebuffer = new MotionPrebufferService(
+    mediaSupervisor,
+    resolve(userDataPath, "motion-prebuffer"),
+    libraryRoot,
+  );
+  const cameras = await database.request("camera.list", undefined);
+  if (cameras.ok) await Promise.all((cameras.value as CameraRecord[])
+    .filter((camera) => camera.active)
+    .map((camera) => startMotionPrebuffer(camera.id)));
+}
+
+async function saveMotionPrebufferSegments(cameraId: string, recordingId: string, eventAt: string): Promise<void> {
+  if (!motionPrebuffer || !database) return;
+  try {
+    const segments = await motionPrebuffer.capture(cameraId, recordingId, eventAt);
+    let earliest: string | null = null;
+    for (const segment of segments) {
+      const stored = await database.request("recording.segment.create", {
+        recordingId,
+        ...segment,
+        status: "completed",
+      });
+      if (!stored.ok) {
+        await unlink(segment.path).catch(() => undefined);
+        continue;
+      }
+      if (!earliest || segment.startedAt < earliest) earliest = segment.startedAt;
+    }
+    if (earliest) await database.request("recording.extendStart", { id: recordingId, startedAt: earliest });
+  } catch {
+    localAlerts.report("recording_interrupted", "Não foi possível preservar todo o vídeo anterior ao movimento.", cameraId);
+  }
+}
+
+async function handleMotionMessages(cameraId: string, messages: string[]): Promise<void> {
+  for (const message of messages) {
+    for (const parsed of parseOnvifMotionNotifications(message)) {
+      const event = motionNormalizer.normalize({
+        cameraId,
+        active: parsed.active,
+        occurredAt: parsed.occurredAt,
+      });
+      if (!event) continue;
+      if (event.repeated) {
+        if (config?.motion.enabled && event.state === "started" && recordingSources.get(cameraId) === "motion") {
+          motionStopTimers.arm(cameraId, "missing-end", Math.max(MOTION_MISSING_END_TIMEOUT_MS, config.motion.postRecordSeconds * 1_000));
+        }
+        continue;
+      }
+
+      const stored = await database?.request("motionEvent.create", {
+        ...event,
+        recordingId: activeRecordings.get(cameraId)?.recordingId ?? null,
+      });
+      if (!config?.motion.enabled || recordingSources.get(cameraId) === "manual") continue;
+      motionStopTimers.clear(cameraId);
+
+      if (event.state === "started") {
+        try {
+          const result = await startRecording(cameraId, "motion");
+          if (result.ok === true && typeof result.recordingId === "string" && stored?.ok) {
+            const eventId = (stored.value as { id: string | null }).id;
+            if (eventId) await database?.request("motionEvent.link", { id: eventId, recordingId: result.recordingId });
+          }
+          if (result.ok === true && result.newlyStarted === true && typeof result.recordingId === "string") {
+            // Cache files use this machine's clock, not the camera's ONVIF timestamp.
+            await saveMotionPrebufferSegments(cameraId, result.recordingId, event.receivedAt);
+          }
+          if (result.ok === true && recordingSources.get(cameraId) === "motion") {
+            motionStopTimers.arm(cameraId, "missing-end", Math.max(MOTION_MISSING_END_TIMEOUT_MS, config.motion.postRecordSeconds * 1_000));
+          }
+        } catch {
+          localAlerts.report("recording_interrupted", "O movimento não pôde iniciar a gravação.", cameraId);
+        }
+      } else if (recordingSources.get(cameraId) === "motion") {
+        motionStopTimers.arm(cameraId, "post-event", config.motion.postRecordSeconds * 1_000);
+      }
+    }
+  }
 }
 
 async function reconcileScheduledRecordings(): Promise<void> {
@@ -992,6 +1121,7 @@ const LibraryRequestSchema = z
     cameraId: z.string().uuid().optional(),
     startAt: z.string().datetime({ offset: true }).optional(),
     endAt: z.string().datetime({ offset: true }).optional(),
+    occurrence: z.enum(["all", "with-motion", "without-motion"]).optional(),
   })
   .refine(
     ({ startAt, endAt }) =>
@@ -1012,6 +1142,23 @@ function registerIpcHandlers(): void {
     handle: ({ id }) => cameraEditDetails(id),
   });
 
+  registry.register("cameras:metrics", {
+    input: CameraIdRequestSchema,
+    handle: async ({ id }) => {
+      const camera = await getCameraRecord(id);
+      if (!camera || !database) throw new Error("Câmera não encontrada.");
+      const profiles = await database.request("profile.list", { cameraId: id });
+      return {
+        connection: camera.status,
+        mainSession: mediaSupervisor?.status(mediaSessionId(id, "main"))?.state ?? null,
+        subSession: mediaSupervisor?.status(mediaSessionId(id, "sub"))?.state ?? null,
+        profiles: profiles.ok ? (profiles.value as Array<{ streamType: "main" | "sub"; name: string | null; codec: string | null; width: number | null; height: number | null; fps: number | null }>).map(({ streamType, name, codec, width, height, fps }) => ({ streamType, name, codec, width, height, fps })) : [],
+        // MediaMTX/WHEP does not expose a reliable per-camera dropped-frame counter.
+        droppedFrames: null,
+      };
+    },
+  });
+
   registry.register("cameras:create", {
     input: CameraCreateRequestSchema,
     handle: async (input) => {
@@ -1026,6 +1173,8 @@ function registerIpcHandlers(): void {
         camera: mapCameraRecord(result.camera, hasCredential),
         duplicate: result.duplicate,
       };
+      if (!result.duplicate) await startMotionPrebuffer(result.camera.id);
+      if (result.camera.active) void motionSubscriptions?.start(result.camera.id);
       await emitCameraChanged();
       return response;
     },
@@ -1050,6 +1199,10 @@ function registerIpcHandlers(): void {
       if (!cameraManagement) throw new Error("Serviço indisponível.");
       const updated = await cameraManagement.update(id, input);
       if (!updated) throw new Error("Câmera não encontrada.");
+      await refreshMotionPrebuffer(id);
+      await motionSubscriptions?.stop(id);
+      motionNormalizer.reset(id);
+      void motionSubscriptions?.start(id);
       await emitCameraChanged();
       return { updated: true };
     },
@@ -1329,6 +1482,10 @@ function registerIpcHandlers(): void {
       activeViewSessions.delete(mediaSessionId(id, "main"));
       activeViewSessions.delete(mediaSessionId(id, "sub"));
       await releaseCameraMedia(id);
+      await motionSubscriptions?.stop(id);
+      motionStopTimers.clear(id);
+      motionNormalizer.reset(id);
+      await motionPrebuffer?.stop(id);
       const changed = cameraManagement
         ? await cameraManagement.deactivate(id)
         : false;
@@ -1343,6 +1500,10 @@ function registerIpcHandlers(): void {
       const changed = cameraManagement
         ? await cameraManagement.reactivate(id)
         : false;
+      if (changed) {
+        await motionSubscriptions?.start(id);
+        await startMotionPrebuffer(id);
+      }
       await emitCameraChanged();
       return changed;
     },
@@ -1357,6 +1518,10 @@ function registerIpcHandlers(): void {
         password: password ?? null,
         rtspPassword: rtspPassword ?? null,
       });
+      await refreshMotionPrebuffer(id);
+      await motionSubscriptions?.stop(id);
+      motionNormalizer.reset(id);
+      void motionSubscriptions?.start(id);
       await emitCameraChanged();
       return true;
     },
@@ -1370,6 +1535,10 @@ function registerIpcHandlers(): void {
       activeViewSessions.delete(mediaSessionId(id, "main"));
       activeViewSessions.delete(mediaSessionId(id, "sub"));
       await releaseCameraMedia(id);
+      await motionSubscriptions?.stop(id);
+      motionStopTimers.clear(id);
+      motionNormalizer.reset(id);
+      await motionPrebuffer?.stop(id);
       await ptzRegistry?.release(id);
       const result = await cameraManagement.remove(id);
       await emitCameraChanged();
@@ -1651,7 +1820,9 @@ function registerIpcHandlers(): void {
           // A parada explícita vence a agenda até que a janela atual termine.
           scheduleSuppressedUntil.set(cameraId, Date.now() + 24 * 60 * 60 * 1_000);
         }
+        const wasMotion = recordingSources.get(cameraId) === "motion";
         const stopped = await stopActiveRecording(cameraId);
+        if (wasMotion) motionNormalizer.reset(cameraId);
         if (!stopped.stopped) return stopped;
         await emitCameraChanged();
         return stopped;
@@ -1709,6 +1880,34 @@ function registerIpcHandlers(): void {
       const result = await database.request("recording.library", filters);
       if (!result.ok) throw new Error(result.error.message);
       return result.value;
+    },
+  });
+
+  registry.register("library:recordingById", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!database) return null;
+      const result = await database.request("recording.libraryById", { id });
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value as (RecordingRecord & { path: string | null }) | null;
+    },
+  });
+
+  registry.register("library:motionEvents", {
+    input: z.object({
+      cameraId: z.string().uuid(),
+      startAt: z.string().datetime({ offset: true }),
+      endAt: z.string().datetime({ offset: true }),
+      state: z.enum(["started", "ended"]).optional(),
+    }).refine(({ startAt, endAt }) => {
+      const span = Date.parse(endAt) - Date.parse(startAt);
+      return span > 0 && span <= 25 * 60 * 60 * 1000;
+    }, { message: "Selecione um período de até um dia." }),
+    handle: async (filters) => {
+      if (!database) return [];
+      const result = await database.request("motionEvent.list", filters);
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value as MotionEventRecord[];
     },
   });
 
@@ -2207,9 +2406,76 @@ function registerIpcHandlers(): void {
     handle: ({ id }) => ({ dismissed: localAlerts.dismiss(id) }),
   });
 
+  registry.register("diagnostics:export", {
+    input: EmptyRequestSchema,
+    handle: async () => {
+      const options: Electron.SaveDialogOptions = { defaultPath: "simple-dvr-diagnostico.json", filters: [{ name: "Diagnóstico JSON", extensions: ["json"] }], properties: ["showOverwriteConfirmation"] };
+      const destination = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options);
+      if (destination.canceled || !destination.filePath) return { exported: false };
+      await writeFile(destination.filePath, JSON.stringify(localAlerts.diagnosticReport(), null, 2), { encoding: "utf8", flag: "wx" });
+      return { exported: true };
+    },
+  });
+
   registry.register("config:get", {
     input: EmptyRequestSchema,
     handle: () => config ?? null,
+  });
+
+  registry.register("dashboard:saveGroup", {
+    input: DashboardGroupSchema,
+    handle: async (group) => {
+      if (!config || !configRepository) return { saved: false };
+      const groups = config.dashboard.groups.filter((item) => item.id !== group.id);
+      config = { ...config, dashboard: { ...config.dashboard, groups: [...groups, group] } };
+      await configRepository.save(config);
+      return { saved: true };
+    },
+  });
+
+  registry.register("dashboard:deleteGroup", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !configRepository) return { deleted: false };
+      config = {
+        ...config,
+        dashboard: {
+          ...config.dashboard,
+          groups: config.dashboard.groups.filter((group) => group.id !== id),
+          layouts: config.dashboard.layouts.map((layout) => layout.groupId === id ? { ...layout, groupId: null } : layout),
+        },
+      };
+      await configRepository.save(config);
+      return { deleted: true };
+    },
+  });
+
+  registry.register("dashboard:saveLayout", {
+    input: DashboardLayoutSchema,
+    handle: async (layout) => {
+      if (!config || !configRepository) return { saved: false };
+      const knownCameraIds = new Set((await listCameraSummaries()).map((camera) => camera.id));
+      const sanitized = {
+        ...layout,
+        groupId: config.dashboard.groups.some((group) => group.id === layout.groupId) ? layout.groupId : null,
+        slots: layout.slots.map((id) => id && knownCameraIds.has(id) ? id : null),
+      };
+      const layouts = config.dashboard.layouts.filter((item) => item.id !== layout.id);
+      config = { ...config, dashboard: { ...config.dashboard, layouts: [...layouts, sanitized], selectedLayoutId: layout.id } };
+      await configRepository.save(config);
+      return { saved: true };
+    },
+  });
+
+  registry.register("dashboard:deleteLayout", {
+    input: z.object({ id: z.string().uuid() }),
+    handle: async ({ id }) => {
+      if (!config || !configRepository) return { deleted: false };
+      const selectedLayoutId = config.dashboard.selectedLayoutId === id ? null : config.dashboard.selectedLayoutId;
+      config = { ...config, dashboard: { ...config.dashboard, layouts: config.dashboard.layouts.filter((layout) => layout.id !== id), selectedLayoutId } };
+      await configRepository.save(config);
+      return { deleted: true };
+    },
   });
 
   registry.register("config:save", {
@@ -2218,12 +2484,24 @@ function registerIpcHandlers(): void {
       if (!configRepository) return { saved: false };
       const parsed = AppConfigSchema.safeParse(incoming);
       if (!parsed.success) return { saved: false };
+      const motionEnabledChanged = config?.motion.enabled !== parsed.data.motion.enabled;
+      const prebufferChanged = config?.motion.enabled !== parsed.data.motion.enabled
+        || config?.motion.prebufferSeconds !== parsed.data.motion.prebufferSeconds
+        || config?.recordingsDir !== parsed.data.recordingsDir;
       await configRepository.save(parsed.data);
       await saveHardwareAcceleration(
         userDataPath,
         parsed.data.streams.enableHardwareAcceleration,
       );
       config = parsed.data;
+      if (motionEnabledChanged) motionNormalizer.resetAll();
+      if (!config.motion.enabled) {
+        motionStopTimers.clearAll();
+        await Promise.all([...recordingSources.entries()]
+          .filter(([, source]) => source === "motion")
+          .map(([cameraId]) => withRecordingLock(cameraId, () => stopActiveRecording(cameraId))));
+      }
+      if (prebufferChanged) await reconcileMotionPrebuffer();
       await withLibraryMutationLock(() => runRetentionCleanup());
       return { saved: true };
     },
@@ -2281,6 +2559,7 @@ async function initializeDatabase(): Promise<void> {
   await credentials.initialize();
   cameraManagement = new CameraManagementService(database, credentials);
   configRepository = new ConfigRepository(database);
+  await localAlerts.load(resolve(userDataPath, "diagnostic-history.json"));
   config = await configRepository.load();
   // This startup preference is authoritative; older versions only stored an
   // unused checkbox in SQLite. Preserve their actual automatic GPU behavior.
@@ -2330,6 +2609,30 @@ async function initializeDatabase(): Promise<void> {
     configDir: mediaConfigDir,
   });
   recordingScheduler = new RecordingScheduler(reconcileScheduledRecordings);
+  motionSubscriptions = new MotionSubscriptionRegistry({
+    getClient: async (cameraId) => {
+      const camera = await getCameraRecord(cameraId);
+      const onvifUrl = camera?.endpoints.find((endpoint) => endpoint.service === "onvif")?.url;
+      if (!camera?.active || !onvifUrl) return null;
+      const credential = await cameraCredential(cameraId, "onvif");
+      const { OnvifAdapter, createFetchOnvifTransport } = await import("../workers/camera/onvif-adapter.js");
+      const adapter = new OnvifAdapter({ deviceServiceUrl: onvifUrl, username: credential?.username, password: credential?.password, transport: createFetchOnvifTransport(), timeoutMs: 10_000 });
+      if (!await adapter.getEventServiceUrl()) return null;
+      let reference: string | null = null;
+      return {
+        subscribe: async () => { const created = await adapter.createPullPointSubscription(); reference = created.reference; return created; },
+        renew: async () => { if (!reference) throw new Error("Assinatura PullPoint ausente."); return adapter.renewPullPointSubscription(reference); },
+        unsubscribe: async () => { if (reference) await adapter.unsubscribePullPointSubscription(reference); },
+        pull: async () => reference ? adapter.pullPointMessages(reference) : [],
+      };
+    },
+  }, handleMotionMessages);
+  await reconcileMotionPrebuffer();
+  if (cameraList.ok) {
+    for (const camera of cameraList.value as CameraRecord[]) {
+      if (camera.active) void motionSubscriptions.start(camera.id);
+    }
+  }
   recordingScheduler.start();
   app.on("browser-window-focus", () => void recordingScheduler?.refresh());
   powerMonitor.on("resume", () => void recordingScheduler?.refresh());
@@ -2379,12 +2682,15 @@ async function initializeDatabase(): Promise<void> {
     name: "application-resources",
     stop: async () => {
       recordingScheduler?.stop();
+      await motionSubscriptions?.stopAll();
+      motionStopTimers.clearAll();
       for (const cameraId of [...activeRecordings.keys()]) {
         await withRecordingLock(cameraId, () =>
           stopActiveRecording(cameraId, "interrupted"),
         );
       }
       await ptzRegistry?.shutdownAll();
+      await motionPrebuffer?.stopAll();
       await mediaSupervisor?.shutdown();
       await database?.shutdown(3_000);
     },

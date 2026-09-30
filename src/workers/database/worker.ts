@@ -246,6 +246,36 @@ export class SqliteWorker {
           r.cameras.setRecordingStatus(p.cameraId, p.status);
           return reply({ stored: true });
         }
+        case "motionEvent.create": {
+          const p = request.payload as { cameraId: string; state: "started" | "ended"; occurredAt: string; receivedAt: string; recordingId?: string | null };
+          if (!this.db || !Number.isFinite(Date.parse(p.occurredAt)) || !Number.isFinite(Date.parse(p.receivedAt)))
+            return error("VALIDATION_ERROR", "Evento de movimento inválido.");
+          const id = randomUUID();
+          const result = this.db.prepare(`INSERT OR IGNORE INTO motion_events (id, camera_id, state, occurred_at, received_at, recording_id) VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(id, p.cameraId, p.state, p.occurredAt, p.receivedAt, p.recordingId ?? null);
+          const existing = result.changes === 1 ? id : (this.db.prepare(`SELECT id FROM motion_events WHERE camera_id = ? AND state = ? AND occurred_at = ?`)
+            .get(p.cameraId, p.state, p.occurredAt) as { id: string } | undefined)?.id ?? null;
+          return reply({ id: existing, stored: result.changes === 1 });
+        }
+        case "motionEvent.link": {
+          const p = request.payload as { id: string; recordingId: string };
+          const result = this.db?.prepare(`UPDATE motion_events SET recording_id = ? WHERE id = ? AND camera_id = (SELECT camera_id FROM recordings WHERE id = ?)`)
+            .run(p.recordingId, p.id, p.recordingId);
+          return reply({ linked: (result?.changes ?? 0) > 0 });
+        }
+        case "motionEvent.list": {
+          const p = request.payload as { cameraId: string; startAt: string; endAt: string; state?: "started" | "ended" };
+          const rows = this.db?.prepare(`SELECT m.id, m.camera_id AS cameraId, m.state,
+            m.occurred_at AS occurredAt, m.received_at AS receivedAt,
+            m.recording_id AS recordingId,
+            EXISTS(SELECT 1 FROM recording_segments s WHERE s.recording_id = m.recording_id) AS hasVideo
+            FROM motion_events m
+            WHERE m.camera_id = ? AND m.received_at >= ? AND m.received_at < ?
+              AND (? IS NULL OR m.state = ?)
+            ORDER BY m.received_at DESC LIMIT 1000`)
+            .all(p.cameraId, p.startAt, p.endAt, p.state ?? null, p.state ?? null) as Array<Record<string, unknown>> | undefined;
+          return reply((rows ?? []).map((row) => ({ ...row, hasVideo: row.hasVideo === 1 })));
+        }
         case "camera.getCapabilities": {
           const p = request.payload as { cameraId: string };
           const caps = r.capabilities.get(p.cameraId);
@@ -301,6 +331,10 @@ export class SqliteWorker {
           const p = request.payload as { id: string; status: string };
           return reply(r.recordings.complete(p.id, p.status as never));
         }
+        case "recording.extendStart": {
+          const p = request.payload as { id: string; startedAt: string };
+          return reply(r.recordings.extendStart(p.id, p.startedAt));
+        }
         case "recording.get": {
           const p = request.payload as { id: string };
           return reply(r.recordings.getById(p.id));
@@ -318,8 +352,13 @@ export class SqliteWorker {
             cameraId?: string;
             startAt?: string;
             endAt?: string;
+            occurrence?: 'all' | 'with-motion' | 'without-motion';
           };
           return reply(r.recordings.listLibrary(p));
+        }
+        case "recording.libraryById": {
+          const p = request.payload as { id: string };
+          return reply(r.recordings.libraryById(p.id));
         }
         case "recording.segment.create": {
           const p = request.payload as Parameters<

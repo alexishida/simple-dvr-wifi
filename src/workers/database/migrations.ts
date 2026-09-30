@@ -79,6 +79,32 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_recording_schedules_camera ON recording_schedules (camera_id, weekday);
     `),
   },
+  {
+    version: 5,
+    name: 'motion-events',
+    destructive: false,
+    up: (db) => db.exec(`
+      CREATE TABLE motion_events (
+        id TEXT PRIMARY KEY,
+        camera_id TEXT NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK (state IN ('started', 'ended')),
+        occurred_at TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        recording_id TEXT REFERENCES recordings(id) ON DELETE SET NULL,
+        UNIQUE(camera_id, state, occurred_at)
+      );
+      CREATE INDEX idx_motion_events_camera_time ON motion_events (camera_id, occurred_at);
+    `),
+  },
+  {
+    version: 6,
+    name: 'motion-events-received-time-index',
+    destructive: false,
+    up: (db) => db.exec(`
+      CREATE INDEX idx_motion_events_camera_received ON motion_events (camera_id, received_at);
+      CREATE INDEX idx_motion_events_recording ON motion_events (recording_id, state);
+    `),
+  },
 ]
 
 export interface MigrationResult {

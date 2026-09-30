@@ -3,12 +3,14 @@ import type { CameraSummary } from "../../shared/contracts.js";
 import type {
   MediaKind,
   MediaMetadata,
+  MotionEventRecord,
   RecordingRecord,
   RecordingSegmentRecord,
   SnapshotRecord,
 } from "../../shared/database.js";
 import {
   CameraIcon,
+  ActivityIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
@@ -279,6 +281,13 @@ export function LibraryView({
   const [snapshotZoom, setSnapshotZoom] = useState(1);
   const [timelineCamera, setTimelineCamera] = useState("");
   const [timelineDate, setTimelineDate] = useState("");
+  const [timelineRecordings, setTimelineRecordings] = useState<RecordingLibraryItem[]>([]);
+  const [timelineEvents, setTimelineEvents] = useState<MotionEventRecord[]>([]);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [occurrenceFilter, setOccurrenceFilter] = useState<"all" | "with-motion" | "without-motion">("all");
+  const [eventStateFilter, setEventStateFilter] = useState<"all" | "started" | "ended">("all");
+  const [eventVideoFilter, setEventVideoFilter] = useState<"all" | "with-video" | "without-video">("all");
+  const pendingMotionPlaybackAt = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -288,6 +297,7 @@ export function LibraryView({
       cameraId: selectedCamera || undefined,
       startAt: localDateTime(startDate, startTime),
       endAt: localDateTime(endDate, endTime, true),
+      occurrence: mode === "recordings" ? occurrenceFilter : undefined,
     };
     const request =
       mode === "snapshots"
@@ -320,6 +330,7 @@ export function LibraryView({
     startTime,
     endDate,
     endTime,
+    occurrenceFilter,
     refreshVersion,
   ]);
 
@@ -416,6 +427,7 @@ export function LibraryView({
   useEffect(() => {
     let active = true;
     if (!playingRecording) {
+      pendingMotionPlaybackAt.current = null;
       setPlayingSegments([]);
       setPlayingSegmentIndex(0);
       setPlaybackUrl(null);
@@ -431,6 +443,20 @@ export function LibraryView({
       if (!result.ok || result.value.length === 0) {
         setPlaybackError(result.ok ? "Nenhum segmento de vídeo foi encontrado." : result.error.message);
         return;
+      }
+      const targetAt = pendingMotionPlaybackAt.current;
+      pendingMotionPlaybackAt.current = null;
+      if (targetAt) {
+        const targetMs = Date.parse(targetAt);
+        const index = result.value.findIndex((segment) =>
+          Date.parse(segment.endedAt ?? segment.startedAt) >= targetMs);
+        const selectedIndex = index < 0 ? result.value.length - 1 : index;
+        const segment = result.value[selectedIndex]!;
+        setPlayingSegmentIndex(selectedIndex);
+        setPendingSeekSeconds(Math.max(0, (targetMs - Date.parse(segment.startedAt)) / 1_000));
+        if (targetMs < Date.parse(segment.startedAt) || targetMs > Date.parse(segment.endedAt ?? segment.startedAt)) {
+          setPlaybackError("Não há vídeo no instante exato; exibindo o trecho disponível mais próximo.");
+        }
       }
       setPlayingSegments(result.value);
       setClipStartAt(localDateTimeInputValue(result.value[0]!.startedAt));
@@ -511,20 +537,53 @@ export function LibraryView({
     (snapshot) => snapshot.id === compareSnapshotId,
   );
   const timelineCameraId =
-    timelineCamera || selectedCamera || sortedRecordings[0]?.cameraId || "";
+    timelineCamera || selectedCamera || sortedRecordings[0]?.cameraId || cameras[0]?.id || "";
   const effectiveTimelineDate =
     timelineDate ||
-    (sortedRecordings[0] ? localDateValue(sortedRecordings[0].startedAt) : "");
+    (sortedRecordings[0] ? localDateValue(sortedRecordings[0].startedAt) : localDateValue(new Date().toISOString()));
+  const timelineCameraOptions = Array.from(new Set([
+    ...cameras.map((camera) => camera.id),
+    ...sortedRecordings.map((recording) => recording.cameraId),
+  ]));
+  useEffect(() => {
+    if (mode !== "recordings" || !timelineCameraId || !effectiveTimelineDate) return;
+    let active = true;
+    const dayStart = new Date(`${effectiveTimelineDate}T00:00:00`);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    setTimelineError(null);
+    setTimelineRecordings([]);
+    setTimelineEvents([]);
+    void Promise.all([
+      window.api.library.recordings({ cameraId: timelineCameraId, startAt: dayStart.toISOString(), endAt: dayEnd.toISOString() }),
+      window.api.library.motionEvents({
+        cameraId: timelineCameraId,
+        startAt: dayStart.toISOString(),
+        endAt: dayEnd.toISOString(),
+        state: eventStateFilter === "all" ? undefined : eventStateFilter,
+      }),
+    ]).then(([recordingsResult, eventsResult]) => {
+      if (!active) return;
+      setTimelineRecordings(recordingsResult.ok ? recordingsResult.value : []);
+      setTimelineEvents(eventsResult.ok ? eventsResult.value : []);
+      if (!recordingsResult.ok || !eventsResult.ok) setTimelineError("Não foi possível carregar toda a linha do tempo.");
+    }).catch(() => {
+      if (active) setTimelineError("Não foi possível carregar a linha do tempo.");
+    });
+    return () => { active = false; };
+  }, [mode, timelineCameraId, effectiveTimelineDate, eventStateFilter, refreshVersion]);
+  const visibleTimelineEvents = timelineEvents.filter((event) =>
+    eventVideoFilter === "all" || (eventVideoFilter === "with-video" ? event.hasVideo : !event.hasVideo));
   const timelineSegments = useMemo(() => {
     if (!timelineCameraId || !effectiveTimelineDate) return [];
     const dayStart = new Date(`${effectiveTimelineDate}T00:00:00`);
     const dayEnd = new Date(`${effectiveTimelineDate}T23:59:59.999`);
     const total = dayEnd.getTime() - dayStart.getTime();
-    return sortedRecordings
-      .filter((recording) => recording.cameraId === timelineCameraId)
+    return timelineRecordings
       .map((recording) => {
         const start = new Date(recording.startedAt);
-        const end = recording.endedAt ? new Date(recording.endedAt) : start;
+        const end = recording.endedAt ? new Date(recording.endedAt)
+          : ["starting", "recording", "stopping"].includes(recording.status) ? new Date() : start;
         if (end < dayStart || start > dayEnd) return null;
         const clippedStart = Math.max(start.getTime(), dayStart.getTime());
         const clippedEnd = Math.min(Math.max(end.getTime(), clippedStart), dayEnd.getTime());
@@ -535,7 +594,27 @@ export function LibraryView({
         };
       })
       .filter((segment): segment is NonNullable<typeof segment> => segment !== null);
-  }, [effectiveTimelineDate, sortedRecordings, timelineCameraId]);
+  }, [effectiveTimelineDate, timelineRecordings, timelineCameraId]);
+
+  const openMotionEvent = async (event: MotionEventRecord): Promise<void> => {
+    if (!event.recordingId || !event.hasVideo) {
+      setTimelineError("Esta ocorrência não tem um trecho de vídeo disponível.");
+      return;
+    }
+    try {
+      const result = await window.api.library.recordingById(event.recordingId);
+      if (!result.ok || !result.value?.path) {
+        setTimelineError("A gravação vinculada à ocorrência não está disponível.");
+        return;
+      }
+      setTimelineError(null);
+      setPlaybackError(null);
+      pendingMotionPlaybackAt.current = event.receivedAt;
+      setPlayingRecording(result.value);
+    } catch {
+      setTimelineError("Não foi possível abrir a gravação vinculada à ocorrência.");
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -1030,6 +1109,16 @@ export function LibraryView({
         className="library-display-controls"
         aria-label="Exibição da biblioteca"
       >
+        {mode === "recordings" && (
+          <div className="library-field">
+            <label className="library-filter-label" htmlFor="recording-occurrence-filter">Ocorrência</label>
+            <select id="recording-occurrence-filter" className="field-input library-control-input" value={occurrenceFilter} onChange={(event) => { setOccurrenceFilter(event.target.value as typeof occurrenceFilter); setCurrentPage(1); }}>
+              <option value="all">Todas as gravações</option>
+              <option value="with-motion">Com movimento</option>
+              <option value="without-motion">Sem movimento</option>
+            </select>
+          </div>
+        )}
         <div className="library-field">
           <label className="library-filter-label" htmlFor={sortId}>
             Ordenar
@@ -1104,7 +1193,7 @@ export function LibraryView({
           <div className="recording-timeline-header">
             <div>
               <h3 id="recording-timeline-title">Linha do tempo</h3>
-              <p>Períodos gravados, lacunas e arquivos disponíveis no dia.</p>
+              <p>Períodos gravados e ocorrências de movimento no dia.</p>
             </div>
             <div className="recording-timeline-filters">
               <div className="library-field">
@@ -1117,7 +1206,7 @@ export function LibraryView({
                   value={timelineCameraId}
                   onChange={(event) => setTimelineCamera(event.target.value)}
                 >
-                  {Array.from(new Set(sortedRecordings.map((recording) => recording.cameraId))).map((cameraId) => (
+                  {timelineCameraOptions.map((cameraId) => (
                     <option key={cameraId} value={cameraId}>
                       {cameraNames.get(cameraId) ?? "Câmera removida"}
                     </option>
@@ -1134,8 +1223,25 @@ export function LibraryView({
                   onChange={(event) => setTimelineDate(event.target.value)}
                 />
               </div>
+              <div className="library-field">
+                <label className="library-filter-label" htmlFor="timeline-event-state">Evento</label>
+                <select id="timeline-event-state" className="field-input library-control-input" value={eventStateFilter} onChange={(event) => setEventStateFilter(event.target.value as typeof eventStateFilter)}>
+                  <option value="all">Início e fim</option>
+                  <option value="started">Início</option>
+                  <option value="ended">Fim</option>
+                </select>
+              </div>
+              <div className="library-field">
+                <label className="library-filter-label" htmlFor="timeline-event-video">Trecho</label>
+                <select id="timeline-event-video" className="field-input library-control-input" value={eventVideoFilter} onChange={(event) => setEventVideoFilter(event.target.value as typeof eventVideoFilter)}>
+                  <option value="all">Todos</option>
+                  <option value="with-video">Com vídeo</option>
+                  <option value="without-video">Sem vídeo</option>
+                </select>
+              </div>
             </div>
           </div>
+          {timelineError && <p className="form-message form-error" role="alert">{timelineError}</p>}
           {timelineCameraId && effectiveTimelineDate ? (
             <>
               <div className="recording-timeline-hours" aria-hidden="true">
@@ -1162,12 +1268,36 @@ export function LibraryView({
                     <span className="sr-only">{recording.path ? "Gravação disponível" : "Arquivo indisponível"}</span>
                   </button>
                 ))}
+                {visibleTimelineEvents.map((event) => {
+                  const dayStart = new Date(`${effectiveTimelineDate}T00:00:00`).getTime();
+                  const dayEnd = new Date(`${effectiveTimelineDate}T23:59:59.999`).getTime();
+                  const left = Math.min(99, Math.max(1, (Date.parse(event.receivedAt) - dayStart) / (dayEnd - dayStart) * 100));
+                  const cameraTime = Math.abs(Date.parse(event.occurredAt) - Date.parse(event.receivedAt)) > 2_000
+                    ? ` · hora da câmera ${formatDate(event.occurredAt)}` : "";
+                  const label = `${event.state === "started" ? "Início" : "Fim"} do movimento às ${formatDate(event.receivedAt)}${cameraTime} · ${event.hasVideo ? "vídeo vinculado" : "sem vídeo vinculado"}`;
+                  return (
+                    <button key={event.id} type="button" className={`recording-timeline-event${event.state === "ended" ? " is-ended" : ""}${event.hasVideo ? "" : " is-unavailable"}`} style={{ left: `${left}%` }} aria-label={label} title={label} onClick={() => void openMotionEvent(event)}>
+                      <ActivityIcon size={14} />
+                    </button>
+                  );
+                })}
               </div>
               <p className="recording-timeline-legend">
                 <span><i className="recording-timeline-legend-available" /> Vídeo disponível</span>
                 <span><i className="recording-timeline-legend-missing" /> Arquivo indisponível</span>
                 <span><i className="recording-timeline-legend-gap" /> Lacuna sem vídeo</span>
+                <span><ActivityIcon size={13} /> Movimento ONVIF</span>
               </p>
+              <div className="motion-event-list" aria-label="Ocorrências de movimento">
+                <p>{visibleTimelineEvents.length} {visibleTimelineEvents.length === 1 ? "ocorrência" : "ocorrências"} no filtro{timelineEvents.length >= 1_000 ? " · exibindo as 1.000 mais recentes" : ""}</p>
+                {visibleTimelineEvents.map((event) => (
+                  <button key={event.id} type="button" className="motion-event-row" onClick={() => void openMotionEvent(event)}>
+                    <ActivityIcon size={16} />
+                    <span>{event.state === "started" ? "Início" : "Fim"} · {formatDate(event.receivedAt)}</span>
+                    <span className={event.hasVideo ? "motion-event-available" : "motion-event-unavailable"}>{event.hasVideo ? "Vídeo vinculado" : "Sem vídeo"}</span>
+                  </button>
+                ))}
+              </div>
             </>
           ) : (
             <p className="recording-timeline-empty">Não há gravações para formar a linha do tempo.</p>

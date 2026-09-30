@@ -13,6 +13,7 @@ import {
 import { useAppStore } from "../store/appStore.js";
 import { LiveVideo } from "./LiveVideo.js";
 import { buildCameraSlots } from "../camera-layout.js";
+import type { DashboardLayout } from "../../shared/dashboard-layout.js";
 
 export type GridLayout = 2 | 3 | 4;
 
@@ -22,34 +23,7 @@ const LAYOUT_OPTIONS: Array<{ value: GridLayout; label: string }> = [
   { value: 4, label: "4×4" },
 ];
 
-const CAMERA_LAYOUT_STORAGE_KEY = "simple-dvr-wifi:live-camera-layout";
-
 type CameraLayoutSlots = Record<GridLayout, Array<string | null>>;
-
-function loadCameraLayout(): CameraLayoutSlots {
-  const emptyLayout: CameraLayoutSlots = { 2: [], 3: [], 4: [] };
-
-  try {
-    const stored = window.localStorage.getItem(CAMERA_LAYOUT_STORAGE_KEY);
-    const value: unknown = stored ? JSON.parse(stored) : [];
-    if (Array.isArray(value)) {
-      const legacyOrder = value.filter(
-        (cameraId): cameraId is string => typeof cameraId === "string",
-      );
-      return { 2: legacyOrder, 3: legacyOrder, 4: legacyOrder };
-    }
-    if (!value || typeof value !== "object") return emptyLayout;
-
-    const savedLayout = value as Partial<CameraLayoutSlots>;
-    return {
-      2: Array.isArray(savedLayout[2]) ? savedLayout[2] : [],
-      3: Array.isArray(savedLayout[3]) ? savedLayout[3] : [],
-      4: Array.isArray(savedLayout[4]) ? savedLayout[4] : [],
-    };
-  } catch {
-    return emptyLayout;
-  }
-}
 
 interface LayoutSwitcherProps {
   layout: GridLayout;
@@ -479,6 +453,8 @@ interface MonitoringGridProps {
   onPtzSelect: (camera: CameraSummary) => void;
   onEdit: (camera: CameraSummary) => void;
   selectedPtzCameraId: string | null;
+  savedLayout: DashboardLayout | null;
+  onSlotsChanged: (slots: Array<string | null>) => void;
 }
 
 export function MonitoringGrid({
@@ -488,18 +464,19 @@ export function MonitoringGrid({
   onPtzSelect,
   onEdit,
   selectedPtzCameraId,
+  savedLayout,
+  onSlotsChanged,
 }: MonitoringGridProps): React.JSX.Element {
   const fullscreen = useAppStore((state) => state.fullscreenCamera);
-  const [cameraLayout, setCameraLayout] =
-    useState<CameraLayoutSlots>(loadCameraLayout);
+  const [cameraLayout, setCameraLayout] = useState<CameraLayoutSlots>({ 2: [], 3: [], 4: [] });
   const [reorderMode, setReorderMode] = useState(false);
   const [draggingCameraId, setDraggingCameraId] = useState<string | null>(null);
   const [dragTargetPosition, setDragTargetPosition] = useState<number | null>(
     null,
   );
   const gridSlots = useMemo(
-    () => buildCameraSlots(cameras, cameraLayout[layout], layout),
-    [cameraLayout, cameras, layout],
+    () => buildCameraSlots(cameras, savedLayout?.slots ?? cameraLayout[layout], layout),
+    [cameraLayout, cameras, layout, savedLayout],
   );
   const activeCameraCount = cameras.filter((camera) => camera.active).length;
 
@@ -519,14 +496,8 @@ export function MonitoringGrid({
     const targetCameraId = nextSlots[targetPosition] ?? null;
     nextSlots[sourcePosition] = targetCameraId;
     nextSlots[targetPosition] = cameraId;
-    setCameraLayout((currentLayout) => {
-      const nextLayout = { ...currentLayout, [layout]: nextSlots };
-      window.localStorage.setItem(
-        CAMERA_LAYOUT_STORAGE_KEY,
-        JSON.stringify(nextLayout),
-      );
-      return nextLayout;
-    });
+    if (savedLayout) onSlotsChanged(nextSlots);
+    else setCameraLayout((currentLayout) => ({ ...currentLayout, [layout]: nextSlots }));
     setDraggingCameraId(null);
     setDragTargetPosition(null);
   };

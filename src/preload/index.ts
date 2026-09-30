@@ -2,16 +2,20 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import type {
   CameraEditDetails,
+  CameraMetrics,
   CameraSummary,
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
+import type { DashboardGroup, DashboardLayout } from "../shared/dashboard-layout.js";
 import type { SdCardCamera, SdCardRecording } from '../shared/sd-card.js';
 import type {
   CameraRecord,
   MediaKind,
   MediaMetadata,
   MediaMetadataInput,
+  MotionEventFilter,
+  MotionEventRecord,
   RecordingRecord,
   RecordingSegmentRecord,
   SnapshotRecord,
@@ -161,6 +165,8 @@ const api = {
       ipcRenderer.invoke("cameras:list"),
     details: (id: string): Promise<Result<CameraEditDetails>> =>
       ipcRenderer.invoke("cameras:details", { id }),
+    metrics: (id: string): Promise<Result<CameraMetrics>> =>
+      ipcRenderer.invoke("cameras:metrics", { id }),
     onChanged: (listener: EventListener<"cameras:changed">): Unsubscribe =>
       subscribe("cameras:changed", listener),
     create: (input: CameraCreateInput): Promise<Result<CameraCreateResult>> =>
@@ -285,6 +291,10 @@ const api = {
       filters: LibraryFilter = {},
     ): Promise<Result<RecordingLibraryItem[]>> =>
       ipcRenderer.invoke("library:recordings", filters),
+    recordingById: (id: string): Promise<Result<RecordingLibraryItem | null>> =>
+      ipcRenderer.invoke("library:recordingById", { id }),
+    motionEvents: (filters: MotionEventFilter): Promise<Result<MotionEventRecord[]>> =>
+      ipcRenderer.invoke("library:motionEvents", filters),
     recordingSegments: (id: string): Promise<Result<RecordingSegmentRecord[]>> =>
       ipcRenderer.invoke("library:recordingSegments", { id }),
     metadata: (input: {
@@ -345,6 +355,9 @@ const api = {
     list: () => ipcRenderer.invoke("alerts:list"),
     dismiss: (id: string) => ipcRenderer.invoke("alerts:dismiss", { id }),
   },
+  diagnostics: {
+    export: () => ipcRenderer.invoke("diagnostics:export"),
+  },
   retention: {
     status: () => ipcRenderer.invoke("retention:status"),
   },
@@ -352,6 +365,12 @@ const api = {
     list: (cameraId: string) => ipcRenderer.invoke("schedules:list", { cameraId }),
     replace: (input: { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> }) => ipcRenderer.invoke("schedules:replace", input),
     status: (cameraId: string) => ipcRenderer.invoke("schedules:status", { cameraId }),
+  },
+  dashboard: {
+    saveGroup: (group: DashboardGroup) => ipcRenderer.invoke("dashboard:saveGroup", group),
+    deleteGroup: (id: string) => ipcRenderer.invoke("dashboard:deleteGroup", { id }),
+    saveLayout: (layout: DashboardLayout) => ipcRenderer.invoke("dashboard:saveLayout", layout),
+    deleteLayout: (id: string) => ipcRenderer.invoke("dashboard:deleteLayout", { id }),
   },
 };
 
