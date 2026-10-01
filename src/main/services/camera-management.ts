@@ -22,6 +22,8 @@ export interface CameraCreateInput {
   snapshotUri?: string | null;
   username?: string | null;
   password?: string | null;
+  sdCardUsername?: string | null;
+  sdCardPassword?: string | null;
   allowDuplicate?: boolean;
 }
 
@@ -33,6 +35,8 @@ export interface CameraUpdateInput {
   onvifUrl?: string | null;
   username?: string | null;
   password?: string | null;
+  sdCardUsername?: string | null;
+  sdCardPassword?: string | null;
 }
 
 export class CameraManagementService {
@@ -98,6 +102,11 @@ export class CameraManagementService {
       parsedOnvif?.password ||
       parsedSnapshot?.password ||
       null;
+    const sdCardPassword = input.sdCardPassword || null;
+    const sdCardUsername = input.sdCardUsername?.trim() || credentialUsername;
+    if (sdCardPassword && !sdCardUsername) {
+      throw new Error("Informe o usuÃ¡rio da credencial do cartÃ£o SD.");
+    }
 
     const duplicates = await this.checkDuplicates({
       host: input.host,
@@ -138,25 +147,34 @@ export class CameraManagementService {
     }
     let camera = response.value as CameraRecord;
 
-    if (credentialUsername && credentialPassword) {
+    if ((credentialUsername && credentialPassword) || (sdCardUsername && sdCardPassword)) {
       try {
-        await this.credentials.setCredential(camera.id, {
-          service: "onvif",
-          username: credentialUsername,
-          password: credentialPassword,
-        });
-        if (rtspUrl) {
+        if (credentialUsername && credentialPassword) {
           await this.credentials.setCredential(camera.id, {
-            service: "rtsp",
+            service: "onvif",
             username: credentialUsername,
             password: credentialPassword,
           });
+          if (rtspUrl) {
+            await this.credentials.setCredential(camera.id, {
+              service: "rtsp",
+              username: credentialUsername,
+              password: credentialPassword,
+            });
+          }
+          if (parsedSnapshot) {
+            await this.credentials.setCredential(camera.id, {
+              service: "snapshot",
+              username: credentialUsername,
+              password: credentialPassword,
+            });
+          }
         }
-        if (parsedSnapshot) {
+        if (sdCardUsername && sdCardPassword) {
           await this.credentials.setCredential(camera.id, {
-            service: "snapshot",
-            username: credentialUsername,
-            password: credentialPassword,
+            service: "sd_card",
+            username: sdCardUsername,
+            password: sdCardPassword,
           });
         }
       } catch (error) {
@@ -184,6 +202,8 @@ export class CameraManagementService {
       username?: string | null;
       password?: string | null;
       rtspPassword?: string | null;
+      sdCardUsername?: string | null;
+      sdCardPassword?: string | null;
     },
   ): Promise<void> {
     const username = input.username?.trim() || null;
@@ -201,6 +221,18 @@ export class CameraManagementService {
         service: "rtsp",
         username: username ?? current?.username,
         password: input.rtspPassword,
+      });
+    }
+    if (input.sdCardPassword) {
+      const current = await this.currentCredential(cameraId, "sd_card", "onvif");
+      const sdCardUsername = input.sdCardUsername?.trim() || current?.username;
+      if (!sdCardUsername) {
+        throw new Error("Informe o usuÃ¡rio da credencial do cartÃ£o SD.");
+      }
+      await this.credentials.setCredential(cameraId, {
+        service: "sd_card",
+        username: sdCardUsername,
+        password: input.sdCardPassword,
       });
     }
   }
@@ -275,6 +307,8 @@ export class CameraManagementService {
         username: input.username ?? null,
         password: input.password,
         rtspPassword: input.password,
+        sdCardUsername: input.sdCardUsername,
+        sdCardPassword: input.sdCardPassword,
       });
     } else if (input.username?.trim()) {
       const current =
@@ -287,6 +321,12 @@ export class CameraManagementService {
           rtspPassword: current.password,
         });
       }
+    }
+    if (input.sdCardPassword && !input.password) {
+      await this.updateCredentials(cameraId, {
+        sdCardUsername: input.sdCardUsername,
+        sdCardPassword: input.sdCardPassword,
+      });
     }
     return (await this.requestCamera("camera.get", { id: cameraId })) ?? null;
   }

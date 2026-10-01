@@ -322,7 +322,7 @@ export class SqliteWorker {
         case "camera.setEndpoint": {
           const p = request.payload as {
             cameraId: string;
-            service: "onvif" | "rtsp" | "rtsp_sub" | "snapshot" | "ptz";
+            service: "onvif" | "rtsp" | "rtsp_sub" | "snapshot" | "ptz" | "onvif_recording" | "onvif_search" | "onvif_replay";
             url: string;
           };
           r.cameras.setEndpoint(p.cameraId, { service: p.service, url: p.url });

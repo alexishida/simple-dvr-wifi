@@ -56,6 +56,15 @@ export function createFetchOnvifTransport(): OnvifTransport {
 
 const DEFAULT_OPTIONS = { timeoutMs: 5_000, maxXmlBytes: 512 * 1024 };
 const ONVIF_PTZ_SPACE_BASE = "http://www.onvif.org/ver10/tptz";
+const ONVIF_RECORDING_NAMESPACE = "http://www.onvif.org/ver10/recording/wsdl";
+const ONVIF_SEARCH_NAMESPACE = "http://www.onvif.org/ver10/search/wsdl";
+const ONVIF_REPLAY_NAMESPACE = "http://www.onvif.org/ver10/replay/wsdl";
+
+export interface OnvifRecordingServiceUrls {
+  recording: string | null;
+  search: string | null;
+  replay: string | null;
+}
 
 function escapeXml(value: string): string {
   return value
@@ -140,14 +149,14 @@ function soapEnvelope(
     </s:Header>`;
   }
   return `<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:trc="${ONVIF_RECORDING_NAMESPACE}" xmlns:tse="${ONVIF_SEARCH_NAMESPACE}" xmlns:trp="${ONVIF_REPLAY_NAMESPACE}" xmlns:tt="http://www.onvif.org/ver10/schema">
 ${security}
   <s:Body>${body}</s:Body>
 </s:Envelope>`;
 }
 
 function soapAction(body: string): string | null {
-  const operation = /<(tds|trt|tr2|tptz|tev):([A-Za-z][A-Za-z0-9]*)/.exec(body);
+  const operation = /<(tds|trt|tr2|tptz|tev|trc|tse|trp):([A-Za-z][A-Za-z0-9]*)/.exec(body);
   if (!operation) return null;
   const namespace =
     operation[1] === "tds"
@@ -158,11 +167,17 @@ function soapAction(body: string): string | null {
         ? "http://www.onvif.org/ver20/ptz/wsdl"
         : operation[1] === "tev"
           ? "http://www.onvif.org/ver10/events/wsdl"
-        : "http://www.onvif.org/ver10/media/wsdl";
+          : operation[1] === "trc"
+            ? ONVIF_RECORDING_NAMESPACE
+            : operation[1] === "tse"
+              ? ONVIF_SEARCH_NAMESPACE
+              : operation[1] === "trp"
+                ? ONVIF_REPLAY_NAMESPACE
+                : "http://www.onvif.org/ver10/media/wsdl";
   return `${namespace}/${operation[2]}`;
 }
 
-function cameraEventUrl(deviceUrl: string, advertisedUrl: string): string {
+function cameraServiceUrl(deviceUrl: string, advertisedUrl: string): string {
   const device = new URL(deviceUrl);
   const advertised = new URL(advertisedUrl, device);
   if (!['http:', 'https:'].includes(advertised.protocol)
@@ -225,6 +240,7 @@ export class OnvifAdapter implements CameraAdapter {
   private readonly options: OnvifClientOptions;
   private ptzServiceUrl: string | null = null;
   private eventsServiceUrl: string | null = null;
+  private recordingServiceUrls: OnvifRecordingServiceUrls | null | undefined;
   private primaryProfileToken: string | null = null;
   private useExplicitPtzSpaces = false;
   private useRelativeMoveForTapoPan = false;
@@ -251,6 +267,7 @@ export class OnvifAdapter implements CameraAdapter {
         h264: "unknown",
         h265: "unknown",
         mjpeg: "unknown",
+        recording: "unknown",
       },
       profiles: [],
       mediaServiceUrl: null,
@@ -258,12 +275,29 @@ export class OnvifAdapter implements CameraAdapter {
       ptzSupported: false,
       rtspMainUrl: null,
       rtspSubUrl: null,
+      recordingServiceUrl: null,
+      searchServiceUrl: null,
+      replayServiceUrl: null,
     };
 
     const identity = await this.fetchIdentity();
     if (identity) info.identity = identity;
     this.useExplicitPtzSpaces = isTapoDevice(info.identity);
     this.useRelativeMoveForTapoPan = this.useExplicitPtzSpaces;
+
+    const recordingServices = await this.getRecordingServiceUrls();
+    info.recordingServiceUrl = recordingServices?.recording ?? null;
+    info.searchServiceUrl = recordingServices?.search ?? null;
+    info.replayServiceUrl = recordingServices?.replay ?? null;
+    info.capabilities.recording = stateFromBoolean(
+      recordingServices
+        ? Boolean(
+            recordingServices.recording &&
+              recordingServices.search &&
+              recordingServices.replay,
+          )
+        : null,
+    );
 
     const mediaUrl = await this.fetchMediaUrl();
     info.mediaServiceUrl = mediaUrl;
@@ -490,31 +524,60 @@ export class OnvifAdapter implements CameraAdapter {
       const events = capability.children.find((child) => child.name === 'Events');
       const address = events?.attributes.XAddr ?? (events ? queryText(events, 'XAddr') : null);
       if (address) {
-        this.eventsServiceUrl = cameraEventUrl(this.options.deviceServiceUrl, address);
+        this.eventsServiceUrl = cameraServiceUrl(this.options.deviceServiceUrl, address);
         return this.eventsServiceUrl;
       }
     }
     return null;
   }
 
+  async getRecordingServiceUrls(): Promise<OnvifRecordingServiceUrls | null> {
+    if (this.recordingServiceUrls !== undefined) return this.recordingServiceUrls;
+    try {
+      const body = await this.call(
+        "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>",
+      );
+      const node = this.parseXml(body);
+      const result: OnvifRecordingServiceUrls = {
+        recording: null,
+        search: null,
+        replay: null,
+      };
+      for (const service of queryAll(node, "Body/GetServicesResponse/Service")) {
+        const namespace = queryText(service, "Namespace");
+        const address = queryText(service, "XAddr");
+        if (!namespace || !address) continue;
+        const safeAddress = cameraServiceUrl(this.options.deviceServiceUrl, address);
+        if (namespace === ONVIF_RECORDING_NAMESPACE) result.recording = safeAddress;
+        if (namespace === ONVIF_SEARCH_NAMESPACE) result.search = safeAddress;
+        if (namespace === ONVIF_REPLAY_NAMESPACE) result.replay = safeAddress;
+      }
+      this.recordingServiceUrls = result;
+      return result;
+    } catch {
+      this.recordingServiceUrls = null;
+      return null;
+    }
+  }
+
   async createPullPointSubscription(): Promise<{ reference: string; renewAfterMs: number }> {
     const body = await this.call('<tev:CreatePullPointSubscription><tev:InitialTerminationTime>PT10M</tev:InitialTerminationTime></tev:CreatePullPointSubscription>', this.eventsServiceUrl ?? this.options.deviceServiceUrl);
     const reference = queryText(this.parseXml(body), 'Body/CreatePullPointSubscriptionResponse/SubscriptionReference/Address');
     if (!reference) throw new Error('A câmera não retornou referência PullPoint.');
-    return { reference: cameraEventUrl(this.options.deviceServiceUrl, reference), renewAfterMs: 8 * 60_000 };
+    return { reference: cameraServiceUrl(this.options.deviceServiceUrl, reference), renewAfterMs: 8 * 60_000 };
   }
 
   async renewPullPointSubscription(reference: string): Promise<{ renewAfterMs: number }> {
-    await this.call('<tev:Renew><tev:TerminationTime>PT10M</tev:TerminationTime></tev:Renew>', cameraEventUrl(this.options.deviceServiceUrl, reference));
+    await this.call('<tev:Renew><tev:TerminationTime>PT10M</tev:TerminationTime></tev:Renew>', cameraServiceUrl(this.options.deviceServiceUrl, reference));
     return { renewAfterMs: 8 * 60_000 };
   }
 
   async unsubscribePullPointSubscription(reference: string): Promise<void> {
-    await this.call('<tev:Unsubscribe/>', cameraEventUrl(this.options.deviceServiceUrl, reference));
+    await this.call('<tev:Unsubscribe/>', cameraServiceUrl(this.options.deviceServiceUrl, reference));
   }
 
   async pullPointMessages(reference: string): Promise<string[]> {
-    const body = await this.call('<tev:PullMessages><tev:Timeout>PT5S</tev:Timeout><tev:MessageLimit>20</tev:MessageLimit></tev:PullMessages>', cameraEventUrl(this.options.deviceServiceUrl, reference));
+    const body = await this.call('<tev:PullMessages><tev:Timeout>PT5S</tev:Timeout><tev:MessageLimit>20</tev:MessageLimit></tev:PullMessages>', cameraServiceUrl(this.options.deviceServiceUrl, reference));
     return [body];
   }
 

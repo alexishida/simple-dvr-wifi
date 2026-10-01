@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { CameraIcon, WifiIcon } from '../icons.js'
+import { CameraIcon, VolumeIcon, VolumeMutedIcon, WifiIcon } from '../icons.js'
+import { audioCodecFromSdp } from '../media-codecs.js'
 
 interface LiveVideoProps {
   cameraId: string
@@ -9,7 +10,19 @@ interface LiveVideoProps {
 }
 
 type PlayerState = 'connecting' | 'playing' | 'error'
+type AudioState = 'checking' | 'available' | 'unavailable'
 const pendingReleases = new Map<string, Promise<unknown>>()
+let audiblePlayer: { key: string; mute: () => void } | null = null
+const AUDIO_VOLUME_KEY_PREFIX = 'simple-dvr-wifi:audio-volume:'
+
+function savedVolume(cameraId: string): number {
+  try {
+    const value = Number(window.localStorage.getItem(`${AUDIO_VOLUME_KEY_PREFIX}${cameraId}`))
+    return Number.isInteger(value) && value >= 0 && value <= 100 ? value : 80
+  } catch {
+    return 80
+  }
+}
 
 function sessionKey(cameraId: string, profile: 'main' | 'sub'): string {
   return `${cameraId}:${profile}`
@@ -59,6 +72,19 @@ export const LiveVideo = memo(function LiveVideo({
   const [message, setMessage] = useState('Conectando ao stream…')
   const [retryAttempt, setRetryAttempt] = useState(0)
   const [visible, setVisible] = useState(true)
+  const [hasAudio, setHasAudio] = useState(false)
+  const [audioState, setAudioState] = useState<AudioState>('checking')
+  const [audioCodec, setAudioCodec] = useState<string | null>(null)
+  const [audioEnabled, setAudioEnabled] = useState(false)
+  const [volume, setVolume] = useState(() => savedVolume(cameraId))
+
+  useEffect(() => {
+    setVolume(savedVolume(cameraId))
+  }, [cameraId])
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.volume = volume / 100
+  }, [videoRef, volume])
 
   useEffect(() => {
     const target = containerRef.current
@@ -77,8 +103,13 @@ export const LiveVideo = memo(function LiveVideo({
     let sessionUrl: string | null = null
     let bearerToken: string | null = null
     let mediaRequested = false
+    let audioReceived = false
+    let audioProbeTimer: number | null = null
     const abortController = new AbortController()
     const video = videoRef.current
+    setHasAudio(false)
+    setAudioState('checking')
+    setAudioCodec(null)
 
     const connect = async (): Promise<void> => {
       if (!visible) return
@@ -109,8 +140,14 @@ export const LiveVideo = memo(function LiveVideo({
       bearerToken = endpoint.value.token
       peer = new RTCPeerConnection({ iceServers: [] })
       peer.addTransceiver('video', { direction: 'recvonly' })
+      peer.addTransceiver('audio', { direction: 'recvonly' })
       peer.addEventListener('track', (event) => {
         if (cancelled || !videoRef.current) return
+        if (event.track.kind === 'audio') {
+          audioReceived = true
+          setHasAudio(true)
+          setAudioState('available')
+        }
         videoRef.current.srcObject =
           event.streams[0] ?? new MediaStream([event.track])
         void videoRef.current.play().catch(() => undefined)
@@ -119,6 +156,9 @@ export const LiveVideo = memo(function LiveVideo({
         if (cancelled || !peer) return
         if (peer.connectionState === 'connected') {
           setState('playing')
+          audioProbeTimer = window.setTimeout(() => {
+            if (!audioReceived) setAudioState('unavailable')
+          }, 3_000)
         } else if (
           peer.connectionState === 'failed' ||
           peer.connectionState === 'disconnected'
@@ -155,6 +195,7 @@ export const LiveVideo = memo(function LiveVideo({
         sessionUrl = new URL(location, endpoint.value.url).toString()
       const answer = await response.text()
       if (cancelled) return
+      setAudioCodec(audioCodecFromSdp(answer))
       await peer.setRemoteDescription({ type: 'answer', sdp: answer })
     }
 
@@ -170,7 +211,9 @@ export const LiveVideo = memo(function LiveVideo({
     return () => {
       cancelled = true
       abortController.abort()
+      if (audioProbeTimer !== null) window.clearTimeout(audioProbeTimer)
       peer?.close()
+      if (audiblePlayer?.key === sessionKey(cameraId, profile)) audiblePlayer = null
       if (video) video.srcObject = null
       const release = connectionTask
         .catch(() => undefined)
@@ -194,6 +237,41 @@ export const LiveVideo = memo(function LiveVideo({
     }
   }, [cameraId, profile, retryAttempt, videoRef, visible])
 
+  const toggleAudio = (event: React.MouseEvent<HTMLButtonElement>): void => {
+    event.stopPropagation()
+    const video = videoRef.current
+    if (!video || !hasAudio) return
+    const key = sessionKey(cameraId, profile)
+    if (audioEnabled) {
+      video.muted = true
+      if (audiblePlayer?.key === key) audiblePlayer = null
+      setAudioEnabled(false)
+      return
+    }
+    audiblePlayer?.mute()
+    video.muted = false
+    audiblePlayer = {
+      key,
+      mute: () => {
+        video.muted = true
+        setAudioEnabled(false)
+      },
+    }
+    setAudioEnabled(true)
+    void video.play().catch(() => undefined)
+  }
+
+  const changeVolume = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    event.stopPropagation()
+    const next = Number(event.target.value)
+    setVolume(next)
+    try {
+      window.localStorage.setItem(`${AUDIO_VOLUME_KEY_PREFIX}${cameraId}`, String(next))
+    } catch {
+      // A private browser profile can deny storage; the current session still works.
+    }
+  }
+
   return (
     <div ref={containerRef} className="live-video">
       <video
@@ -201,9 +279,17 @@ export const LiveVideo = memo(function LiveVideo({
         className="live-video-element"
         aria-label={`Vídeo ao vivo de ${cameraName}`}
         autoPlay
-        muted
+        muted={!audioEnabled}
         playsInline
       />
+      <div className="live-audio-controls" aria-label="Áudio da câmera" onClick={(event) => event.stopPropagation()}>
+        <button type="button" className="btn-icon" aria-label={audioEnabled ? `Silenciar áudio de ${cameraName}` : `Ativar áudio de ${cameraName}`} title={hasAudio ? (audioEnabled ? 'Silenciar áudio' : 'Ativar áudio') : 'Esta câmera não enviou áudio'} disabled={!hasAudio} onClick={toggleAudio}>
+          {audioEnabled ? <VolumeIcon size={16} /> : <VolumeMutedIcon size={16} />}
+        </button>
+        <input aria-label={`Volume de ${cameraName}`} type="range" min="0" max="100" value={volume} disabled={!hasAudio || !audioEnabled} onChange={changeVolume} />
+        {audioState === 'available' && audioCodec && <span className="live-audio-codec">Áudio: {audioCodec}</span>}
+        {audioState === 'unavailable' && <span className="live-audio-unavailable" role="status">Sem áudio compatível</span>}
+      </div>
       {state !== 'playing' && (
         <div
           className={`camera-video-placeholder live-video-status live-video-${state}`}

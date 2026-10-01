@@ -105,6 +105,18 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_motion_events_recording ON motion_events (recording_id, state);
     `),
   },
+  {
+    version: 7,
+    name: 'onvif-recording-capability',
+    destructive: false,
+    up: (db) => db.exec('ALTER TABLE camera_capabilities ADD COLUMN recording INTEGER NOT NULL DEFAULT 0'),
+  },
+  {
+    version: 8,
+    name: 'camera-firmware-version',
+    destructive: false,
+    up: (db) => db.exec('ALTER TABLE cameras ADD COLUMN firmware_version TEXT'),
+  },
 ]
 
 export interface MigrationResult {

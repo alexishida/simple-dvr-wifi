@@ -4,6 +4,82 @@ import { PtzControlService } from "../src/main/services/ptz-control.ts";
 import { decideResourceState } from "../src/workers/media/resource-policy.ts";
 import { MotionSubscriptionRegistry } from "../src/main/services/motion-subscriptions.ts";
 import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotification, parseOnvifMotionNotifications } from "../src/main/services/motion-events.ts";
+import { buildProbeMessage, discoverOnvifDevices, parseProbeMatches } from "../src/main/services/onvif-discovery.ts";
+import { SdCardAdapterRegistry } from "../src/main/services/sd-card-adapter.ts";
+
+test("SD-card adapter registry selects only explicit camera support", () => {
+  const adapter = { id: "test", supports: (camera) => camera.host === "supported", detail: () => "Teste", list: async () => [], download: async () => ({ path: "", imported: false }) };
+  const registry = new SdCardAdapterRegistry([adapter]);
+  assert.equal(registry.forCamera({ host: "supported" }).id, "test");
+  assert.deepEqual(registry.describe({ host: "unsupported" }), { supported: false, detail: "Consulta do cartão SD indisponível para este modelo." });
+});
+
+test("WS-Discovery probe and responses keep only bounded HTTP(S) ONVIF endpoints", () => {
+  const probe = buildProbeMessage("urn:uuid:camera-test");
+  assert.match(probe, /NetworkVideoTransmitter/);
+  assert.match(probe, /urn:uuid:camera-test/);
+  const matches = parseProbeMatches(`<?xml version="1.0"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><d:ProbeMatches xmlns:d="http://docs.oasis-open.org/ws-dd/ns/discovery">
+      <d:ProbeMatch><a:EndpointReference xmlns:a="http://www.w3.org/2005/08/addressing"><a:Address>urn:uuid:front-door</a:Address></a:EndpointReference><d:Types>dn:NetworkVideoTransmitter</d:Types><d:Scopes>onvif://www.onvif.org/name/Front%20door onvif://www.onvif.org/Profile/Streaming</d:Scopes><d:XAddrs>http://192.168.1.30/onvif/device_service rtsp://192.168.1.30/ignored</d:XAddrs></d:ProbeMatch>
+      <d:ProbeMatch><a:EndpointReference xmlns:a="http://www.w3.org/2005/08/addressing"><a:Address>urn:uuid:front-door</a:Address></a:EndpointReference><d:XAddrs>http://192.168.1.30/onvif/device_service</d:XAddrs></d:ProbeMatch>
+      <d:ProbeMatch><d:XAddrs>ftp://192.168.1.31/not-onvif</d:XAddrs></d:ProbeMatch>
+    </d:ProbeMatches></s:Body></s:Envelope>`);
+  assert.deepEqual(matches, [{ endpointReference: "urn:uuid:front-door", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: ["onvif://www.onvif.org/name/Front%20door", "onvif://www.onvif.org/Profile/Streaming"], types: ["dn:NetworkVideoTransmitter"] }]);
+  assert.deepEqual(parseProbeMatches("<!DOCTYPE x><x />"), []);
+});
+
+test("WS-Discovery caps a datagram at one hundred valid devices", () => {
+  const matches = Array.from({ length: 101 }, (_, index) => `
+    <d:ProbeMatch><d:XAddrs>http://192.168.10.${index + 1}/onvif/device_service</d:XAddrs></d:ProbeMatch>`).join("");
+  const devices = parseProbeMatches(`<?xml version="1.0"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><d:ProbeMatches xmlns:d="http://docs.oasis-open.org/ws-dd/ns/discovery">${matches}</d:ProbeMatches></s:Body></s:Envelope>`);
+  assert.equal(devices.length, 100);
+  assert.equal(devices[0].host, "192.168.10.1");
+  assert.equal(devices.at(-1).host, "192.168.10.100");
+});
+
+test("WS-Discovery merges multiple interfaces, supports selection, and handles no interfaces", async () => {
+  const interfaces = [
+    { name: "Ethernet", address: "192.168.1.2" },
+    { name: "Wi-Fi", address: "10.0.0.2" },
+  ];
+  const scans = [];
+  const scanner = async (network) => {
+    scans.push(network.address);
+    return network.address === "192.168.1.2"
+      ? [{ endpointReference: "urn:uuid:front", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: [] }]
+      : [
+          { endpointReference: "urn:uuid:front", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: [] },
+          { endpointReference: "urn:uuid:garage", host: "10.0.0.10", onvifUrl: "http://10.0.0.10/onvif/device_service", scopes: [], types: [] },
+        ];
+  };
+  const devices = await discoverOnvifDevices({ interfaces, scanner });
+  assert.deepEqual(scans, ["192.168.1.2", "10.0.0.2"]);
+  assert.deepEqual(devices.map((device) => device.host), ["10.0.0.10", "192.168.1.30"]);
+  scans.length = 0;
+  const selected = await discoverOnvifDevices({ address: "10.0.0.2", interfaces, scanner });
+  assert.deepEqual(scans, ["10.0.0.2"]);
+  assert.equal(selected.length, 2);
+  assert.deepEqual(await discoverOnvifDevices({ interfaces: [], scanner }), []);
+});
+
+test("WS-Discovery stops an injected scan when cancelled", async () => {
+  const controller = new AbortController();
+  let scannerObservedAbort = false;
+  const pending = discoverOnvifDevices({
+    interfaces: [{ name: "Ethernet", address: "192.168.1.2" }],
+    signal: controller.signal,
+    scanner: (_network, _timeout, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        scannerObservedAbort = true;
+        reject(new Error("cancelled"));
+      }, { once: true });
+    }),
+  });
+  controller.abort();
+  await assert.rejects(pending, /cancelada/);
+  assert.equal(scannerObservedAbort, true);
+});
 
 function ptzFixture(t, failures = 1) {
   const timers = new Map();
@@ -989,10 +1065,12 @@ test("clip export serializes work, reports progress, and cleans temporary files"
   const destination = join(directory, "clip.mp4");
   let release;
   let runnerReady;
+  let exportArgs;
   const ready = new Promise((resolveReady) => { runnerReady = resolveReady; });
   const executor = {
     run: ({ args, onProgress }) =>
       new Promise((resolveRun) => {
+        exportArgs = args;
         runnerReady();
         release = async () => {
           onProgress(30_000);
@@ -1023,6 +1101,7 @@ test("clip export serializes work, reports progress, and cleans temporary files"
   assert.deepEqual(service.status("job-one"), { active: true, percent: 0 });
   await assert.rejects(service.export({ ...input, jobId: "job-two", destinationPath: join(directory, "second.mp4") }), /Já existe/);
   await ready;
+  assert.equal(exportArgs.includes("0:a:0?"), true, "Clip export must preserve an optional audio stream");
   await release();
   const result = await exporting;
   assert.equal(result.destinationPath, destination);
@@ -1076,12 +1155,14 @@ test("bundled FFmpeg exports a valid MP4 clip", async (t) => {
   const binary = join(process.cwd(), "resources", "ffmpeg", "win32", "ffmpeg.exe");
   const source = join(directory, "source.mp4");
   const destination = join(directory, "exported.mp4");
+  const extractedAudio = join(directory, "exported-audio.m4a");
   const runner = new FfmpegRunner(binary);
   const generated = await runner.run({
     binaryPath: binary,
     args: [
       "-hide_banner", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=10",
-      "-t", "1", "-c:v", "mpeg4", "-y", source,
+      "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+      "-t", "1", "-c:v", "mpeg4", "-c:a", "aac", "-shortest", "-y", source,
     ],
     allowedOutputDirs: [directory],
     timeoutMs: 10_000,
@@ -1108,6 +1189,15 @@ test("bundled FFmpeg exports a valid MP4 clip", async (t) => {
   assert.equal(result.gaps.length, 0);
   const header = await readFile(destination);
   assert.equal(header.subarray(4, 8).toString("ascii"), "ftyp");
+  const extracted = await runner.run({
+    binaryPath: binary,
+    args: ["-hide_banner", "-nostdin", "-i", destination, "-map", "0:a:0", "-c", "copy", "-y", extractedAudio],
+    allowedInputDirs: [directory],
+    allowedOutputDirs: [directory],
+    timeoutMs: 10_000,
+  });
+  assert.equal(extracted.exitCode, 0, "Exported clip must retain its audio stream");
+  assert.equal((await readFile(extractedAudio)).subarray(4, 8).toString("ascii"), "ftyp");
 });
 
 test("stopping a starting media session never spawns a late process", async (t) => {

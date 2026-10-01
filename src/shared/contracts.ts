@@ -103,6 +103,10 @@ export const CameraMetricsSchema = z.object({
     height: z.number().int().nullable(),
     fps: z.number().nullable(),
   })),
+  onvifRecordingSearch: z.boolean(),
+  manufacturer: z.string().nullable(),
+  model: z.string().nullable(),
+  firmwareVersion: z.string().nullable(),
   droppedFrames: z.number().int().nullable(),
 }).strict();
 export type CameraMetrics = z.infer<typeof CameraMetricsSchema>;

@@ -44,6 +44,8 @@ export interface CameraCreateInput {
   snapshotUri?: string | null;
   username?: string | null;
   password?: string | null;
+  sdCardUsername?: string | null;
+  sdCardPassword?: string | null;
   allowDuplicate?: boolean;
 }
 
@@ -62,11 +64,27 @@ export interface CameraTestResult {
   }>;
 }
 
+export interface DiscoveryInterface {
+  name: string;
+  address: string;
+}
+
+export interface DiscoveredOnvifDevice {
+  endpointReference: string | null;
+  host: string;
+  onvifUrl: string;
+  scopes: string[];
+  types: string[];
+}
+
 export interface CameraApi {
   list: () => Promise<Result<CameraSummary[]>>;
   onChanged: (listener: EventListener<"cameras:changed">) => Unsubscribe;
   details: (id: string) => Promise<Result<CameraEditDetails>>;
   metrics: (id: string) => Promise<Result<CameraMetrics>>;
+  discoveryInterfaces: () => Promise<Result<DiscoveryInterface[]>>;
+  discover: (input: { requestId: string; address?: string }) => Promise<Result<DiscoveredOnvifDevice[]>>;
+  cancelDiscovery: (requestId: string) => Promise<Result<{ cancelled: boolean }>>;
   create: (input: CameraCreateInput) => Promise<Result<CameraCreateResult>>;
   checkDuplicate: (input: {
     host?: string;
@@ -91,6 +109,8 @@ export interface CameraApi {
     onvifUrl?: string | null;
     username?: string | null;
     password?: string | null;
+    sdCardUsername?: string | null;
+    sdCardPassword?: string | null;
   }) => Promise<Result<{ updated: boolean }>>;
   deactivate: (id: string) => Promise<Result<boolean>>;
   reactivate: (id: string) => Promise<Result<boolean>>;
@@ -99,6 +119,8 @@ export interface CameraApi {
     username?: string | null;
     password?: string | null;
     rtspPassword?: string | null;
+    sdCardUsername?: string | null;
+    sdCardPassword?: string | null;
   }) => Promise<Result<boolean>>;
   remove: (id: string) => Promise<Result<{ removed: boolean }>>;
 }

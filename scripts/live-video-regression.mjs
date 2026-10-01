@@ -2,11 +2,17 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { LiveVideo } from "../src/renderer/components/LiveVideo.tsx";
+import { audioCodecFromSdp } from "../src/renderer/media-codecs.ts";
 
 export async function run() {
   const check = (condition, message) => {
     if (!condition) throw new Error(message);
   };
+  check(
+    audioCodecFromSdp("v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111 0\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\n") === "Opus",
+    "Audio codec parser did not select the negotiated codec",
+  );
+  check(audioCodecFromSdp("v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 H264/90000\r\n") === null, "Video-only SDP reported audio");
   const waitFor = async (predicate) => {
     const deadline = Date.now() + 3000;
     while (!predicate()) {
@@ -69,6 +75,14 @@ export async function run() {
       this.connectionState = "connected";
       this.dispatchEvent(new Event("connectionstatechange"));
     }
+    emitAudioTrack() {
+      const event = new Event("track");
+      Object.defineProperties(event, {
+        streams: { value: [new MediaStream()] },
+        track: { value: { kind: "audio" } },
+      });
+      this.dispatchEvent(event);
+    }
     close() {
       this.connectionState = "closed";
     }
@@ -88,9 +102,19 @@ export async function run() {
     render();
     await waitFor(() => peers[0]?.connectionState === "connected");
     check(
-      peers[0].transceivers.join() === "video",
-      "Muted player requested audio",
+      peers[0].transceivers.join() === "video,audio",
+      "Player did not request the optional audio track",
     );
+    check(container.querySelector("video").muted === true, "Player must start muted");
+    const audioButton = container.querySelector("button[title='Esta câmera não enviou áudio']");
+    check(audioButton?.disabled, "Audio control must remain disabled without a track");
+    peers[0].emitAudioTrack();
+    await waitFor(() => !audioButton.disabled);
+    audioButton.click();
+    await waitFor(() => container.querySelector("video").muted === false);
+    check(audioButton.title === "Silenciar áudio", "Audio control did not reflect its enabled state");
+    audioButton.click();
+    await waitFor(() => container.querySelector("video").muted === true);
     render();
     check(acquisitions.length === 1, "Unchanged render restarted the stream");
     setVisibility("hidden");

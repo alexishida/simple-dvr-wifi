@@ -18,7 +18,8 @@ conta em nuvem.
   do endereço, porta, canal e perfil escolhidos.
 - Configuração manual de URL RTSP e ONVIF, com teste de conexão antes de salvar.
 - Vídeo ao vivo em grades 2×2, 3×3 e 4×4, tela cheia e seleção de stream
-  principal ou secundário.
+  principal ou secundário, com áudio opcional quando a câmera e o navegador
+  oferecerem um codec compatível.
 - Organização persistida da grade, snapshots e gravação local segmentada.
 - Descoberta e uso de capacidades ONVIF, incluindo PTZ quando a câmera oferece
   o recurso.
@@ -85,8 +86,12 @@ modelo não listado, selecione **Outro modelo / URL manual**.
   gravações em andamento continuam.
 - Ao fechar a janela, o aplicativo permanece em execução na bandeja do sistema;
   use a opção **Sair** no ícone para encerrá-lo por completo.
-- O aplicativo reproduz somente vídeo. O áudio dos streams não é negociado nem
-  decodificado.
+- O áudio começa silenciado e pode ser ativado em uma câmera por vez. Na
+  reprodução sincronizada, selecione explicitamente a câmera que deseja ouvir.
+  A reprodução depende de a câmera e o navegador negociarem um codec compatível;
+  o controle mostra o codec negociado quando disponível. Se não houver faixa de
+  áudio compatível, o app indica a limitação e o vídeo continua funcionando
+  normalmente.
 - O fallback de snapshot por RTSP requer um `ffmpeg` acessível no `PATH`.
   FFmpeg ainda não é redistribuído com o aplicativo.
 
@@ -156,6 +161,8 @@ src/
   `ipcRenderer`.
 - As credenciais são cifradas com AES-256-GCM e a chave é protegida pelo
   `safeStorage` do sistema.
+- A credencial opcional do cartao SD e cifrada e mantida separadamente. Sem
+  ela, a consulta usa a credencial ONVIF da camera como fallback.
 - MediaMTX é executado por sessão local, limitado a loopback e validado por hash
   antes de iniciar.
 - FFmpeg é chamado sem shell, com argumentos e caminhos validados.
@@ -164,6 +171,7 @@ src/
 
 - [Changelog](CHANGELOG.md)
 - [Especificações e mudanças OpenSpec](openspec/)
+- [Avaliação de cartão SD por ONVIF Profile G](docs/onvif-sd-card-evaluation.md)
 - [Política de binários de mídia](resources/README.md)
 
 ## Licença

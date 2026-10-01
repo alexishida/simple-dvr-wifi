@@ -27,6 +27,8 @@ export function CameraForm({
     : manualRtspUrl;
   const [username, setUsername] = useState(initial?.username ?? "");
   const [password, setPassword] = useState("");
+  const [sdCardUsername, setSdCardUsername] = useState("");
+  const [sdCardPassword, setSdCardPassword] = useState("");
   const [message, setMessage] = useState<{
     kind: "error" | "info" | "success";
     text: string;
@@ -134,6 +136,8 @@ export function CameraForm({
           rtspUrl: parsedRtsp?.sanitizedUrl ?? null,
           username: username.trim() || parsedRtsp?.username || null,
           password: password || parsedRtsp?.password || null,
+          sdCardUsername: sdCardUsername.trim() || null,
+          sdCardPassword: sdCardPassword || null,
         });
         if (!result.ok) {
           setMessage({ kind: "error", text: result.error.message });
@@ -161,6 +165,8 @@ export function CameraForm({
         rtspUrl: parsedRtsp?.sanitizedUrl ?? null,
         username: username.trim() || parsedRtsp?.username || null,
         password: password || parsedRtsp?.password || null,
+        sdCardUsername: sdCardUsername.trim() || null,
+        sdCardPassword: sdCardPassword || null,
         allowDuplicate: duplicate,
       });
 
@@ -330,6 +336,37 @@ export function CameraForm({
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
+            </div>
+          </div>
+          <div className="field-row camera-form-credentials">
+            <div className="field">
+              <label className="field-label" htmlFor="cam-sd-user">
+                Usuario do cartao SD <span className="field-optional">Opcional</span>
+              </label>
+              <input
+                id="cam-sd-user"
+                className="field-input"
+                value={sdCardUsername}
+                onChange={(event) => setSdCardUsername(event.target.value)}
+                autoComplete="username"
+              />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="cam-sd-pass">
+                {editingId ? "Nova senha do cartao SD (opcional)" : "Senha do cartao SD (opcional)"}
+              </label>
+              <input
+                id="cam-sd-pass"
+                className="field-input"
+                type="password"
+                autoComplete="new-password"
+                value={sdCardPassword}
+                onChange={(event) => setSdCardPassword(event.target.value)}
+                aria-describedby="cam-sd-help"
+              />
+              <p id="cam-sd-help" className="field-hint">
+                Deixe em branco para usar a credencial ONVIF. Esta senha e guardada separadamente e nunca e exibida.
+              </p>
             </div>
           </div>
         </section>

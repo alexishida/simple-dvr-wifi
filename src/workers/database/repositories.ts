@@ -27,6 +27,7 @@ function mapCamera(row: Row): CameraRecord {
     port: (row.port as number) ?? null,
     manufacturer: (row.manufacturer as string) ?? null,
     model: (row.model as string) ?? null,
+    firmwareVersion: (row.firmware_version as string) ?? null,
     serialNumber: (row.serial_number as string) ?? null,
     epr: (row.epr as string) ?? null,
     status: row.status as CameraRecord['status'],
@@ -262,18 +263,19 @@ export class CameraRepository {
 
   setIdentity(
     id: string,
-    fields: Partial<{ manufacturer: string; model: string; serialNumber: string; epr: string }>,
+    fields: Partial<{ manufacturer: string; model: string; firmwareVersion: string; serialNumber: string; epr: string }>,
   ): void {
     const existing = this.db.prepare('SELECT * FROM cameras WHERE id = ?').get(id) as
       Row | undefined
     if (!existing) return
     this.db
       .prepare(
-        `UPDATE cameras SET manufacturer = ?, model = ?, serial_number = ?, epr = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE cameras SET manufacturer = ?, model = ?, firmware_version = ?, serial_number = ?, epr = ?, updated_at = ? WHERE id = ?`,
       )
       .run(
         fields.manufacturer ?? (existing.manufacturer as string) ?? null,
         fields.model ?? (existing.model as string) ?? null,
+        fields.firmwareVersion ?? (existing.firmware_version as string) ?? null,
         fields.serialNumber ?? (existing.serial_number as string) ?? null,
         fields.epr ?? (existing.epr as string) ?? null,
         nowIso(),
@@ -295,13 +297,14 @@ export class CapabilityRepository {
       h264: boolean
       h265: boolean
       mjpeg: boolean
+      recording: boolean
     }>,
   ): void {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO camera_capabilities
-         (camera_id, onvif, rtsp, snapshot, ptz, h264, h265, mjpeg, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (camera_id, onvif, rtsp, snapshot, ptz, h264, h265, mjpeg, recording, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         cameraId,
@@ -312,6 +315,7 @@ export class CapabilityRepository {
         caps.h264 ? 1 : 0,
         caps.h265 ? 1 : 0,
         caps.mjpeg ? 1 : 0,
+        caps.recording ? 1 : 0,
         nowIso(),
       )
   }
@@ -324,6 +328,7 @@ export class CapabilityRepository {
     h264: boolean
     h265: boolean
     mjpeg: boolean
+    recording: boolean
   } | null {
     const row = this.db
       .prepare('SELECT * FROM camera_capabilities WHERE camera_id = ?')
@@ -337,6 +342,7 @@ export class CapabilityRepository {
       h264: Boolean(row.h264),
       h265: Boolean(row.h265),
       mjpeg: Boolean(row.mjpeg),
+      recording: Boolean(row.recording),
     }
   }
 }

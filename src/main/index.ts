@@ -47,6 +47,7 @@ import { DatabaseSupervisor } from "./supervisors/database.js";
 import { createUtilityProcessTransport } from "./supervisors/database-utility-process.js";
 import { CredentialService } from "./services/credentials.js";
 import { MiboSdCardService } from "./services/mibo-sd-card.js";
+import { SdCardAdapterRegistry } from "./services/sd-card-adapter.js";
 import { SafeStorageMasterKeyStore } from "./security/vault.js";
 import { ConfigRepository } from "./services/config.js";
 import { BackupService, type BackupPreview } from "./services/backup.js";
@@ -68,6 +69,7 @@ import { RecordingScheduler, shouldScheduleRecording } from "./services/recordin
 import { MotionSubscriptionRegistry } from "./services/motion-subscriptions.js";
 import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotifications } from "./services/motion-events.js";
 import { MotionPrebufferService } from "./services/motion-prebuffer.js";
+import { discoverOnvifDevices, listDiscoveryInterfaces } from "./services/onvif-discovery.js";
 import { AppConfigSchema, type AppConfig } from "../shared/config.js";
 import { DashboardGroupSchema, DashboardLayoutSchema } from "../shared/dashboard-layout.js";
 import type { CameraEditDetails, CameraSummary } from "../shared/contracts.js";
@@ -93,7 +95,7 @@ const shutdownCoordinator = new ShutdownCoordinator();
 let shutdownStarted = false;
 let database: DatabaseSupervisor | null = null;
 let credentials: CredentialService | null = null;
-const sdCardService = new MiboSdCardService();
+const sdCardAdapters = new SdCardAdapterRegistry([new MiboSdCardService()]);
 let cameraManagement: CameraManagementService | null = null;
 let mediaSupervisor: MediaSessionSupervisor | null = null;
 let ptzRegistry: PtzControllerRegistry | null = null;
@@ -101,6 +103,7 @@ let config: AppConfig | null = null;
 let configRepository: ConfigRepository | null = null;
 let backupService: BackupService | null = null;
 const restoreCandidates = new Map<string, { source: string; preview: BackupPreview }>();
+const activeDiscoveries = new Map<string, AbortController>();
 const activeRecordings = new Map<
   string,
   { recordingId: string; startedAt: string; recordDir: string }
@@ -260,13 +263,13 @@ async function cameraRtspUrl(
 
 async function cameraCredential(
   cameraId: string,
-  service: "onvif" | "rtsp" | "snapshot" | "ptz",
+  service: "onvif" | "rtsp" | "snapshot" | "ptz" | "sd_card",
 ): Promise<{ username: string | null; password: string } | null> {
   if (!credentials) return null;
   const services = await credentials.listCredentialServices(cameraId);
   if (!services.includes(service)) {
     if (
-      (service === "snapshot" || service === "rtsp" || service === "ptz") &&
+      (service === "snapshot" || service === "rtsp" || service === "ptz" || service === "sd_card") &&
       services.includes("onvif")
     ) {
       return credentials.getCredentialDetails(cameraId, "onvif");
@@ -1086,6 +1089,8 @@ const CameraCreateRequestSchema = z.object({
   snapshotUri: z.string().max(2048).nullable().optional(),
   username: z.string().max(253).nullable().optional(),
   password: z.string().max(2048).nullable().optional(),
+  sdCardUsername: z.string().trim().max(253).nullable().optional(),
+  sdCardPassword: z.string().max(2048).nullable().optional(),
   allowDuplicate: z.boolean().optional(),
 });
 
@@ -1098,6 +1103,8 @@ const CameraUpdateCredentialsSchema = z.object({
   username: z.string().trim().max(256).nullable().optional(),
   password: z.string().max(2048).nullable().optional(),
   rtspPassword: z.string().max(2048).nullable().optional(),
+  sdCardUsername: z.string().trim().max(256).nullable().optional(),
+  sdCardPassword: z.string().max(2048).nullable().optional(),
 });
 
 const CameraUpdateRequestSchema = CameraCreateRequestSchema.pick({
@@ -1108,6 +1115,8 @@ const CameraUpdateRequestSchema = CameraCreateRequestSchema.pick({
   onvifUrl: true,
   username: true,
   password: true,
+  sdCardUsername: true,
+  sdCardPassword: true,
 }).extend({
   id: z.string().uuid(),
 });
@@ -1120,6 +1129,11 @@ const CameraConnectionTestSchema = z.object({
   username: z.string().max(253).nullable().optional(),
   password: z.string().max(2048).nullable().optional(),
 });
+const CameraDiscoveryScanSchema = z.object({
+  address: z.string().regex(/^\d{1,3}(?:\.\d{1,3}){3}$/).optional(),
+  requestId: z.string().uuid(),
+});
+const CameraDiscoveryCancelSchema = z.object({ requestId: z.string().uuid() });
 const LibraryRequestSchema = z
   .object({
     cameraId: z.string().uuid().optional(),
@@ -1151,15 +1165,50 @@ function registerIpcHandlers(): void {
     handle: async ({ id }) => {
       const camera = await getCameraRecord(id);
       if (!camera || !database) throw new Error("Câmera não encontrada.");
-      const profiles = await database.request("profile.list", { cameraId: id });
+      const [profiles, capabilities] = await Promise.all([
+        database.request("profile.list", { cameraId: id }),
+        database.request("camera.getCapabilities", { cameraId: id }),
+      ]);
       return {
         connection: camera.status,
         mainSession: mediaSupervisor?.status(mediaSessionId(id, "main"))?.state ?? null,
         subSession: mediaSupervisor?.status(mediaSessionId(id, "sub"))?.state ?? null,
         profiles: profiles.ok ? (profiles.value as Array<{ streamType: "main" | "sub"; name: string | null; codec: string | null; width: number | null; height: number | null; fps: number | null }>).map(({ streamType, name, codec, width, height, fps }) => ({ streamType, name, codec, width, height, fps })) : [],
+        onvifRecordingSearch: capabilities.ok && Boolean((capabilities.value as { recording?: boolean } | null)?.recording),
+        manufacturer: camera.manufacturer,
+        model: camera.model,
+        firmwareVersion: camera.firmwareVersion,
         // MediaMTX/WHEP does not expose a reliable per-camera dropped-frame counter.
         droppedFrames: null,
       };
+    },
+  });
+
+  registry.register("cameras:discoveryInterfaces", {
+    input: EmptyRequestSchema,
+    handle: listDiscoveryInterfaces,
+  });
+
+  registry.register("cameras:discover", {
+    input: CameraDiscoveryScanSchema,
+    handle: async ({ address, requestId }) => {
+      const controller = new AbortController();
+      activeDiscoveries.set(requestId, controller);
+      try {
+        return await discoverOnvifDevices({ address, signal: controller.signal });
+      } finally {
+        activeDiscoveries.delete(requestId);
+      }
+    },
+  });
+
+  registry.register("cameras:cancelDiscovery", {
+    input: CameraDiscoveryCancelSchema,
+    handle: ({ requestId }) => {
+      const controller = activeDiscoveries.get(requestId);
+      if (!controller) return { cancelled: false };
+      controller.abort();
+      return { cancelled: true };
     },
   });
 
@@ -1339,6 +1388,7 @@ function registerIpcHandlers(): void {
             cameraId: id,
             manufacturer: info.identity.manufacturer || undefined,
             model: info.identity.model || undefined,
+            firmwareVersion: info.identity.firmwareVersion || undefined,
             serialNumber: info.identity.serialNumber || undefined,
           });
           await database.request("camera.setCapabilities", {
@@ -1350,6 +1400,7 @@ function registerIpcHandlers(): void {
             h264: info.capabilities.h264 === "supported",
             h265: info.capabilities.h265 === "supported",
             mjpeg: info.capabilities.mjpeg === "supported",
+            recording: info.capabilities.recording === "supported",
           });
           if (info.profiles.length > 0) {
             await database.request("profile.replaceAll", {
@@ -1409,6 +1460,20 @@ function registerIpcHandlers(): void {
                 });
               }
             }
+          }
+          for (const [service, url] of [
+            ["onvif_recording", info.recordingServiceUrl],
+            ["onvif_search", info.searchServiceUrl],
+            ["onvif_replay", info.replayServiceUrl],
+          ] as const) {
+            if (!url) continue;
+            const parsedService = parseHttpUrl(url);
+            if (!parsedService) continue;
+            await database.request("camera.setEndpoint", {
+              cameraId: id,
+              service,
+              url: parsedService.sanitizedUrl,
+            });
           }
           segments.push({
             name: "onvif",
@@ -1515,12 +1580,14 @@ function registerIpcHandlers(): void {
 
   registry.register("cameras:updateCredentials", {
     input: CameraUpdateCredentialsSchema,
-    handle: async ({ id, username, password, rtspPassword }) => {
+    handle: async ({ id, username, password, rtspPassword, sdCardUsername, sdCardPassword }) => {
       if (!cameraManagement) return false;
       await cameraManagement.updateCredentials(id, {
         username: username ?? null,
         password: password ?? null,
         rtspPassword: rtspPassword ?? null,
+        sdCardUsername: sdCardUsername ?? null,
+        sdCardPassword: sdCardPassword ?? null,
       });
       await refreshMotionPrebuffer(id);
       await motionSubscriptions?.stop(id);
@@ -1922,12 +1989,11 @@ function registerIpcHandlers(): void {
       const response = await database.request('camera.listAll', undefined);
       if (!response.ok) throw new Error('Não foi possível listar as câmeras.');
       return (response.value as CameraRecord[]).filter((camera) => camera.active).map((camera) => {
-        const supported = /intelbras/i.test(camera.manufacturer ?? '') && /^im4-c$/i.test(camera.model ?? '');
+        const support = sdCardAdapters.describe(camera);
         return {
           id: camera.id,
           name: camera.name,
-          supported,
-          detail: supported ? 'Cartão SD via API local' : 'Consulta do cartão SD indisponível para este modelo.',
+          ...support,
         };
       });
     },
@@ -1938,12 +2004,14 @@ function registerIpcHandlers(): void {
     handle: async ({ cameraId, date }) => {
       if (!config) throw new Error('Configuração indisponível.');
       const camera = await getCameraRecord(cameraId);
-      if (!camera?.active || !/intelbras/i.test(camera.manufacturer ?? '') || !/^im4-c$/i.test(camera.model ?? '')) {
+      if (!camera?.active) {
         throw new Error('A consulta do cartão SD não é suportada nesta câmera.');
       }
-      const credential = await cameraCredential(cameraId, 'onvif');
+      const adapter = sdCardAdapters.forCamera(camera);
+      if (!adapter) throw new Error('A consulta do cartão SD não é suportada nesta câmera.');
+      const credential = await cameraCredential(cameraId, 'sd_card');
       if (!credential?.username) throw new Error('Cadastre a credencial da câmera antes de consultar o cartão SD.');
-      return sdCardService.list(cameraId, camera.host, { username: credential.username, password: credential.password }, date, config.recordingsDir || resolve(userDataPath, 'recordings'));
+      return adapter.list({ camera, credential: { username: credential.username, password: credential.password }, date, libraryRoot: config.recordingsDir || resolve(userDataPath, 'recordings') });
     },
   });
 
@@ -1952,12 +2020,14 @@ function registerIpcHandlers(): void {
     handle: async ({ cameraId, id }) => {
       if (!config || !database) throw new Error('Biblioteca indisponível.');
       const camera = await getCameraRecord(cameraId);
-      if (!camera?.active || !/intelbras/i.test(camera.manufacturer ?? '') || !/^im4-c$/i.test(camera.model ?? '')) {
+      if (!camera?.active) {
         throw new Error('O download do cartão SD não é suportado nesta câmera.');
       }
-      const credential = await cameraCredential(cameraId, 'onvif');
+      const adapter = sdCardAdapters.forCamera(camera);
+      if (!adapter) throw new Error('O download do cartão SD não é suportado nesta câmera.');
+      const credential = await cameraCredential(cameraId, 'sd_card');
       if (!credential?.username) throw new Error('Credencial da câmera indisponível.');
-      const result = await sdCardService.download(cameraId, camera.host, { username: credential.username, password: credential.password }, id, config.recordingsDir || resolve(userDataPath, 'recordings'), bundledFfmpegPath(), database);
+      const result = await adapter.download({ camera, credential: { username: credential.username, password: credential.password }, id, libraryRoot: config.recordingsDir || resolve(userDataPath, 'recordings'), ffmpegPath: bundledFfmpegPath(), database });
       libraryStorageCache = null;
       return result;
     },

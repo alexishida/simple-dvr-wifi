@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CameraSummary } from '../../shared/contracts.js'
 import type { RecordingSegmentRecord } from '../../shared/database.js'
-import { CloseIcon, RecIcon, VideoIcon } from '../icons.js'
+import { CloseIcon, RecIcon, VideoIcon, VolumeIcon } from '../icons.js'
 import {
   MAX_SYNCHRONIZED_CAMERAS,
   normalizeSynchronizedOffset,
@@ -28,6 +28,7 @@ export function SynchronizedPlayback({
   const [entries, setEntries] = useState<SyncEntry[]>([])
   const [offsets, setOffsets] = useState<Record<string, number>>({})
   const [playing, setPlaying] = useState(false)
+  const [audibleCameraId, setAudibleCameraId] = useState<string | null>(null)
   const videos = useRef(new Map<string, HTMLVideoElement>())
   const closeRef = useRef<HTMLButtonElement | null>(null)
 
@@ -49,6 +50,12 @@ export function SynchronizedPlayback({
     queueMicrotask(() => closeRef.current?.focus())
     return () => { active = false }
   }, [anchorAt, anchorMs, cameras])
+
+  useEffect(() => {
+    if (audibleCameraId && entries.some((entry) => entry.camera.id === audibleCameraId && entry.segments.length > 0)) return
+    // Keep synchronized playback silent until the user deliberately selects a source.
+    setAudibleCameraId(null)
+  }, [audibleCameraId, entries])
 
   useEffect(() => {
     const escape = (event: KeyboardEvent): void => {
@@ -91,13 +98,28 @@ export function SynchronizedPlayback({
           <button type="button" className="btn btn-icon recording-player-close" ref={closeRef} aria-label="Fechar reprodução sincronizada" title="Fechar" onClick={() => { pauseAll(); onClose() }}><CloseIcon size={18} /></button>
         </header>
         <p className="field-hint">Ajuste cada relógio quando necessário. Um painel sem vídeo indica uma lacuna real; a sincronização não preenche trechos ausentes.</p>
+        <label className="synchronized-audio-source" htmlFor="synchronized-audio-source">
+          <VolumeIcon size={16} />
+          Ouvir câmera
+          <select
+            id="synchronized-audio-source"
+            className="field-input"
+            value={audibleCameraId ?? ''}
+            onChange={(event) => setAudibleCameraId(event.target.value || null)}
+          >
+            <option value="">Nenhuma (silenciado)</option>
+            {entries.filter((entry) => entry.segments.length > 0).map((entry) => (
+              <option key={entry.camera.id} value={entry.camera.id}>{entry.camera.name}</option>
+            ))}
+          </select>
+        </label>
         <div className="synchronized-player-grid">
           {entries.length === 0 ? <p role="status">Carregando gravações…</p> : entries.map((entry) => {
             const segment = segmentAt(entry.segments, targetFor(entry))
             const source = entry.recordingId && segment ? `app://renderer/media/recordings/${encodeURIComponent(entry.recordingId)}/${segment.index}` : null
             return <article className="synchronized-player-tile" key={entry.camera.id}>
               <h4><VideoIcon size={16} /> {entry.camera.name}</h4>
-              {source ? <video ref={(video) => { if (video) videos.current.set(entry.camera.id, video); else videos.current.delete(entry.camera.id) }} src={source} muted={entry.camera.id !== entries[0]?.camera.id} playsInline onLoadedMetadata={(event) => { event.currentTarget.currentTime = segment?.offsetSeconds ?? 0; if (playing) void event.currentTarget.play().catch(() => undefined) }} onTimeUpdate={(event) => entry.camera.id === entries[0]?.camera.id && synchronizeFrom(event.currentTarget)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} controls={entry.camera.id === entries[0]?.camera.id} /> : <p className="synchronized-player-gap"><RecIcon size={20} /> {entry.message ?? 'Sem vídeo neste horário.'}</p>}
+              {source ? <video ref={(video) => { if (video) videos.current.set(entry.camera.id, video); else videos.current.delete(entry.camera.id) }} src={source} muted={entry.camera.id !== audibleCameraId} playsInline onLoadedMetadata={(event) => { event.currentTarget.currentTime = segment?.offsetSeconds ?? 0; if (playing) void event.currentTarget.play().catch(() => undefined) }} onTimeUpdate={(event) => entry.camera.id === entries[0]?.camera.id && synchronizeFrom(event.currentTarget)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} controls={entry.camera.id === entries[0]?.camera.id} /> : <p className="synchronized-player-gap"><RecIcon size={20} /> {entry.message ?? 'Sem vídeo neste horário.'}</p>}
               <label>Compensar relógio
                 <input type="range" min="-60" max="60" step="1" value={(offsets[entry.camera.id] ?? 0) / 1_000} onChange={(event) => setOffsets((current) => ({ ...current, [entry.camera.id]: normalizeSynchronizedOffset(Number(event.target.value) * 1_000) }))} />
                 <span>{((offsets[entry.camera.id] ?? 0) / 1_000).toLocaleString('pt-BR', { signDisplay: 'always' })} s</span>

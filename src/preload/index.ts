@@ -41,6 +41,8 @@ export interface CameraCreateInput {
   snapshotUri?: string | null;
   username?: string | null;
   password?: string | null;
+  sdCardUsername?: string | null;
+  sdCardPassword?: string | null;
   allowDuplicate?: boolean;
 }
 
@@ -70,6 +72,19 @@ export interface CameraTestResult {
     status: "ok" | "error" | "skipped";
     detail: string;
   }>;
+}
+
+export interface DiscoveryInterface {
+  name: string;
+  address: string;
+}
+
+export interface DiscoveredOnvifDevice {
+  endpointReference: string | null;
+  host: string;
+  onvifUrl: string;
+  scopes: string[];
+  types: string[];
 }
 
 export interface MediaSessionStatus {
@@ -167,6 +182,12 @@ const api = {
       ipcRenderer.invoke("cameras:details", { id }),
     metrics: (id: string): Promise<Result<CameraMetrics>> =>
       ipcRenderer.invoke("cameras:metrics", { id }),
+    discoveryInterfaces: (): Promise<Result<DiscoveryInterface[]>> =>
+      ipcRenderer.invoke("cameras:discoveryInterfaces"),
+    discover: (input: { requestId: string; address?: string }): Promise<Result<DiscoveredOnvifDevice[]>> =>
+      ipcRenderer.invoke("cameras:discover", input),
+    cancelDiscovery: (requestId: string): Promise<Result<{ cancelled: boolean }>> =>
+      ipcRenderer.invoke("cameras:cancelDiscovery", { requestId }),
     onChanged: (listener: EventListener<"cameras:changed">): Unsubscribe =>
       subscribe("cameras:changed", listener),
     create: (input: CameraCreateInput): Promise<Result<CameraCreateResult>> =>
@@ -195,6 +216,8 @@ const api = {
       onvifUrl?: string | null;
       username?: string | null;
       password?: string | null;
+      sdCardUsername?: string | null;
+      sdCardPassword?: string | null;
     }): Promise<Result<{ updated: boolean }>> =>
       ipcRenderer.invoke("cameras:update", input),
     deactivate: (id: string): Promise<Result<boolean>> =>
@@ -206,6 +229,8 @@ const api = {
       username?: string | null;
       password?: string | null;
       rtspPassword?: string | null;
+      sdCardUsername?: string | null;
+      sdCardPassword?: string | null;
     }): Promise<Result<boolean>> =>
       ipcRenderer.invoke("cameras:updateCredentials", input),
     remove: (id: string): Promise<Result<{ removed: boolean }>> =>

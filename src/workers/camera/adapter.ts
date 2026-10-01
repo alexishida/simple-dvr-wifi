@@ -15,6 +15,7 @@ export interface CameraCapabilities {
   h264: CapabilityState
   h265: CapabilityState
   mjpeg: CapabilityState
+  recording: CapabilityState
 }
 
 export interface CameraProfileInfo {
@@ -39,6 +40,9 @@ export interface CameraOnvifInfo {
   ptzSupported: boolean
   rtspMainUrl: string | null
   rtspSubUrl: string | null
+  recordingServiceUrl: string | null
+  searchServiceUrl: string | null
+  replayServiceUrl: string | null
 }
 
 export function emptyOnvifInfo(deviceServiceUrl: string): CameraOnvifInfo {
@@ -52,6 +56,7 @@ export function emptyOnvifInfo(deviceServiceUrl: string): CameraOnvifInfo {
       h264: 'unknown',
       h265: 'unknown',
       mjpeg: 'unknown',
+      recording: 'unknown',
     },
     profiles: [],
     deviceServiceUrl,
@@ -60,6 +65,9 @@ export function emptyOnvifInfo(deviceServiceUrl: string): CameraOnvifInfo {
     ptzSupported: false,
     rtspMainUrl: null,
     rtspSubUrl: null,
+    recordingServiceUrl: null,
+    searchServiceUrl: null,
+    replayServiceUrl: null,
   }
 }
 

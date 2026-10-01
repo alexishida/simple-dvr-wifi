@@ -167,7 +167,7 @@ export class ClipExportService {
         binaryPath: this.binaryPath,
         args: [
           '-hide_banner', '-nostdin', '-y', '-f', 'concat', '-safe', '0',
-          '-i', manifestPath, '-map', '0:v:0?', '-c', 'copy',
+          '-i', manifestPath, '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy',
           '-movflags', '+faststart', input.destinationPath,
         ],
         allowedOutputDirs: [dirname(resolve(input.destinationPath)), temporaryDir],

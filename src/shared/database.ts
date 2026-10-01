@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { CameraIdSchema, CameraStatusSchema, RecordingStatusSchema } from './contracts.js'
 
 export const DbRequestIdSchema = z.string().min(1).max(64)
-export const ServiceNameSchema = z.enum(['onvif', 'rtsp', 'rtsp_sub', 'snapshot', 'ptz'])
+export const ServiceNameSchema = z.enum(['onvif', 'rtsp', 'rtsp_sub', 'snapshot', 'ptz', 'sd_card', 'onvif_recording', 'onvif_search', 'onvif_replay'])
 
 export const EncryptedCredentialSchema = z.object({
   keyVersion: z.number().int().positive(),
@@ -59,6 +59,7 @@ export const CameraRecordSchema = z.object({
   port: z.number().int().min(1).max(65_535).nullable(),
   manufacturer: z.string().max(120).nullable(),
   model: z.string().max(120).nullable(),
+  firmwareVersion: z.string().max(120).nullable(),
   serialNumber: z.string().max(120).nullable(),
   epr: z.string().max(2048).nullable(),
   status: CameraStatusSchema,

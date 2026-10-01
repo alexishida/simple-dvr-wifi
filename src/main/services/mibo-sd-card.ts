@@ -4,19 +4,11 @@ import { mkdir, readdir, rename, stat, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { DatabaseSupervisor } from "../supervisors/database.js";
 import { FfmpegRunner } from "../../workers/media/ffmpeg-runner.js";
 import { checkStorageStatus, shouldAllowWrite } from "./storage-monitor.js";
-
-export interface SdCardRecording {
-  id: string;
-  cameraId: string;
-  startedAt: string;
-  endedAt: string;
-  durationMs: number;
-  bytes: number;
-  downloaded: boolean;
-}
+import type { SdCardRecording } from "../../shared/sd-card.js";
+import type { CameraRecord } from "../../shared/database.js";
+import type { SdCardAdapter, SdCardDownloadRequest, SdCardListRequest } from "./sd-card-adapter.js";
 
 type SourceRecording = SdCardRecording & { filePath: string };
 type Credentials = { username: string; password: string };
@@ -283,20 +275,25 @@ async function downloadFile(
     );
 }
 
-export class MiboSdCardService {
+export class MiboSdCardService implements SdCardAdapter {
+  readonly id = "intelbras-mibo-im4-c";
   private readonly listings = new Map<
     string,
     { expiresAt: number; entries: Map<string, SourceRecording> }
   >();
   private readonly downloads = new Set<string>();
 
-  async list(
-    cameraId: string,
-    host: string,
-    credential: Credentials,
-    date: string,
-    libraryRoot: string,
-  ): Promise<SdCardRecording[]> {
+  supports(camera: CameraRecord): boolean {
+    return /intelbras/i.test(camera.manufacturer ?? "") && /^im4-c$/i.test(camera.model ?? "");
+  }
+
+  detail(): string {
+    return "Cartão SD via API local Mibo"
+  }
+
+  async list({ camera, credential, date, libraryRoot }: SdCardListRequest): Promise<SdCardRecording[]> {
+    const cameraId = camera.id;
+    const host = camera.host;
     if (!/^[A-Za-z0-9.-]+$/.test(host))
       throw new Error("Endereço da câmera inválido.");
     if (
@@ -405,15 +402,9 @@ export class MiboSdCardService {
     }
   }
 
-  async download(
-    cameraId: string,
-    host: string,
-    credential: Credentials,
-    id: string,
-    root: string,
-    ffmpegPath: string,
-    database: DatabaseSupervisor,
-  ): Promise<{ path: string; imported: boolean }> {
+  async download({ camera, credential, id, libraryRoot: root, ffmpegPath, database }: SdCardDownloadRequest): Promise<{ path: string; imported: boolean }> {
+    const cameraId = camera.id;
+    const host = camera.host;
     if (!/^[A-Za-z0-9.-]+$/.test(host))
       throw new Error("Endereço da câmera inválido.");
     const listing = this.listings.get(cameraId);

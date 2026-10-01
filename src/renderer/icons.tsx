@@ -89,6 +89,20 @@ export const WifiIcon = icon(
   </>,
 );
 
+export const VolumeIcon = icon(
+  <>
+    <path d="M4 10v4h4l5 4V6l-5 4H4Z" />
+    <path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" />
+  </>,
+);
+
+export const VolumeMutedIcon = icon(
+  <>
+    <path d="M4 10v4h4l5 4V6l-5 4H4Z" />
+    <path d="m17 10 4 4m0-4-4 4" />
+  </>,
+);
+
 export const VideoIcon = icon(
   <>
     <rect x="2" y="6" width="14" height="12" rx="2" />

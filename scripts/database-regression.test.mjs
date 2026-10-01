@@ -424,8 +424,9 @@ test("media metadata migration upgrades an existing version 1 database", () => {
     runMigrations(db, {}, [MIGRATIONS[0]]);
     assert.throws(() => db.prepare("SELECT * FROM media_metadata"));
     const result = runMigrations(db, {}, MIGRATIONS);
-    assert.deepEqual(result.applied, [2, 3, 4, 5, 6]);
+    assert.deepEqual(result.applied, [2, 3, 4, 5, 6, 7, 8]);
     assert.doesNotThrow(() => db.prepare("SELECT * FROM media_metadata"));
+    assert.equal(db.prepare("SELECT recording FROM camera_capabilities LIMIT 1").columns()[0]?.name, "recording");
   } finally {
     db.close();
   }
@@ -469,16 +470,34 @@ test("stored credentials round-trip without plaintext in the SQLite file", async
     service: "rtsp",
     ...expected,
   });
+  const sdCardExpected = {
+    username: "sd-card-user",
+    password: "sd-card-password-94723",
+  };
+  await credentials.setCredential(camera.value.id, {
+    service: "sd_card",
+    ...sdCardExpected,
+  });
   const reopened = new CredentialService(database, keyStore);
   await reopened.initialize();
   assert.deepEqual(
     await reopened.getCredentialDetails(camera.value.id, "rtsp"),
     expected,
   );
+  assert.deepEqual(
+    await reopened.getCredentialDetails(camera.value.id, "sd_card"),
+    sdCardExpected,
+  );
+  assert.deepEqual(
+    new Set(await reopened.listCredentialServices(camera.value.id)),
+    new Set(["rtsp", "sd_card"]),
+  );
   await database.close();
   const contents = await readFile(path);
   assert.equal(contents.includes(Buffer.from(expected.username)), false);
   assert.equal(contents.includes(Buffer.from(expected.password)), false);
+  assert.equal(contents.includes(Buffer.from(sdCardExpected.username)), false);
+  assert.equal(contents.includes(Buffer.from(sdCardExpected.password)), false);
 });
 
 test("pre-migration backup includes committed WAL data and the original schema", async () => {
