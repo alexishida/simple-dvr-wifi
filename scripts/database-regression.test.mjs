@@ -518,6 +518,59 @@ test("pre-migration backup includes committed WAL data and the original schema",
   }
 });
 
+test("catalog backups exclude credentials, pass integrity checks, and restore atomically", async (t) => {
+  const root = tmpdir();
+  const directory = await mkdtemp(join(root, "dvr-catalog-backup-test-"));
+  const databasePath = join(directory, "catalog.sqlite");
+  const exportPath = join(directory, "export.sqlite");
+  const worker = new SqliteWorker(MIGRATIONS);
+  t.after(async () => {
+    worker.close();
+    const child = relative(root, directory);
+    assert.ok(child && !child.startsWith("..") && !isAbsolute(child));
+    await rm(directory, { recursive: true, force: true });
+  });
+  worker.open(databasePath, directory);
+  const dispatch = async (op, payload) => worker.dispatch({ id: `${op}-${Math.random()}`, op, payload });
+  const first = await dispatch("camera.create", { name: "Saved", host: "saved.local" });
+  assert.equal(first.ok, true);
+  worker.database.prepare(
+    "INSERT INTO camera_credentials (camera_id, service, key_version, ciphertext, nonce, tag, updated_at) VALUES (?, 'rtsp', 1, 'secret-ciphertext', 'nonce', 'tag', ?)"
+  ).run(first.value.id, new Date().toISOString());
+  await dispatch("preference.set", { key: "app.config", value: "{}" });
+  const exported = await dispatch("backup.export", { destination: exportPath });
+  assert.equal(exported.ok, true);
+  assert.deepEqual(exported.value, {
+    cameras: 1,
+    recordings: 0,
+    snapshots: 0,
+    schedules: 0,
+    hasConfiguration: true,
+    credentialsExcluded: true,
+  });
+  const saved = new Database(exportPath, { readonly: true });
+  try {
+    assert.equal(saved.pragma("integrity_check", { simple: true }), "ok");
+    assert.equal(saved.prepare("SELECT COUNT(*) AS count FROM camera_credentials").get().count, 0);
+    assert.equal((await readFile(exportPath)).includes(Buffer.from("secret-ciphertext")), false);
+  } finally {
+    saved.close();
+  }
+  const second = await dispatch("camera.create", { name: "Discarded", host: "discarded.local" });
+  assert.equal(second.ok, true);
+  const restored = await dispatch("backup.restore", {
+    source: exportPath,
+    destination: databasePath,
+    backupDir: directory,
+  });
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.equal(restored.value.cameras, 1);
+  assert.ok(await access(restored.value.preserved).then(() => true));
+  const cameras = await dispatch("camera.list", undefined);
+  assert.equal(cameras.ok, true);
+  assert.deepEqual(cameras.value.map((camera) => camera.name), ["Saved"]);
+});
+
 test("failed migrations leave the worker uninitialized and allow a subsequent open", () => {
   let fail = true;
   const worker = new SqliteWorker([

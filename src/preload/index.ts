@@ -358,6 +358,11 @@ const api = {
   diagnostics: {
     export: () => ipcRenderer.invoke("diagnostics:export"),
   },
+  backup: {
+    export: () => ipcRenderer.invoke("backup:export"),
+    inspectRestore: () => ipcRenderer.invoke("backup:inspectRestore"),
+    restore: (token: string) => ipcRenderer.invoke("backup:restore", { token, strategy: "replace" }),
+  },
   retention: {
     status: () => ipcRenderer.invoke("retention:status"),
   },

@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
 import DatabaseConstructor from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type {
   CameraRecord,
   DbRequest,
@@ -75,6 +77,31 @@ export class SqliteWorker {
     this.repos = null;
   }
 
+  private backupPreview(db: Database.Database): {
+    cameras: number; recordings: number; snapshots: number; schedules: number
+    hasConfiguration: boolean; credentialsExcluded: boolean
+  } {
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
+        .map(({ name }) => name),
+    );
+    for (const table of ["cameras", "recordings", "snapshots", "preferences", "schema_migrations"]) {
+      if (!tables.has(table)) throw new Error("O backup não possui o catálogo esperado.");
+    }
+    if (!integrityCheck(db).ok) throw new Error("A verificação de integridade do backup falhou.");
+    const count = (table: string): number => Number(
+      (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count,
+    );
+    return {
+      cameras: count("cameras"),
+      recordings: count("recordings"),
+      snapshots: count("snapshots"),
+      schedules: tables.has("recording_schedules") ? count("recording_schedules") : 0,
+      hasConfiguration: Boolean(db.prepare("SELECT 1 FROM preferences WHERE key = 'app.config'").get()),
+      credentialsExcluded: !tables.has("camera_credentials") || count("camera_credentials") === 0,
+    };
+  }
+
   async dispatch(request: DbRequest): Promise<DbResponse> {
     const reply = (value: unknown): DbResponse => ({
       id: request.id,
@@ -120,7 +147,78 @@ export class SqliteWorker {
         if (!payload?.destination)
           return error("VALIDATION_ERROR", "destination obrigatório.");
         await this.db.backup(payload.destination);
-        return reply({ exported: true });
+        const exported = new DatabaseConstructor(payload.destination) as Database.Database;
+        let exportFailed = false;
+        try {
+          exported.pragma("foreign_keys = ON");
+          exported.prepare("DELETE FROM camera_credentials").run();
+          // Deleting the rows alone leaves ciphertext in free SQLite pages.
+          // Rebuild the export so credentials cannot be recovered from it.
+          exported.exec("VACUUM");
+          return reply(this.backupPreview(exported));
+        } catch (exportError) {
+          exportFailed = true;
+          throw exportError;
+        } finally {
+          exported.close();
+          if (exportFailed) await rm(payload.destination, { force: true });
+        }
+      }
+      case "backup.inspect": {
+        const payload = request.payload as { source: string } | undefined;
+        if (!payload?.source)
+          return error("VALIDATION_ERROR", "source obrigatório.");
+        const source = new DatabaseConstructor(payload.source, {
+          readonly: true,
+          fileMustExist: true,
+        }) as Database.Database;
+        try {
+          return reply(this.backupPreview(source));
+        } finally {
+          source.close();
+        }
+      }
+      case "backup.restore": {
+        if (!this.db) return error("STORAGE_ERROR", "Banco não inicializado.");
+        const payload = request.payload as
+          | { source: string; destination: string; backupDir: string }
+          | undefined;
+        if (!payload?.source || !payload.destination || !payload.backupDir) {
+          return error("VALIDATION_ERROR", "Dados de restauração inválidos.");
+        }
+        const source = new DatabaseConstructor(payload.source, {
+          readonly: true,
+          fileMustExist: true,
+        }) as Database.Database;
+        let preview: ReturnType<SqliteWorker["backupPreview"]>;
+        try {
+          preview = this.backupPreview(source);
+        } finally {
+          source.close();
+        }
+        const preserved = join(
+          payload.backupDir,
+          `before-restore-${Date.now()}-${randomUUID()}.sqlite`,
+        );
+        await mkdir(dirname(preserved), { recursive: true });
+        await this.db.backup(preserved);
+        this.close();
+        const displaced = `${payload.destination}.restore-${randomUUID()}`;
+        try {
+          await rm(`${payload.destination}-wal`, { force: true });
+          await rm(`${payload.destination}-shm`, { force: true });
+          await rename(payload.destination, displaced);
+          await rename(payload.source, payload.destination);
+          this.open(payload.destination, payload.backupDir);
+          await rm(displaced, { force: true });
+          return reply({ ...preview, preserved });
+        } catch (restoreError) {
+          this.close();
+          await rm(payload.destination, { force: true });
+          await rename(displaced, payload.destination).catch(() => undefined);
+          this.open(payload.destination, payload.backupDir);
+          throw restoreError;
+        }
       }
       case "close":
         this.close();

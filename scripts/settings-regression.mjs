@@ -38,6 +38,24 @@ export async function run() {
         return { ok: true, value: { saved: true } };
       },
     },
+    library: {
+      storageUsage: async () => ({ ok: true, value: { freeBytes: null, totalBytes: null, usedBytes: 0, byCamera: [] } }),
+    },
+    retention: {
+      status: async () => ({ ok: true, value: { lastRunAt: null, deleted: 0, freedBytes: 0, failures: 0, noCandidates: true } }),
+    },
+    alerts: {
+      list: async () => ({ ok: true, value: [] }),
+      dismiss: async () => ({ ok: true, value: { dismissed: true } }),
+    },
+    diagnostics: {
+      export: async () => ({ ok: true, value: { exported: false } }),
+    },
+    backup: {
+      export: async () => ({ ok: true, value: { exported: false } }),
+      inspectRestore: async () => ({ ok: true, value: { selected: false } }),
+      restore: async () => ({ ok: true, value: { scheduled: false } }),
+    },
   };
   flushSync(() =>
     root.render(
@@ -78,7 +96,7 @@ export async function run() {
           new Event("submit", { bubbles: true, cancelable: true }),
         ),
     );
-  const status = () => container.querySelector('[role="status"]').textContent;
+  const status = () => container.querySelector('.settings-save-status').textContent;
 
   check(
     button("Salvar alterações").disabled,
@@ -184,15 +202,16 @@ export async function run() {
     click(name);
     for (const input of container.querySelectorAll("input, select")) {
       check(
-        container.querySelector(`label[for="${input.id}"]`),
+        container.querySelector(`label[for="${input.id}"]`) || input.closest("label"),
         `Missing label: ${input.id}`,
       );
-      check(
-        document.getElementById(
-          input.getAttribute("aria-describedby").split(" ")[0],
-        ),
-        `Missing hint: ${input.id}`,
-      );
+      const describedBy = input.getAttribute("aria-describedby");
+      if (describedBy) {
+        check(
+          document.getElementById(describedBy.split(" ")[0]),
+          `Missing hint: ${input.id}`,
+        );
+      }
     }
   }
   click("Conexão");

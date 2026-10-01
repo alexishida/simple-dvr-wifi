@@ -286,6 +286,18 @@ export interface ExposedApi {
   diagnostics: {
     export: () => Promise<Result<{ exported: boolean }>>;
   };
+  backup: {
+    export: () => Promise<Result<{
+      exported: boolean;
+      preview?: { bytes: number; cameras: number; recordings: number; snapshots: number; schedules: number; hasConfiguration: boolean; credentialsExcluded: boolean };
+    }>>;
+    inspectRestore: () => Promise<Result<{
+      selected: boolean;
+      token?: string;
+      preview?: { bytes: number; cameras: number; recordings: number; snapshots: number; schedules: number; hasConfiguration: boolean; credentialsExcluded: boolean };
+    }>>;
+    restore: (token: string) => Promise<Result<{ scheduled: boolean }>>;
+  };
   retention: {
     status: () => Promise<Result<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean }>>;
   };

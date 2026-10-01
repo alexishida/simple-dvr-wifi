@@ -6,6 +6,7 @@ import {
   CloseIcon,
   EditIcon,
   ExportIcon,
+  FolderIcon,
   ImageIcon,
   SettingsIcon,
   VideoIcon,
@@ -155,6 +156,11 @@ export function SettingsView({
   } | null>(null);
   const [alerts, setAlerts] = useState<Array<{ id: string; message: string; count: number }>>([]);
   const [diagnosticMessage, setDiagnosticMessage] = useState<string | null>(null);
+  const [backupMessage, setBackupMessage] = useState<string | null>(null);
+  const [restoreCandidate, setRestoreCandidate] = useState<{
+    token: string;
+    preview: { bytes: number; cameras: number; recordings: number; snapshots: number; schedules: number; hasConfiguration: boolean; credentialsExcluded: boolean };
+  } | null>(null);
   const [retentionStatus, setRetentionStatus] = useState<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean } | null>(null);
   const [scheduleCameraId, setScheduleCameraId] = useState("");
   const [schedulePeriods, setSchedulePeriods] = useState<Array<{ weekday: number; start: string; end: string; enabled: boolean }>>([]);
@@ -758,6 +764,39 @@ export function SettingsView({
                   <p className="field-hint">Exporte quedas de conexão e falhas de gravação. Credenciais, tokens e URLs autenticadas são removidos.</p>
                   <button type="button" className="btn btn-secondary btn-sm" onClick={() => void window.api.diagnostics.export().then((result) => setDiagnosticMessage(result.ok && result.value.exported ? "Diagnóstico exportado." : result.ok ? "Exportação cancelada." : result.error.message))}><ExportIcon size={14} /> Exportar diagnóstico</button>
                   {diagnosticMessage && <p className="field-hint" role="status">{diagnosticMessage}</p>}
+                </div>
+              </div>
+              <div className="settings-note">
+                <FolderIcon size={18} />
+                <div>
+                  <p>Backup e restauração</p>
+                  <p className="field-hint">O backup contém configurações e catálogo. Vídeos não são copiados e credenciais vinculadas a este computador são removidas.</p>
+                  <div className="settings-inline-actions">
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => void window.api.backup.export().then((result) => setBackupMessage(result.ok && result.value.exported ? "Backup exportado com integridade verificada." : result.ok ? "Exportação cancelada." : result.error.message))}>
+                      <ExportIcon size={14} /> Exportar backup
+                    </button>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => void window.api.backup.inspectRestore().then((result) => {
+                      if (!result.ok) { setBackupMessage(result.error.message); return; }
+                      if (!result.value.selected || !result.value.token || !result.value.preview) { setBackupMessage("Seleção cancelada."); return; }
+                      setRestoreCandidate({ token: result.value.token, preview: result.value.preview });
+                      setBackupMessage(null);
+                    })}>
+                      <FolderIcon size={14} /> Selecionar backup
+                    </button>
+                  </div>
+                  {restoreCandidate && (
+                    <div className="backup-preview" role="status">
+                      <p>Prévia: {restoreCandidate.preview.cameras} câmeras, {restoreCandidate.preview.recordings} gravações, {restoreCandidate.preview.snapshots} snapshots e {restoreCandidate.preview.schedules} períodos agendados.</p>
+                      <p className="field-hint">A restauração substitui o catálogo e as configurações atuais; uma cópia do banco atual será preservada. Será necessário cadastrar as credenciais novamente e reiniciar o aplicativo.</p>
+                      <button type="button" className="btn btn-danger btn-sm" onClick={() => {
+                        if (!window.confirm("Substituir o catálogo e as configurações atuais pelo backup selecionado? O aplicativo será reiniciado.")) return;
+                        void window.api.backup.restore(restoreCandidate.token).then((result) => setBackupMessage(result.ok && result.value.scheduled ? "Restauração concluída. Reiniciando…" : result.ok ? "Restauração cancelada." : result.error.message));
+                      }}>
+                        <FolderIcon size={14} /> Restaurar e reiniciar
+                      </button>
+                    </div>
+                  )}
+                  {backupMessage && <p className="field-hint" role="status">{backupMessage}</p>}
                 </div>
               </div>
               <div className="settings-note">

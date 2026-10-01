@@ -18,32 +18,49 @@ export function shouldScheduleRecording(input: {
 export class RecordingScheduler {
   private timer: NodeJS.Timeout | null = null
   private pending: Promise<void> | null = null
+  private refreshRequested = false
 
   constructor(
     private readonly reconcile: () => Promise<void>,
     private readonly intervalMs = 30_000,
+    private readonly onError: (error: unknown) => void = () => undefined,
   ) {}
 
   start(): void {
     if (this.timer) return
-    void this.run()
-    this.timer = setInterval(() => void this.run(), this.intervalMs)
+    this.refreshInBackground()
+    this.timer = setInterval(() => {
+      if (!this.pending) this.refreshInBackground()
+    }, this.intervalMs)
   }
 
   async refresh(): Promise<void> {
+    this.refreshRequested = true
     await this.run()
+  }
+
+  refreshInBackground(): void {
+    void this.refresh().catch(this.onError)
   }
 
   stop(): void {
     if (!this.timer) return
     clearInterval(this.timer)
     this.timer = null
+    this.refreshRequested = false
   }
 
   private async run(): Promise<void> {
     if (this.pending) return this.pending
-    const pending = this.reconcile().finally(() => {
-      if (this.pending === pending) this.pending = null
+    const pending = Promise.resolve().then(async () => {
+      try {
+        do {
+          this.refreshRequested = false
+          await this.reconcile()
+        } while (this.refreshRequested)
+      } finally {
+        if (this.pending === pending) this.pending = null
+      }
     })
     this.pending = pending
     return pending

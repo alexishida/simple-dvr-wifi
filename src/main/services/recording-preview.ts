@@ -1,4 +1,4 @@
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
 export const MAX_RECORDING_PREVIEW_BYTES = 2 * 1024 * 1024;
@@ -45,9 +45,28 @@ export async function readRecordingPreview(
   recordingId: string,
 ): Promise<string | null> {
   try {
-    const buffer = await readFile(previewPath(root, recordingId));
-    validatePreview(buffer);
-    return `data:image/jpeg;base64,${buffer.toString("base64")}`;
+    const file = await open(previewPath(root, recordingId), "r");
+    try {
+      const { size } = await file.stat();
+      if (size > MAX_RECORDING_PREVIEW_BYTES) {
+        throw new Error("O preview excede o limite permitido.");
+      }
+      // Read at most the observed size plus one byte, even if the file grows
+      // after stat. This keeps a corrupt preview from exhausting main memory.
+      const buffer = Buffer.alloc(size + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await file.read(buffer, length, buffer.length - length, null);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+      if (length > size) throw new Error("O preview foi alterado durante a leitura.");
+      const preview = buffer.subarray(0, length);
+      validatePreview(preview);
+      return `data:image/jpeg;base64,${preview.toString("base64")}`;
+    } finally {
+      await file.close();
+    }
   } catch (error) {
     if (
       error &&

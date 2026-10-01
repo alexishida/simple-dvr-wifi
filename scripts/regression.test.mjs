@@ -197,6 +197,17 @@ import { isScheduledAt, nextScheduledAt } from "../src/shared/recording-schedule
 import { RecordingScheduler, shouldScheduleRecording } from "../src/main/services/recording-scheduler.ts";
 import { MotionPrebufferService } from "../src/main/services/motion-prebuffer.ts";
 import {
+  deleteRecordingPreview,
+  MAX_RECORDING_PREVIEW_BYTES,
+  readRecordingPreview,
+  saveRecordingPreview,
+} from "../src/main/services/recording-preview.ts";
+import {
+  MAX_SYNCHRONIZED_CAMERAS,
+  normalizeSynchronizedOffset,
+  segmentAt,
+} from "../src/renderer/sync-playback.ts";
+import {
   buildConcatManifest,
   ClipExportService,
   planClipExport,
@@ -469,6 +480,49 @@ test("weekly schedule reports the next configured start", () => {
   assert.equal(next?.getMinutes(), 30);
 });
 
+test("next schedule preserves minute boundaries, overnight periods, and disabled days", () => {
+  const monday = new Date(2026, 0, 5, 22, 30, 45);
+  const periods = [{ weekday: 1, start: "22:00", end: "02:00", enabled: true }];
+  assert.equal(nextScheduledAt(periods, monday)?.getTime(), new Date(2026, 0, 5, 22, 31).getTime());
+  assert.equal(monday.getSeconds(), 45);
+  assert.equal(nextScheduledAt(periods, new Date(2026, 0, 5, 23, 59))?.getTime(), new Date(2026, 0, 6).getTime());
+  assert.equal(nextScheduledAt(periods, new Date(2026, 0, 6, 1, 59))?.getTime(), new Date(2026, 0, 12, 22).getTime());
+  assert.equal(nextScheduledAt([], monday), null);
+  assert.equal(nextScheduledAt([{ ...periods[0], enabled: false }], monday), null);
+  assert.equal(nextScheduledAt(periods, new Date(NaN)), null);
+});
+
+test("next schedule agrees with minute-by-minute lookup across weekly and DST boundaries", () => {
+  const periodSets = [
+    [{ weekday: 0, start: "02:30", end: "03:30", enabled: true }],
+    [{ weekday: 6, start: "23:00", end: "01:30", enabled: true }],
+    [
+      { weekday: 0, start: "01:00", end: "01:45", enabled: true },
+      { weekday: 1, start: "08:00", end: "09:00", enabled: false },
+      { weekday: 2, start: "06:00", end: "08:00", enabled: true },
+    ],
+  ];
+  for (const from of [
+    new Date(2026, 2, 7, 23, 59, 30),
+    new Date(2026, 2, 8, 1, 59),
+    new Date(2026, 9, 31, 23, 59),
+    new Date(2026, 10, 1, 1, 59),
+    new Date(2026, 11, 31, 23, 59),
+  ]) {
+    for (const periods of periodSets) {
+      const cursor = new Date(from);
+      cursor.setSeconds(0, 0);
+      cursor.setMinutes(cursor.getMinutes() + 1);
+      let expected = null;
+      for (let minute = 0; minute < 8 * 24 * 60; minute++) {
+        if (isScheduledAt(periods, cursor)) { expected = new Date(cursor); break; }
+        cursor.setMinutes(cursor.getMinutes() + 1);
+      }
+      assert.deepEqual(nextScheduledAt(periods, from), expected);
+    }
+  }
+});
+
 test("scheduler never overrides a manual recording", () => {
   const periods = [{ weekday: 1, start: "08:00", end: "10:00", enabled: true }];
   assert.equal(shouldScheduleRecording({ periods, now: new Date(2026, 0, 5, 9), cameraActive: true, manualRecording: true, scheduledRecording: false }), "none");
@@ -483,6 +537,105 @@ test("recording scheduler starts only one recurring loop", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 1);
   scheduler.stop();
+});
+
+test("synchronized playback identifies gaps and bounds per-camera clock compensation", () => {
+  const segments = [
+    { id: "segment-1", recordingId: "123e4567-e89b-42d3-a456-426614174000", path: "a.mp4", startedAt: "2026-01-01T10:00:00.000Z", endedAt: "2026-01-01T10:01:00.000Z", durationMs: 60_000, status: "completed" },
+    { id: "segment-2", recordingId: "123e4567-e89b-42d3-a456-426614174000", path: "b.mp4", startedAt: "2026-01-01T10:02:00.000Z", endedAt: "2026-01-01T10:03:00.000Z", durationMs: 60_000, status: "completed" },
+  ];
+  assert.deepEqual(segmentAt(segments, Date.parse("2026-01-01T10:00:30.000Z")), { index: 0, offsetSeconds: 30 });
+  assert.deepEqual(segmentAt(segments, Date.parse("2026-01-01T10:02:10.000Z")), { index: 1, offsetSeconds: 10 });
+  assert.equal(segmentAt(segments, Date.parse("2026-01-01T10:01:30.000Z")), null);
+  assert.equal(normalizeSynchronizedOffset(67_600), 60_000);
+  assert.equal(normalizeSynchronizedOffset(-67_600), -60_000);
+  assert.equal(normalizeSynchronizedOffset(Number.NaN), 0);
+  assert.equal(MAX_SYNCHRONIZED_CAMERAS, 4);
+});
+
+test("recording scheduler reconciles changes requested during an active pass", async () => {
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const scheduler = new RecordingScheduler(async () => {
+    calls += 1;
+    if (calls === 1) {
+      entered();
+      await blocked;
+    }
+  });
+  const first = scheduler.refresh();
+  await started;
+  const updates = [scheduler.refresh(), scheduler.refresh()];
+  assert.equal(calls, 1);
+  release();
+  await Promise.all([first, ...updates]);
+  assert.equal(calls, 2);
+});
+
+test("recording scheduler reports background failures and can retry", async (t) => {
+  const failure = new Error("reconciliation failed");
+  const errors = [];
+  let calls = 0;
+  const scheduler = new RecordingScheduler(async () => {
+    calls += 1;
+    if (calls === 1) throw failure;
+  }, 60_000, (error) => errors.push(error));
+  t.after(() => scheduler.stop());
+  scheduler.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(errors, [failure]);
+  await scheduler.refresh();
+  assert.equal(calls, 2);
+});
+
+test("recording scheduler releases its pending pass after synchronous failures", async () => {
+  let calls = 0;
+  const scheduler = new RecordingScheduler(() => {
+    calls += 1;
+    if (calls === 1) throw new Error("synchronous failure");
+    return Promise.resolve();
+  });
+  await assert.rejects(scheduler.refresh(), /synchronous failure/);
+  await scheduler.refresh();
+  assert.equal(calls, 2);
+});
+
+test("recording scheduler stop discards a queued background pass", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const scheduler = new RecordingScheduler(async () => { calls += 1; await blocked; }, 60_000);
+  scheduler.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  const refresh = scheduler.refresh();
+  scheduler.stop();
+  release();
+  await refresh;
+  assert.equal(calls, 1);
+});
+
+test("recording previews validate content and size and release the file after failures", async (t) => {
+  const root = await temporaryDirectory(t);
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const path = join(root, `${id}.jpg`);
+  assert.equal(await readRecordingPreview(root, id), null);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
+  await saveRecordingPreview(root, id, jpeg);
+  assert.equal(await readRecordingPreview(root, id), `data:image/jpeg;base64,${jpeg.toString("base64")}`);
+  await writeFile(path, "invalid");
+  await assert.rejects(readRecordingPreview(root, id), /JPEG/);
+  const oversized = Buffer.alloc(MAX_RECORDING_PREVIEW_BYTES + 1);
+  jpeg.copy(oversized);
+  await writeFile(path, oversized);
+  await assert.rejects(readRecordingPreview(root, id), /limite/);
+  await saveRecordingPreview(root, id, oversized.subarray(0, MAX_RECORDING_PREVIEW_BYTES));
+  assert.equal(await readRecordingPreview(root, id), `data:image/jpeg;base64,${oversized.subarray(0, MAX_RECORDING_PREVIEW_BYTES).toString("base64")}`);
+  await deleteRecordingPreview(root, id);
+  assert.equal(await readRecordingPreview(root, id), null);
+  await assert.rejects(readRecordingPreview(root, "../outside"), /inválido/);
 });
 
 test("streamed executable hashing matches SHA-256 across chunk boundaries", async (t) => {

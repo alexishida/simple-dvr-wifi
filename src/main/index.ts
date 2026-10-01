@@ -23,6 +23,7 @@ import {
   readdir,
   rename,
   realpath,
+  rm,
   stat,
   unlink,
   writeFile,
@@ -48,6 +49,7 @@ import { CredentialService } from "./services/credentials.js";
 import { MiboSdCardService } from "./services/mibo-sd-card.js";
 import { SafeStorageMasterKeyStore } from "./security/vault.js";
 import { ConfigRepository } from "./services/config.js";
+import { BackupService, type BackupPreview } from "./services/backup.js";
 import {
   loadHardwareAcceleration,
   saveHardwareAcceleration,
@@ -97,6 +99,8 @@ let mediaSupervisor: MediaSessionSupervisor | null = null;
 let ptzRegistry: PtzControllerRegistry | null = null;
 let config: AppConfig | null = null;
 let configRepository: ConfigRepository | null = null;
+let backupService: BackupService | null = null;
+const restoreCandidates = new Map<string, { source: string; preview: BackupPreview }>();
 const activeRecordings = new Map<
   string,
   { recordingId: string; startedAt: string; recordDir: string }
@@ -2406,6 +2410,77 @@ function registerIpcHandlers(): void {
     handle: ({ id }) => ({ dismissed: localAlerts.dismiss(id) }),
   });
 
+  registry.register("backup:export", {
+    input: EmptyRequestSchema,
+    handle: async () => {
+      if (!backupService) return { exported: false };
+      const options: Electron.SaveDialogOptions = {
+        defaultPath: `simple-dvr-backup-${new Date().toISOString().slice(0, 10)}.sqlite`,
+        filters: [{ name: "Backup do Simple DVR", extensions: ["sqlite"] }],
+        properties: ["showOverwriteConfirmation"],
+      };
+      const result = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, options)
+        : await dialog.showSaveDialog(options);
+      if (result.canceled || !result.filePath) return { exported: false };
+      await assertNewExportDestination(result.filePath);
+      const preview = await backupService.exportTo(result.filePath);
+      return { exported: true, preview };
+    },
+  });
+
+  registry.register("backup:inspectRestore", {
+    input: EmptyRequestSchema,
+    handle: async () => {
+      if (!backupService) return { selected: false };
+      const options: Electron.OpenDialogOptions = {
+        properties: ["openFile"],
+        filters: [{ name: "Backup do Simple DVR", extensions: ["sqlite", "db", "sqlite3"] }],
+      };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+      const source = result.filePaths[0];
+      if (result.canceled || !source) return { selected: false };
+      const preview = await backupService.inspectImportFile(source);
+      const token = randomUUID();
+      restoreCandidates.set(token, { source, preview });
+      return { selected: true, token, preview };
+    },
+  });
+
+  registry.register("backup:restore", {
+    input: z.object({ token: z.string().uuid(), strategy: z.literal("replace") }),
+    handle: async ({ token }) => {
+      if (!database || !backupService) return { scheduled: false };
+      if (activeRecordings.size > 0) {
+        throw new Error("Finalize as gravações ativas antes de restaurar um backup.");
+      }
+      const candidate = restoreCandidates.get(token);
+      restoreCandidates.delete(token);
+      if (!candidate) throw new Error("A prévia do backup expirou. Selecione o arquivo novamente.");
+      const restoreDirectory = resolve(userDataPath, "restore-imports");
+      const staged = join(restoreDirectory, `${token}.sqlite`);
+      await mkdir(restoreDirectory, { recursive: true });
+      try {
+        await copyFile(candidate.source, staged, fsConstants.COPYFILE_EXCL);
+        await backupService.inspectImportFile(staged);
+        const restored = await database.request("backup.restore", {
+          source: staged,
+          destination: databasePath,
+          backupDir,
+        });
+        if (!restored.ok) throw new Error("Não foi possível restaurar o backup.");
+      } catch (error) {
+        await rm(staged, { force: true });
+        throw error;
+      }
+      app.relaunch();
+      app.quit();
+      return { scheduled: true };
+    },
+  });
+
   registry.register("diagnostics:export", {
     input: EmptyRequestSchema,
     handle: async () => {
@@ -2552,6 +2627,7 @@ async function initializeDatabase(): Promise<void> {
   database = new DatabaseSupervisor(
     createUtilityProcessTransport(databasePath, backupDir),
   );
+  backupService = new BackupService(database);
   credentials = new CredentialService(
     database,
     new SafeStorageMasterKeyStore(safeStorage),
@@ -2608,7 +2684,11 @@ async function initializeDatabase(): Promise<void> {
     expectedHash: expectedMediaMtxHashFromManifest(mediaManifestPath),
     configDir: mediaConfigDir,
   });
-  recordingScheduler = new RecordingScheduler(reconcileScheduledRecordings);
+  recordingScheduler = new RecordingScheduler(
+    reconcileScheduledRecordings,
+    30_000,
+    () => localAlerts.report("recording_interrupted", "Não foi possível atualizar as gravações agendadas."),
+  );
   motionSubscriptions = new MotionSubscriptionRegistry({
     getClient: async (cameraId) => {
       const camera = await getCameraRecord(cameraId);
@@ -2634,8 +2714,8 @@ async function initializeDatabase(): Promise<void> {
     }
   }
   recordingScheduler.start();
-  app.on("browser-window-focus", () => void recordingScheduler?.refresh());
-  powerMonitor.on("resume", () => void recordingScheduler?.refresh());
+  app.on("browser-window-focus", () => recordingScheduler?.refreshInBackground());
+  powerMonitor.on("resume", () => recordingScheduler?.refreshInBackground());
 
   ptzRegistry = new PtzControllerRegistry({
     getAdapter: async (cameraId) => {

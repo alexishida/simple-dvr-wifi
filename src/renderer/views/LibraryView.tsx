@@ -24,6 +24,7 @@ import {
   VideoIcon,
 } from "../icons.js";
 import { recordingStatusLabel } from "../status.js";
+import { SynchronizedPlayback } from "../components/SynchronizedPlayback.js";
 
 type RecordingLibraryItem = RecordingRecord & { path: string | null };
 
@@ -252,6 +253,8 @@ export function LibraryView({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [playingRecording, setPlayingRecording] =
+    useState<RecordingLibraryItem | null>(null);
+  const [synchronizedRecording, setSynchronizedRecording] =
     useState<RecordingLibraryItem | null>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
@@ -484,6 +487,11 @@ export function LibraryView({
     () => new Map(cameras.map((camera) => [camera.id, camera.name])),
     [cameras],
   );
+  const synchronizedCameras = useMemo(() => {
+    if (!synchronizedRecording) return cameras;
+    const anchor = cameras.find((camera) => camera.id === synchronizedRecording.cameraId);
+    return anchor ? [anchor, ...cameras.filter((camera) => camera.id !== anchor.id)] : cameras;
+  }, [cameras, synchronizedRecording]);
   const items = mode === "snapshots" ? snapshots : recordings;
   const Icon = mode === "snapshots" ? ImageIcon : RecIcon;
   const title = mode === "snapshots" ? "Snapshots" : "Gravações";
@@ -1590,6 +1598,15 @@ export function LibraryView({
                         <button
                           type="button"
                           className="btn btn-secondary"
+                          disabled={!recording.path}
+                          onClick={() => setSynchronizedRecording(recording)}
+                        >
+                          <VideoIcon size={16} />
+                          Sincronizar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
                           aria-label={exportingId === recording.id ? "Exportando gravação" : "Exportar gravação"}
                           title={exportingId === recording.id ? "Exportando gravação…" : "Exportar gravação"}
                           disabled={exportingId === recording.id || !recording.path}
@@ -1656,6 +1673,13 @@ export function LibraryView({
             </div>
           </nav>
         </>
+      )}
+      {synchronizedRecording && (
+        <SynchronizedPlayback
+          anchorAt={synchronizedRecording.startedAt}
+          cameras={synchronizedCameras}
+          onClose={() => setSynchronizedRecording(null)}
+        />
       )}
       {playingRecording?.path && (
         <div
