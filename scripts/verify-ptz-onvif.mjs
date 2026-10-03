@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict'
-import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { build } from 'vite'
 
-const chunksDir = resolve('out/main/chunks')
-const adapterFile = (await readdir(chunksDir)).find((file) =>
-  /^onvif-adapter-.+\.js$/.test(file),
-)
-if (!adapterFile) {
-  throw new Error('Execute "npm run build" antes da verificação de PTZ ONVIF.')
-}
+// Bundle the adapter in isolation: app chunks can import Electron's main entry.
+await build({
+  configFile: false,
+  logLevel: 'warn',
+  build: {
+    target: 'node22',
+    outDir: 'out/tests/ptz',
+    emptyOutDir: false,
+    minify: false,
+    lib: {
+      entry: resolve('src/workers/camera/onvif-adapter.ts'),
+      formats: ['es'],
+      fileName: () => 'onvif-adapter.mjs',
+    },
+    rollupOptions: { external: (id) => id.startsWith('node:') },
+  },
+})
 
-const { OnvifAdapter } = await import(pathToFileURL(resolve(chunksDir, adapterFile)).href)
+const { OnvifAdapter } = await import(pathToFileURL(resolve('out/tests/ptz/onvif-adapter.mjs')).href)
 
 const successResponse = `<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">

@@ -23,6 +23,7 @@ export interface CameraProfileInfo {
   name: string
   streamType: 'main' | 'sub'
   codec: string | null
+  audioCodec: string | null
   width: number | null
   height: number | null
   fps: number | null

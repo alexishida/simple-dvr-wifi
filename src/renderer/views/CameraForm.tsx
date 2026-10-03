@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { parseHttpUrl, parseRtspUrl } from "../../shared/camera-urls.js";
 import {
   CAMERA_PRESETS,
@@ -27,6 +27,13 @@ export function CameraForm({
     : manualRtspUrl;
   const [username, setUsername] = useState(initial?.username ?? "");
   const [password, setPassword] = useState("");
+  const [identified, setIdentified] = useState<{
+    manufacturer: string | null;
+    model: string | null;
+    serialNumber: string | null;
+  } | null>(null);
+  const configurationRevision = useRef(0);
+  const visibleIdentity = identified ?? (editingId ? initial : null);
   const [sdCardUsername, setSdCardUsername] = useState("");
   const [sdCardPassword, setSdCardPassword] = useState("");
   const [message, setMessage] = useState<{
@@ -38,6 +45,8 @@ export function CameraForm({
   const [testing, setTesting] = useState(false);
 
   function selectPreset(id: string): void {
+    configurationRevision.current++;
+    setIdentified(null);
     // Keep the generated URL when switching to custom configuration.
     if (!id) setRtspUrl(rtspUrl);
     setPresetId(id);
@@ -156,8 +165,10 @@ export function CameraForm({
 
       const result = await window.api.cameras.create({
         name: name.trim(),
-        manufacturer: preset?.manufacturer ?? initial?.manufacturer ?? null,
-        model: preset?.model ?? initial?.model ?? null,
+        manufacturer:
+          identified?.manufacturer ?? preset?.manufacturer ?? initial?.manufacturer ?? null,
+        model: identified?.model ?? preset?.model ?? initial?.model ?? null,
+        serialNumber: identified?.serialNumber ?? initial?.serialNumber ?? null,
         host: host.trim() || parsedRtsp?.host || "",
         port: port ? Number(port) : (parsedRtsp?.port ?? null),
         epr: initial?.epr ?? null,
@@ -202,9 +213,12 @@ export function CameraForm({
     }
 
     setTesting(true);
+    const revision = configurationRevision.current;
+    setIdentified(null);
     setMessage({ kind: "info", text: "Testando a conexão informada…" });
     try {
       const result = await window.api.cameras.testConnection({
+        cameraId: editingId ?? undefined,
         host: host.trim() || parsedRtsp?.host || "",
         port: port ? Number(port) : (parsedRtsp?.port ?? null),
         onvifUrl: onvifUrl.trim() || null,
@@ -212,16 +226,27 @@ export function CameraForm({
         username: username.trim() || parsedRtsp?.username || null,
         password: password || parsedRtsp?.password || null,
       });
+      if (revision !== configurationRevision.current) return;
       if (!result.ok) {
         setMessage({ kind: "error", text: result.error.message });
         return;
+      }
+      const device = result.value.identified;
+      const autoFilled =
+        !editingId &&
+        !preset &&
+        !manualRtspUrl.trim() &&
+        Boolean(device?.rtspUrl);
+      if (device) {
+        setIdentified(device);
+        if (autoFilled && device.rtspUrl) setRtspUrl(device.rtspUrl);
       }
       const details = result.value.segments
         .map((segment) => `${segment.name.toUpperCase()}: ${segment.detail}`)
         .join(" ");
       setMessage({
         kind: result.value.status === "connected" ? "success" : "error",
-        text: details,
+        text: `${details}${autoFilled ? " URL RTSP preenchida; confira antes de cadastrar." : ""}`,
       });
     } finally {
       setTesting(false);
@@ -254,30 +279,29 @@ export function CameraForm({
             />
           </div>
 
-          {editingId &&
-            (initial?.manufacturer ||
-              initial?.model ||
-              initial?.serialNumber) && (
+          {(visibleIdentity?.manufacturer ||
+            visibleIdentity?.model ||
+            visibleIdentity?.serialNumber) && (
               <div
                 className="camera-details-grid"
                 aria-label="Informações do dispositivo"
               >
-                {initial.manufacturer && (
+                {visibleIdentity.manufacturer && (
                   <div className="camera-detail">
                     <span>Fabricante</span>
-                    <strong>{initial.manufacturer}</strong>
+                    <strong>{visibleIdentity.manufacturer}</strong>
                   </div>
                 )}
-                {initial.model && (
+                {visibleIdentity.model && (
                   <div className="camera-detail">
                     <span>Modelo</span>
-                    <strong>{initial.model}</strong>
+                    <strong>{visibleIdentity.model}</strong>
                   </div>
                 )}
-                {initial.serialNumber && (
+                {visibleIdentity.serialNumber && (
                   <div className="camera-detail">
                     <span>Número de série</span>
-                    <strong>{initial.serialNumber}</strong>
+                    <strong>{visibleIdentity.serialNumber}</strong>
                   </div>
                 )}
               </div>
@@ -292,7 +316,11 @@ export function CameraForm({
                 id="cam-host"
                 className="field-input"
                 value={host}
-                onChange={(event) => setHost(event.target.value)}
+                onChange={(event) => {
+                  configurationRevision.current++;
+                  setIdentified(null);
+                  setHost(event.target.value);
+                }}
                 required={!parseRtspUrl(rtspUrl)}
               />
             </div>
@@ -307,7 +335,10 @@ export function CameraForm({
                 min={1}
                 max={65_535}
                 value={port}
-                onChange={(event) => setPort(event.target.value)}
+                onChange={(event) => {
+                  configurationRevision.current++;
+                  setPort(event.target.value);
+                }}
               />
             </div>
           </div>
@@ -321,21 +352,33 @@ export function CameraForm({
                 id="cam-user"
                 className="field-input"
                 value={username}
-                onChange={(event) => setUsername(event.target.value)}
+                onChange={(event) => {
+                  configurationRevision.current++;
+                  setUsername(event.target.value);
+                }}
               />
             </div>
             <div className="field">
               <label className="field-label" htmlFor="cam-pass">
-                {editingId ? "Nova senha (deixe vazio para manter)" : "Senha"}
+                Senha da câmera
               </label>
               <input
                 id="cam-pass"
                 className="field-input"
                 type="password"
+                aria-describedby="cam-pass-help"
                 autoComplete="new-password"
                 value={password}
-                onChange={(event) => setPassword(event.target.value)}
+                onChange={(event) => {
+                  configurationRevision.current++;
+                  setPassword(event.target.value);
+                }}
               />
+              <p id="cam-pass-help" className="field-hint">
+                {editingId
+                  ? "Digite aqui para testar uma nova senha e salve para substituí-la. Em branco, o teste usa a senha salva nos endereços cadastrados."
+                  : "Digite a senha da conta local da câmera."}
+              </p>
             </div>
           </div>
           <div className="field-row camera-form-credentials">
@@ -403,7 +446,7 @@ export function CameraForm({
                 <p id="cam-model-help" className="field-hint">
                   {preset
                     ? "URL preenchida automaticamente. Teste a conexão para confirmar a compatibilidade com o firmware. Editar a URL muda para configuração manual."
-                    : "Selecione o modelo para montar a URL RTSP com o endereço e a porta informados."}
+                    : "Selecione o modelo ou teste a conexão ONVIF para identificar e preencher uma URL RTSP disponível."}
                   {preset?.hint && ` ${preset.hint}`}
                 </p>
               </div>
@@ -423,7 +466,11 @@ export function CameraForm({
                         step={1}
                         required
                         value={channel}
-                        onChange={(event) => setChannel(event.target.value)}
+                        onChange={(event) => {
+                          configurationRevision.current++;
+                          setIdentified(null);
+                          setChannel(event.target.value);
+                        }}
                       />
                     </div>
                   )}
@@ -435,9 +482,11 @@ export function CameraForm({
                       id="cam-stream"
                       className="field-input"
                       value={stream}
-                      onChange={(event) =>
-                        setStream(event.target.value as "main" | "sub")
-                      }
+                      onChange={(event) => {
+                        configurationRevision.current++;
+                        setIdentified(null);
+                        setStream(event.target.value as "main" | "sub");
+                      }}
                     >
                       <option value="main">Principal</option>
                       {preset.subPath && (
@@ -459,6 +508,8 @@ export function CameraForm({
               placeholder="rtsp://camera/stream"
               value={rtspUrl}
               onChange={(event) => {
+                configurationRevision.current++;
+                setIdentified(null);
                 setPresetId("");
                 setRtspUrl(event.target.value);
                 applyRtspCredentials(event.target.value);
@@ -492,7 +543,11 @@ export function CameraForm({
               className="field-input"
               placeholder="http://camera/onvif/device_service"
               value={onvifUrl}
-              onChange={(event) => handleOnvifChange(event.target.value)}
+              onChange={(event) => {
+                configurationRevision.current++;
+                setIdentified(null);
+                handleOnvifChange(event.target.value);
+              }}
               onBlur={(event) => applyOnvifDetails(event.target.value)}
             />
           </div>

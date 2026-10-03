@@ -47,6 +47,7 @@ import { DatabaseSupervisor } from "./supervisors/database.js";
 import { createUtilityProcessTransport } from "./supervisors/database-utility-process.js";
 import { CredentialService } from "./services/credentials.js";
 import { MiboSdCardService } from "./services/mibo-sd-card.js";
+import { cameraTestCredentials } from "./services/camera-test-credentials.js";
 import { SdCardAdapterRegistry } from "./services/sd-card-adapter.js";
 import { SafeStorageMasterKeyStore } from "./security/vault.js";
 import { ConfigRepository } from "./services/config.js";
@@ -56,6 +57,10 @@ import {
   saveHardwareAcceleration,
 } from "./services/hardware-acceleration.js";
 import { CameraManagementService } from "./services/camera-management.js";
+import {
+  autoRtspCandidate,
+  type AutoRtspCandidate,
+} from "./services/camera-auto-config.js";
 import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
 import { PtzControllerRegistry } from "./services/ptz-registry.js";
@@ -1122,6 +1127,7 @@ const CameraUpdateRequestSchema = CameraCreateRequestSchema.pick({
 });
 
 const CameraConnectionTestSchema = z.object({
+  cameraId: z.string().uuid().optional(),
   host: z.string().trim().max(253).optional(),
   port: z.number().int().min(1).max(65_535).nullable().optional(),
   rtspUrl: z.string().max(2048).nullable().optional(),
@@ -1173,7 +1179,7 @@ function registerIpcHandlers(): void {
         connection: camera.status,
         mainSession: mediaSupervisor?.status(mediaSessionId(id, "main"))?.state ?? null,
         subSession: mediaSupervisor?.status(mediaSessionId(id, "sub"))?.state ?? null,
-        profiles: profiles.ok ? (profiles.value as Array<{ streamType: "main" | "sub"; name: string | null; codec: string | null; width: number | null; height: number | null; fps: number | null }>).map(({ streamType, name, codec, width, height, fps }) => ({ streamType, name, codec, width, height, fps })) : [],
+        profiles: profiles.ok ? (profiles.value as Array<{ streamType: "main" | "sub"; name: string | null; codec: string | null; audioCodec: string | null; width: number | null; height: number | null; fps: number | null }>).map(({ streamType, name, codec, audioCodec, width, height, fps }) => ({ streamType, name, codec, audioCodec, width, height, fps })) : [],
         onvifRecordingSearch: capabilities.ok && Boolean((capabilities.value as { recording?: boolean } | null)?.recording),
         manufacturer: camera.manufacturer,
         model: camera.model,
@@ -1263,7 +1269,7 @@ function registerIpcHandlers(): void {
 
   registry.register("cameras:testConnection", {
     input: CameraConnectionTestSchema,
-    handle: async ({ rtspUrl, onvifUrl, username, password }) => {
+    handle: async ({ cameraId, host, port, rtspUrl, onvifUrl, username, password }) => {
       const parsedRtsp = rtspUrl ? parseRtspUrl(rtspUrl) : null;
       if (rtspUrl && !parsedRtsp) throw new Error("URL RTSP inválida.");
       const parsedOnvif = onvifUrl ? parseHttpUrl(onvifUrl) : null;
@@ -1286,6 +1292,22 @@ function registerIpcHandlers(): void {
         password:
           password || parsedRtsp?.password || parsedOnvif?.password || null,
       };
+      const camera = cameraId ? await getCameraRecord(cameraId) : null;
+      if (cameraId && !camera) throw new Error("Câmera não encontrada.");
+      const testCredential = (service: "onvif" | "rtsp", url: string) =>
+        cameraTestCredentials({ camera, service, url, ...connection, load: cameraCredential });
+      // Resolve before the generic network error handler so actionable credential errors reach the form.
+      const onvifCredential = parsedOnvif
+        ? await testCredential("onvif", parsedOnvif.sanitizedUrl)
+        : null;
+      let autoCandidate: AutoRtspCandidate | null = null;
+      let identified: {
+        manufacturer: string | null;
+        model: string | null;
+        serialNumber: string | null;
+        rtspUrl: string | null;
+        source: AutoRtspCandidate["source"] | null;
+      } | null = null;
 
       if (parsedOnvif) {
         try {
@@ -1293,11 +1315,30 @@ function registerIpcHandlers(): void {
             await import("../workers/camera/onvif-adapter.js");
           const info = await new OnvifAdapter({
             deviceServiceUrl: parsedOnvif.sanitizedUrl,
-            username: connection.username,
-            password: connection.password,
+            username: onvifCredential?.username,
+            password: onvifCredential?.password,
             transport: createFetchOnvifTransport(),
           }).detect();
           const available = info.capabilities.onvif !== "error";
+          if (available) {
+            const field = (value: string): string | null =>
+              value.trim().slice(0, 120) || null;
+            identified = {
+              manufacturer: field(info.identity.manufacturer),
+              model: field(info.identity.model),
+              serialNumber: field(info.identity.serialNumber),
+              rtspUrl: null,
+              source: null,
+            };
+            if (!parsedRtsp) {
+              const onvifHost = new URL(parsedOnvif.sanitizedUrl).hostname;
+              autoCandidate = autoRtspCandidate(
+                info,
+                host?.trim() || onvifHost,
+                port,
+              );
+            }
+          }
           segments.push({
             name: "onvif",
             status: available ? "ok" : "error",
@@ -1318,20 +1359,29 @@ function registerIpcHandlers(): void {
         });
       }
 
-      if (parsedRtsp) {
+      const effectiveRtsp =
+        parsedRtsp ?? (autoCandidate && parseRtspUrl(autoCandidate.url));
+      if (effectiveRtsp) {
+        const rtspCredential = await testCredential("rtsp", effectiveRtsp.sanitizedUrl);
         const { probeRtsp } = await import("../workers/camera/probes.js");
         const result = await probeRtsp({
-          url: parsedRtsp.sanitizedUrl,
-          username: connection.username,
-          password: connection.password,
+          url: effectiveRtsp.sanitizedUrl,
+          username: rtspCredential.username,
+          password: rtspCredential.password,
           timeoutMs: 5_000,
         });
+        if (autoCandidate && result === "ok" && identified) {
+          identified.rtspUrl = effectiveRtsp.sanitizedUrl;
+          identified.source = autoCandidate.source;
+        }
         segments.push({
           name: "rtsp",
           status: result === "ok" ? "ok" : "error",
           detail:
             result === "ok"
-              ? "Stream RTSP acessível."
+              ? autoCandidate
+                ? `Stream RTSP acessível via ${autoCandidate.source === "onvif" ? "ONVIF" : "referência de modelo"}.`
+                : "Stream RTSP acessível."
               : result === "auth_error"
                 ? "Credenciais RTSP rejeitadas."
                 : "Stream RTSP inacessível.",
@@ -1349,6 +1399,7 @@ function registerIpcHandlers(): void {
           ? "connected"
           : "unavailable",
         segments,
+        identified,
       };
     },
   });
@@ -1410,6 +1461,7 @@ function registerIpcHandlers(): void {
                 name: profile.name || null,
                 streamType: profile.streamType,
                 codec: profile.codec,
+                audioCodec: profile.audioCodec,
                 width: profile.width,
                 height: profile.height,
                 fps: profile.fps,

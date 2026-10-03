@@ -62,6 +62,13 @@ export interface CameraTestResult {
     status: "ok" | "error" | "skipped";
     detail: string;
   }>;
+  identified?: {
+    manufacturer: string | null;
+    model: string | null;
+    serialNumber: string | null;
+    rtspUrl: string | null;
+    source: "onvif" | "reference" | null;
+  } | null;
 }
 
 export interface DiscoveryInterface {
@@ -93,6 +100,7 @@ export interface CameraApi {
   }) => Promise<Result<unknown>>;
   test: (id: string) => Promise<Result<CameraTestResult>>;
   testConnection: (input: {
+    cameraId?: string;
     host: string;
     port?: number | null;
     rtspUrl?: string | null;

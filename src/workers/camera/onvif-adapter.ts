@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { parseXmlSafe, queryAll, queryText, type XmlNode } from "./xml.js";
+import { parseXmlSafe, queryAll, queryText } from "./xml.js";
 import type {
   CameraAdapter,
   CameraOnvifInfo,
@@ -779,24 +779,27 @@ export class OnvifAdapter implements CameraAdapter {
         const encoder = profile.children.find(
           (c) => c.name === "VideoEncoderConfiguration",
         );
+        const audioEncoder = profile.children.find(
+          (c) => c.name === "AudioEncoderConfiguration",
+        );
         const ptzConfig = profile.children.find(
           (c) => c.name === "PTZConfiguration",
         );
 
         const width = Number(
-          queryText(encoder ?? ({} as XmlNode), "Resolution/Width") ??
+          (encoder ? queryText(encoder, "Resolution/Width") : null) ??
             encoder?.attributes.Width ??
             videoSource?.attributes.Width ??
             NaN,
         );
         const height = Number(
-          queryText(encoder ?? ({} as XmlNode), "Resolution/Height") ??
+          (encoder ? queryText(encoder, "Resolution/Height") : null) ??
             encoder?.attributes.Height ??
             videoSource?.attributes.Height ??
             NaN,
         );
         const fps = Number(
-          queryText(encoder ?? ({} as XmlNode), "RateControl/FrameRateLimit") ??
+          (encoder ? queryText(encoder, "RateControl/FrameRateLimit") : null) ??
             encoder?.attributes.FrameRate ??
             NaN,
         );
@@ -805,8 +808,12 @@ export class OnvifAdapter implements CameraAdapter {
           name,
           streamType: guessStreamType(name),
           codec:
-            queryText(encoder ?? ({} as XmlNode), "Encoding") ??
+            (encoder ? queryText(encoder, "Encoding") : null) ??
             encoder?.attributes.Encoding ??
+            null,
+          audioCodec:
+            (audioEncoder ? queryText(audioEncoder, "Encoding") : null) ??
+            audioEncoder?.attributes.Encoding ??
             null,
           width: Number.isFinite(width) ? width : null,
           height: Number.isFinite(height) ? height : null,

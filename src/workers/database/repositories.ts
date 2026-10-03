@@ -46,6 +46,7 @@ function mapProfile(row: Row): CameraProfile {
     name: (row.name as string) ?? null,
     streamType: row.stream_type as CameraProfile['streamType'],
     codec: (row.codec as string) ?? null,
+    audioCodec: (row.audio_codec as string) ?? null,
     width: (row.width as number) ?? null,
     height: (row.height as number) ?? null,
     fps: (row.fps as number) ?? null,
@@ -416,8 +417,8 @@ export class ProfileRepository {
   ): CameraProfile[] {
     const remove = this.db.prepare('DELETE FROM camera_profiles WHERE camera_id = ?')
     const insert = this.db.prepare(
-      `INSERT INTO camera_profiles (id, camera_id, token, name, stream_type, codec, width, height, fps, active, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      `INSERT INTO camera_profiles (id, camera_id, token, name, stream_type, codec, audio_codec, width, height, fps, active, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
     )
     const tx = this.db.transaction((items: typeof profiles) => {
       remove.run(cameraId)
@@ -429,6 +430,7 @@ export class ProfileRepository {
           p.name,
           p.streamType,
           p.codec,
+          p.audioCodec,
           p.width,
           p.height,
           p.fps,

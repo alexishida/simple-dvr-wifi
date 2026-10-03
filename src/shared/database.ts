@@ -78,6 +78,7 @@ export const CameraProfileSchema = z.object({
   name: z.string().max(120).nullable(),
   streamType: z.enum(['main', 'sub']),
   codec: z.string().max(32).nullable(),
+  audioCodec: z.string().max(32).nullable(),
   width: z.number().int().positive().nullable(),
   height: z.number().int().positive().nullable(),
   fps: z.number().positive().nullable(),

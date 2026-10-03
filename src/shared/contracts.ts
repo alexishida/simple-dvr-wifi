@@ -99,6 +99,7 @@ export const CameraMetricsSchema = z.object({
     streamType: StreamProfileSchema,
     name: z.string().nullable(),
     codec: z.string().nullable(),
+    audioCodec: z.string().nullable(),
     width: z.number().int().nullable(),
     height: z.number().int().nullable(),
     fps: z.number().nullable(),

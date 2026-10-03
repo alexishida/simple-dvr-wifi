@@ -6,6 +6,141 @@ import { MotionSubscriptionRegistry } from "../src/main/services/motion-subscrip
 import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotification, parseOnvifMotionNotifications } from "../src/main/services/motion-events.ts";
 import { buildProbeMessage, discoverOnvifDevices, parseProbeMatches } from "../src/main/services/onvif-discovery.ts";
 import { SdCardAdapterRegistry } from "../src/main/services/sd-card-adapter.ts";
+import { cameraTestCredentials } from "../src/main/services/camera-test-credentials.ts";
+
+test("editing a camera tests stored per-service credentials without exposing them to the form", async () => {
+  const camera = { id: "camera", endpoints: [
+    { service: "onvif", url: "http://camera:2020/onvif/device_service" },
+    { service: "rtsp", url: "rtsp://camera:554/stream1" },
+  ] };
+  const loads = [];
+  const load = async (id, service) => {
+    loads.push([id, service]);
+    return { username: "user", password: `${service}-saved` };
+  };
+  for (const endpoint of camera.endpoints) {
+    assert.deepEqual(await cameraTestCredentials({ camera, ...endpoint, username: "user", password: null, load }),
+      { username: "user", password: `${endpoint.service}-saved` });
+  }
+  assert.deepEqual(loads, [["camera", "onvif"], ["camera", "rtsp"]]);
+  assert.deepEqual(await cameraTestCredentials({ camera, service: "rtsp", url: "rtsp://other/live", username: "new-user", password: "new-password", load }),
+    { username: "new-user", password: "new-password" });
+  assert.equal(loads.length, 2, "Explicit passwords must not load stored secrets");
+  for (const url of ["rtsp://other:554/stream1", "rtsp://camera:8554/stream1", "rtsp://camera:554/changed"]) {
+    await assert.rejects(cameraTestCredentials({ camera, service: "rtsp", url, username: "user", password: null, load }), /endereço.*mudou/);
+  }
+  assert.equal(loads.length, 2, "Unregistered destinations must be rejected before loading secrets");
+  await assert.rejects(cameraTestCredentials({ camera, ...camera.endpoints[0], username: "changed", password: null, load }), /usuário mudou/);
+  await assert.rejects(cameraTestCredentials({ camera, ...camera.endpoints[0], username: "user", password: null, load: async () => null }), /Não há senha salva/);
+  assert.deepEqual(await cameraTestCredentials({ camera: null, ...camera.endpoints[0], username: null, password: null, load }), { username: null, password: null });
+});
+import { autoRtspCandidate } from "../src/main/services/camera-auto-config.ts";
+import { presetForOnvifIdentity } from "../src/shared/camera-presets.ts";
+import { OnvifAdapter, createFetchOnvifTransport } from "../src/workers/camera/onvif-adapter.ts";
+import { OnvifSimulator } from "../src/workers/simulators/onvif-simulator.ts";
+import { generateMediaMtxConfig } from "../src/workers/media/mediamtx-config.ts";
+
+test("ONVIF identity uses the local RTSP reference only for specific models", () => {
+  assert.equal(presetForOnvifIdentity("Intelbras", "Mibo iM4-C")?.id, "mibo");
+  assert.equal(presetForOnvifIdentity("TP-Link", "Tapo C310")?.id, "tapo");
+  assert.equal(presetForOnvifIdentity("D-Link", "DCS-942L")?.id, "dlink-942");
+  assert.equal(presetForOnvifIdentity("Haiz", "IP Camera"), null);
+  assert.equal(presetForOnvifIdentity("Unknown", "Tapo C310"), null);
+});
+
+test("automatic RTSP prefers the ONVIF URI and keeps credentials out of the URL", () => {
+  const identity = { manufacturer: "TP-Link", model: "Tapo C310", firmwareVersion: "", serialNumber: "" };
+  assert.deepEqual(autoRtspCandidate({ identity, rtspMainUrl: "rtsp://admin:secret@192.168.1.60/live" }, "192.168.1.60", null), {
+    url: "rtsp://192.168.1.60/live", source: "onvif",
+  });
+  assert.deepEqual(autoRtspCandidate({ identity, rtspMainUrl: null }, "192.168.1.60", null), {
+    url: "rtsp://192.168.1.60:554/stream1", source: "reference",
+  });
+  assert.equal(autoRtspCandidate({ identity: { ...identity, manufacturer: "Haiz" }, rtspMainUrl: null }, "192.168.1.60", null), null);
+});
+
+test("MediaMTX records the original audio track in fMP4 without tying it to player mute", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const result = generateMediaMtxConfig({
+    rtspUrl: "rtsp://camera.local/main",
+    path: "camera-audio",
+    apiToken: "api-token",
+    webrtcToken: "viewer-token",
+    rtmpToken: "rtmp-token",
+    srtToken: "srt-token",
+    httpPort: 18_000,
+    rtspPort: 18_003,
+    rtmpPort: 18_004,
+    configDir: directory,
+    recordPath: join(directory, "recordings", "%path", "%Y-%m-%d", "%H-%M-%S-%f"),
+    recordSegmentDurationMs: 2_000,
+  });
+  const config = await readFile(result.configPath, "utf8");
+  assert.match(config, /source: "rtsp:\/\/camera\.local\/main"/);
+  assert.match(config, /recordFormat: fmp4/);
+  assert.match(config, /recordPartDuration: 1s/);
+  assert.match(config, /recordSegmentDuration: 2000ms/);
+  assert.doesNotMatch(config, /audio.*(?:disable|mute|transcod)/i);
+});
+
+test("ONVIF identity from a simulated camera selects a model-specific RTSP fallback", async (t) => {
+  const camera = new OnvifSimulator({ manufacturer: "TP-Link", model: "Tapo C310" });
+  await camera.start();
+  t.after(() => camera.stop());
+  const info = await new OnvifAdapter({
+    deviceServiceUrl: camera.url,
+    username: "admin",
+    password: "admin",
+    transport: createFetchOnvifTransport(),
+  }).detect();
+  assert.equal(info.identity.model, "Tapo C310");
+  assert.deepEqual(autoRtspCandidate(info, "192.168.1.60", null), {
+    url: "rtsp://192.168.1.60:554/stream1",
+    source: "reference",
+  });
+});
+
+test("ONVIF profiles without optional encoders preserve Intelbras PTZ and service URIs", async () => {
+  for (const includeVideo of [true, false]) {
+    const requests = [];
+    const adapter = new OnvifAdapter({
+      deviceServiceUrl: "http://camera.local/onvif/device_service",
+      transport: {
+        post: async (url, body) => {
+          requests.push({ url, body });
+          let response = "<Success/>";
+          if (body.includes("GetDeviceInformation")) response = "<GetDeviceInformationResponse><Manufacturer>IntelBras</Manufacturer><Model>iM4-C</Model></GetDeviceInformationResponse>";
+          if (body.includes("GetServices")) response = "<GetServicesResponse/>";
+          if (body.includes("GetCapabilities")) response = '<GetCapabilitiesResponse><Capabilities><Media><XAddr>http://camera.local/onvif/media_service</XAddr></Media><PTZ><XAddr>http://camera.local/onvif/ptz_service</XAddr></PTZ></Capabilities></GetCapabilitiesResponse>';
+          if (body.includes("GetProfiles")) response = `<GetProfilesResponse>${[
+            ["MainStream", 1920, 1080, 20], ["SubStream", 640, 480, 15],
+          ].map(([name, width, height, fps], index) => `<Profiles token="MediaProfile${index}"><Name>${name}</Name>${includeVideo ? `<VideoEncoderConfiguration><Encoding>H264</Encoding><Resolution><Width>${width}</Width><Height>${height}</Height></Resolution><RateControl><FrameRateLimit>${fps}</FrameRateLimit></RateControl></VideoEncoderConfiguration>` : ""}<PTZConfiguration token="PTZConfig"/></Profiles>`).join("")}</GetProfilesResponse>`;
+          if (body.includes("GetStreamUri")) response = `<GetStreamUriResponse><MediaUri><Uri>rtsp://camera.local/${body.includes("MediaProfile1") ? "sub" : "main"}</Uri></MediaUri></GetStreamUriResponse>`;
+          if (body.includes("GetSnapshotUri")) response = "<GetSnapshotUriResponse><MediaUri><Uri>http://camera.local/snapshot</Uri></MediaUri></GetSnapshotUriResponse>";
+          return { status: 200, body: `<Envelope><Body>${response}</Body></Envelope>` };
+        },
+      },
+    });
+    const info = await adapter.detect();
+    assert.equal(info.profiles.length, 2, "Missing optional encoders must not discard profiles");
+    assert.equal(info.ptzSupported, true);
+    assert.equal(info.capabilities.ptz, "supported");
+    assert.deepEqual(info.profiles.map(({ audioCodec }) => audioCodec), [null, null]);
+    assert.deepEqual(info.profiles.map(({ codec, width, height, fps }) => [codec, width, height, fps]),
+      includeVideo ? [["H264", 1920, 1080, 20], ["H264", 640, 480, 15]] : [[null, null, null, null], [null, null, null, null]]);
+    assert.equal(info.rtspMainUrl, "rtsp://camera.local/main");
+    assert.equal(info.rtspSubUrl, "rtsp://camera.local/sub");
+    assert.equal(info.snapshotUri, "http://camera.local/snapshot");
+    await adapter.continuousMove({ profileToken: "main", velocity: { pan: 0.2 } });
+    await adapter.stop({ profileToken: "main", panTilt: true });
+    for (const request of requests.slice(-2)) {
+      assert.equal(request.url, "http://camera.local/onvif/ptz_service");
+      assert.match(request.body, /<tptz:ProfileToken>MediaProfile0<\/tptz:ProfileToken>/);
+    }
+    assert.match(requests.at(-2).body, /<tptz:ContinuousMove>/);
+    assert.match(requests.at(-1).body, /<tptz:Stop>/);
+  }
+});
 
 test("SD-card adapter registry selects only explicit camera support", () => {
   const adapter = { id: "test", supports: (camera) => camera.host === "supported", detail: () => "Teste", list: async () => [], download: async () => ({ path: "", imported: false }) };
@@ -61,6 +196,26 @@ test("WS-Discovery merges multiple interfaces, supports selection, and handles n
   assert.deepEqual(scans, ["10.0.0.2"]);
   assert.equal(selected.length, 2);
   assert.deepEqual(await discoverOnvifDevices({ interfaces: [], scanner }), []);
+});
+
+test("WS-Discovery deduplicates by endpoint or identifier and rejects invalid injected results", async () => {
+  const devices = await discoverOnvifDevices({
+    interfaces: [{ name: "Ethernet", address: "192.168.1.2" }],
+    scanner: async () => [
+      { endpointReference: "urn:uuid:front", host: "wrong-host", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: [] },
+      { endpointReference: "urn:uuid:front", host: "192.168.1.31", onvifUrl: "http://192.168.1.31/onvif/device_service", scopes: ["onvif://www.onvif.org/name/Front"], types: [] },
+      { endpointReference: "urn:uuid:garage", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: ["dn:NetworkVideoTransmitter"] },
+      { endpointReference: null, host: "ignored", onvifUrl: "ftp://192.168.1.40/not-onvif", scopes: [], types: [] },
+    ],
+  });
+
+  assert.deepEqual(devices, [{
+    endpointReference: "urn:uuid:front",
+    host: "192.168.1.30",
+    onvifUrl: "http://192.168.1.30/onvif/device_service",
+    scopes: ["onvif://www.onvif.org/name/Front"],
+    types: ["dn:NetworkVideoTransmitter"],
+  }]);
 });
 
 test("WS-Discovery stops an injected scan when cancelled", async () => {

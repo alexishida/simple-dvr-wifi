@@ -26,6 +26,10 @@ export async function run() {
         calls++;
         return { ok: true, value: { duplicate: false } };
       },
+      async update(input) {
+        saved = input;
+        return { ok: true, value: { updated: true } };
+      },
       async testConnection(input) {
         tested = input;
         calls++;
@@ -34,6 +38,16 @@ export async function run() {
           value: {
             status: "connected",
             segments: [{ name: "rtsp", detail: "Conectado" }],
+            identified:
+              input.onvifUrl && !input.rtspUrl
+                ? {
+                    manufacturer: "TP-Link",
+                    model: "Tapo C310",
+                    serialNumber: "test-serial",
+                    rtspUrl: "rtsp://192.168.1.60:554/stream1",
+                    source: "onvif",
+                  }
+                : null,
           },
         };
       },
@@ -159,9 +173,59 @@ export async function run() {
       value("cam-rtsp") === "rtsp://camera/custom",
     "Editing an existing camera must preserve its configuration",
   );
-  render();
-  edit("cam-name", "Garagem");
-  edit("cam-host", "192.168.1.50");
+  testConnection();
+  await tick();
+  check(tested.cameraId === "existing" && tested.password === null,
+    "Blank password must identify the saved camera for main-process credential lookup");
+  edit("cam-pass", "replacement-password");
+  testConnection();
+  await tick();
+  check(tested.cameraId === "existing" && tested.password === "replacement-password",
+    "The password field must be editable and the test must use its current value");
+  submit();
+  await tick();
+  check(saved.id === "existing" && saved.password === "replacement-password",
+    "Saving the edit must persist the replacement password");
+  edit("cam-pass", "");
+  submit();
+  await tick();
+  check(saved.password === null, "Saving a blank password must preserve the stored credential");
+  render({ initial: {
+    name: "Entrada",
+    host: "192.168.1.60",
+    onvifUrl: "http://192.168.1.60/onvif/device_service",
+  } });
+  check(
+    value("cam-rtsp") === "",
+    "Discovery draft should start without a guessed RTSP URL",
+  );
+  testConnection();
+  await tick();
+  check(
+    value("cam-rtsp") === "rtsp://192.168.1.60:554/stream1",
+    "Test did not apply the verified ONVIF stream URI",
+  );
+  submit();
+  await tick();
+  check(
+    saved.model === "Tapo C310" &&
+      saved.serialNumber === "test-serial" &&
+      saved.rtspUrl === value("cam-rtsp"),
+    "Identified camera data was not saved",
+  );
   edit("cam-model", "mibo");
+  submit();
+  await tick();
+  check(
+    saved.manufacturer === "Intelbras" &&
+      saved.model.includes("iM4") &&
+      saved.serialNumber === null,
+    "Changing the preset retained stale ONVIF identity",
+  );
+  render({ editingId: "existing", initial: {
+    name: "Câmera de teste", host: "192.168.1.50", username: "camera-user",
+    onvifUrl: "http://192.168.1.50:2020/onvif/device_service",
+    rtspUrl: "rtsp://192.168.1.50:554/stream1",
+  } });
   return "Preset generation, test/save payloads, validation, manual override and existing-camera editing passed";
 }

@@ -104,6 +104,61 @@ function parseServiceUrl(
   return { host: url.hostname, onvifUrl: url.toString() };
 }
 
+function normalizeDiscoveredDevice(
+  device: DiscoveredOnvifDevice,
+): DiscoveredOnvifDevice | null {
+  const service = parseServiceUrl(device.onvifUrl);
+  if (!service) return null;
+
+  const endpointReference =
+    typeof device.endpointReference === "string" &&
+    device.endpointReference.trim().length > 0 &&
+    device.endpointReference.length <= 2_048
+      ? device.endpointReference.trim()
+      : null;
+  const values = (items: unknown, limit: number): string[] =>
+    Array.isArray(items)
+      ? [
+          ...new Set(
+            items.filter(
+              (item): item is string =>
+                typeof item === "string" && item.length > 0,
+            ),
+          ),
+        ].slice(0, limit)
+      : [];
+
+  return {
+    endpointReference,
+    ...service,
+    scopes: values(device.scopes, 32),
+    types: values(device.types, 16),
+  };
+}
+
+function mergeDevice(
+  devices: DiscoveredOnvifDevice[],
+  candidate: DiscoveredOnvifDevice,
+): void {
+  const normalized = normalizeDiscoveredDevice(candidate);
+  if (!normalized) return;
+  const existing = devices.find(
+    (device) =>
+      device.onvifUrl === normalized.onvifUrl ||
+      (device.endpointReference !== null &&
+        device.endpointReference === normalized.endpointReference),
+  );
+  if (!existing) {
+    if (devices.length < MAX_DEVICES) devices.push(normalized);
+    return;
+  }
+
+  existing.scopes =
+    existing.scopes.length > 0 ? existing.scopes : normalized.scopes;
+  existing.types =
+    existing.types.length > 0 ? existing.types : normalized.types;
+}
+
 export function parseProbeMatches(xml: string): DiscoveredOnvifDevice[] {
   if (Buffer.byteLength(xml, "utf8") > MAX_RESPONSE_BYTES) return [];
   let root: XmlNode;
@@ -113,7 +168,7 @@ export function parseProbeMatches(xml: string): DiscoveredOnvifDevice[] {
     return [];
   }
 
-  const devices = new Map<string, DiscoveredOnvifDevice>();
+  const devices: DiscoveredOnvifDevice[] = [];
   for (const match of findChildren(root, "ProbeMatch")) {
     const xaddrs = (childText(match, "XAddrs") ?? "")
       .split(/\s+/)
@@ -134,17 +189,15 @@ export function parseProbeMatches(xml: string): DiscoveredOnvifDevice[] {
       .split(/\s+/)
       .filter(Boolean)
       .slice(0, 16);
-    const key = `${endpointReference ?? ""}|${service.onvifUrl}`;
-    const previous = devices.get(key);
-    devices.set(key, {
+    mergeDevice(devices, {
       endpointReference,
       ...service,
-      scopes: scopes.length > 0 ? scopes : (previous?.scopes ?? []),
-      types: types.length > 0 ? types : (previous?.types ?? []),
+      scopes,
+      types,
     });
-    if (devices.size >= MAX_DEVICES) break;
+    if (devices.length >= MAX_DEVICES) break;
   }
-  return [...devices.values()];
+  return devices;
 }
 
 function abortedError(): Error {
@@ -154,7 +207,7 @@ function abortedError(): Error {
 const scanInterface: DiscoveryScanner = (network, timeoutMs, signal) => {
   return new Promise((resolve, reject) => {
     const socket = createSocket({ type: "udp4", reuseAddr: true });
-    const devices = new Map<string, DiscoveredOnvifDevice>();
+    const devices: DiscoveredOnvifDevice[] = [];
     let finished = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const finish = (error?: Error): void => {
@@ -169,7 +222,7 @@ const scanInterface: DiscoveryScanner = (network, timeoutMs, signal) => {
         /* socket can already be closed */
       }
       if (error) reject(error);
-      else resolve([...devices.values()]);
+      else resolve(devices);
     };
     const abort = (): void => finish(abortedError());
     if (signal?.aborted) {
@@ -178,8 +231,7 @@ const scanInterface: DiscoveryScanner = (network, timeoutMs, signal) => {
     }
     const receive = (message: Buffer): void => {
       for (const device of parseProbeMatches(message.toString("utf8"))) {
-        const key = `${device.endpointReference ?? ""}|${device.onvifUrl}`;
-        if (devices.has(key) || devices.size < MAX_DEVICES) devices.set(key, device);
+        mergeDevice(devices, device);
       }
     };
     const timeout = setTimeout(() => finish(), timeoutMs);
@@ -197,7 +249,11 @@ const scanInterface: DiscoveryScanner = (network, timeoutMs, signal) => {
             try {
               socket.send(message, DISCOVERY_PORT, DISCOVERY_ADDRESS);
             } catch (error) {
-              finish(error instanceof Error ? error : new Error("Não foi possível continuar a descoberta."));
+              finish(
+                error instanceof Error
+                  ? error
+                  : new Error("Não foi possível continuar a descoberta."),
+              );
             }
           },
           Math.min(1_000, Math.floor(timeoutMs / 2)),
@@ -237,7 +293,9 @@ export async function discoverOnvifDevices(
     return [];
   }
   const results = await Promise.allSettled(
-    selected.map((network) => (input.scanner ?? scanInterface)(network, timeoutMs, input.signal)),
+    selected.map((network) =>
+      (input.scanner ?? scanInterface)(network, timeoutMs, input.signal),
+    ),
   );
   if (input.signal?.aborted) throw abortedError();
   if (results.every((result) => result.status === "rejected")) {
@@ -245,15 +303,12 @@ export async function discoverOnvifDevices(
       "Não foi possível iniciar a descoberta nas interfaces de rede disponíveis.",
     );
   }
-  const devices = new Map<string, DiscoveredOnvifDevice>();
+  const devices: DiscoveredOnvifDevice[] = [];
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
     for (const device of result.value) {
-      const key = `${device.endpointReference ?? ""}|${device.onvifUrl}`;
-      if (devices.has(key) || devices.size < MAX_DEVICES) devices.set(key, device);
+      mergeDevice(devices, device);
     }
   }
-  return [...devices.values()].sort((left, right) =>
-    left.host.localeCompare(right.host),
-  );
+  return devices.sort((left, right) => left.host.localeCompare(right.host));
 }

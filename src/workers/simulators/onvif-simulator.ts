@@ -189,6 +189,7 @@ export class OnvifSimulator {
       return `<Profiles token="${main ? 'main_profile' : 'sub_profile'}">
         <Name>${name}</Name>
         <VideoEncoderConfiguration Encoding="${codec}" Width="${width}" Height="${height}" FrameRate="${fps}"/>
+        <AudioEncoderConfiguration Encoding="AAC"/>
         ${ptz}
       </Profiles>`
     })

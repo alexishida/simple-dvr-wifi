@@ -117,6 +117,12 @@ export const MIGRATIONS: Migration[] = [
     destructive: false,
     up: (db) => db.exec('ALTER TABLE cameras ADD COLUMN firmware_version TEXT'),
   },
+  {
+    version: 9,
+    name: 'camera-profile-audio-codec',
+    destructive: false,
+    up: (db) => db.exec('ALTER TABLE camera_profiles ADD COLUMN audio_codec TEXT'),
+  },
 ]
 
 export interface MigrationResult {

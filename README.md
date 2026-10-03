@@ -50,18 +50,25 @@ O projeto exige Node.js `>=22 <26` e npm somente para desenvolvimento.
 
 ## Começar a monitorar
 
-1. Abra **Câmeras** e escolha **Adicionar manualmente**.
-2. Informe nome, endereço e credenciais da câmera.
-3. Selecione o modelo ou família quando disponível. O aplicativo monta a URL
-   RTSP automaticamente; ajuste canal, stream ou URL se o firmware exigir.
-4. Clique em **Testar conexão** e confirme o cadastro quando a comunicação for
-   validada.
+1. Abra **Câmeras** e escolha **Descobrir na rede** ou **Adicionar manualmente**.
+2. Informe nome e credenciais da câmera. Na descoberta, o endereço ONVIF já vem preenchido.
+3. Clique em **Testar conexão**. Quando a câmera fornece uma URL RTSP via ONVIF,
+   o aplicativo testa e preenche essa URL. Para alguns modelos identificados com
+   precisão, também pode testar um endpoint da [referência local de marca e
+   modelo](docs/referencias-rtsp-marca-modelo.md).
+4. Confira a URL preenchida e confirme o cadastro. Você também pode escolher um
+   preset ou informar uma URL RTSP manualmente.
 5. Em **Live**, organize as câmeras na grade e use os controles para tela cheia,
    snapshot ou gravação.
 
 Os presets aceleram a configuração, mas não substituem a validação. Endpoints
 RTSP podem variar conforme modelo, OEM, firmware e região. As credenciais são
 salvas separadamente da URL; evite inseri-las diretamente no endereço RTSP.
+Uma URL manual não é substituída pela identificação automática.
+
+Ao editar, use **Senha da câmera** para informar uma nova senha, teste e salve as
+alterações. Se o campo ficar vazio, o teste usa a credencial salva para cada serviço
+no endereço cadastrado. Alterações de endereço ou usuário exigem digitar a senha.
 
 ### Fabricantes e famílias predefinidos
 
@@ -172,6 +179,8 @@ src/
 - [Changelog](CHANGELOG.md)
 - [Especificações e mudanças OpenSpec](openspec/)
 - [Avaliação de cartão SD por ONVIF Profile G](docs/onvif-sd-card-evaluation.md)
+- [Plano de validação de cartão SD](docs/sd-card-support-plan.md)
+- [Compatibilidade de áudio](docs/audio-compatibility.md)
 - [Política de binários de mídia](resources/README.md)
 
 ## Licença

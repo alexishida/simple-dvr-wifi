@@ -10,7 +10,7 @@ export interface CameraPreset {
   hint?: string;
 }
 
-// Reference: https://gist.github.com/alexishida/b804c0329e1a71d64336e1f0bcbd20da
+// Reference: docs/referencias-rtsp-marca-modelo.md
 // Keep model/OEM variants separate. Credentials belong in the credential vault,
 // so legacy endpoints that embed passwords in their path are not generated here.
 export const CAMERA_PRESETS: readonly CameraPreset[] = [
@@ -212,6 +212,31 @@ export const CAMERA_PRESETS: readonly CameraPreset[] = [
     subPath: "/12",
   },
 ];
+
+// A manufacturer alone is not enough to identify an OEM-specific RTSP path.
+// These matches are restricted to model families named in the local reference.
+export function presetForOnvifIdentity(
+  manufacturer: string,
+  model: string,
+): CameraPreset | null {
+  const brand = manufacturer.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const name = model.trim().toLowerCase();
+  const matches: ReadonlyArray<{
+    brand: string;
+    model: RegExp;
+    presetId: string;
+  }> = [
+    { brand: "intelbras", model: /\bim4(?:-?c)?\b/i, presetId: "mibo" },
+    { brand: "tplink", model: /\bc310\b/i, presetId: "tapo" },
+    { brand: "dlink", model: /\bdcs-?7010l\b/i, presetId: "dlink-7010" },
+    { brand: "dlink", model: /\bdcs-?942l\b/i, presetId: "dlink-942" },
+    { brand: "zavio", model: /\bb-?5111\b/i, presetId: "zavio" },
+  ];
+  const match = matches.find(
+    (item) => item.brand === brand && item.model.test(name),
+  );
+  return CAMERA_PRESETS.find((preset) => preset.id === match?.presetId) ?? null;
+}
 
 export function buildPresetRtspUrl(
   preset: CameraPreset,

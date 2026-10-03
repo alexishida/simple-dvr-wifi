@@ -424,9 +424,10 @@ test("media metadata migration upgrades an existing version 1 database", () => {
     runMigrations(db, {}, [MIGRATIONS[0]]);
     assert.throws(() => db.prepare("SELECT * FROM media_metadata"));
     const result = runMigrations(db, {}, MIGRATIONS);
-    assert.deepEqual(result.applied, [2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(result.applied, [2, 3, 4, 5, 6, 7, 8, 9]);
     assert.doesNotThrow(() => db.prepare("SELECT * FROM media_metadata"));
     assert.equal(db.prepare("SELECT recording FROM camera_capabilities LIMIT 1").columns()[0]?.name, "recording");
+    assert.equal(db.prepare("SELECT audio_codec FROM camera_profiles LIMIT 1").columns()[0]?.name, "audio_codec");
   } finally {
     db.close();
   }

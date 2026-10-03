@@ -30,8 +30,11 @@ Objetivo: localizar câmeras ONVIF e aproveitar o formulário existente para cad
 - [x] Deduplicar dispositivos encontrados por identificador e endpoint e indicar endereços já cadastrados.
 - [x] Adicionar a ação "Buscar câmeras", com estados de busca, resultado vazio, falha e cancelamento.
 - [x] Preencher o cadastro ao selecionar um dispositivo; o formulário continua permitindo informar credenciais e testar a conexão antes de salvar.
+- [x] Na edição, testar com a credencial salva quando a senha estiver vazia, exigir senha para outro endereço/usuário e validar digitação e envio de uma nova senha pelo formulário.
+- [x] No teste de conexão, usar identidade e GetStreamUri ONVIF para preencher uma URL RTSP validada; tentar a referência por marca/modelo somente para correspondências específicas.
 - [x] Manter cadastro manual e explicar limitações de multicast, VLAN e firewall sem alterar regras do sistema silenciosamente.
-- [ ] Testar múltiplas interfaces, respostas duplicadas ou inválidas, cancelamento e ausência de dispositivos; validar com câmera física.
+- [x] Testar automaticamente múltiplas interfaces, respostas duplicadas ou inválidas, cancelamento e ausência de dispositivos.
+- [ ] Validar com câmera física múltiplas interfaces, respostas duplicadas ou inválidas, cancelamento e ausência de dispositivos.
 
 **Concluído quando:** uma câmera compatível aparece na busca, pode ser cadastrada
 e conectada sem digitar seu endereço, e buscas sem resultado não bloqueiam o app.
@@ -41,12 +44,14 @@ e conectada sem digitar seu endereço, e buscas sem resultado não bloqueiam o a
 Objetivo: reproduzir e preservar áudio disponível nas câmeras. Comunicação por
 microfone/interfone fica fora desta etapa.
 
-- [ ] Identificar presença e codecs de áudio nos streams e registrar a matriz de compatibilidade do pipeline de mídia.
-- [ ] Definir passagem direta ou conversão de áudio conforme compatibilidade; limitar conversões simultâneas e verificar dependências de distribuição.
+- [x] Registrar o codec de áudio anunciado pelos perfis ONVIF e documentar a matriz de compatibilidade do pipeline de mídia.
+- [ ] Confirmar presença e codec efetivos em cada stream com câmeras físicas.
+- [x] Corrigir leitura de perfis ONVIF sem `AudioEncoderConfiguration`: campos opcionais ausentes não descartam os perfis nem ocultam PTZ; regressão cobre URIs e token usado nos comandos. Evidências em `docs/intelbras-im4-c-validation.md`.
+- [x] Definir passagem direta ou conversão de áudio conforme compatibilidade; limitar conversões simultâneas e verificar dependências de distribuição.
 - [x] Habilitar recepção de áudio no player e adicionar volume e mute por câmera, respeitando a interação exigida para reprodução.
 - [x] Iniciar câmeras silenciadas e definir qual câmera pode ser ouvida na grade, tela cheia e reprodução sincronizada.
 - [ ] Separar a preferência de ouvir da preferência de gravar áudio; silenciar o player não deve modificar uma gravação.
-- [ ] Preservar áudio nas gravações manuais, agendadas e por evento, nos segmentos e no pré-buffer quando habilitado.
+- [x] Preservar áudio nas gravações manuais, agendadas e por evento, nos segmentos e no pré-buffer quando habilitado.
 - [x] Preservar áudio na exportação de trechos quando a origem o fornecer; a gravação original e a importação dependem de a origem entregar uma faixa compatível.
 - [x] Tratar câmera sem áudio ou codec incompatível sem interromper o vídeo, mostrando a limitação na interface.
 - [ ] Testar sincronismo de áudio/vídeo, reconexão, mudança de stream, continuidade entre segmentos e reprodução dos arquivos exportados.
@@ -59,10 +64,15 @@ suas gravações com áudio sincronizado, mantendo funcionamento de câmeras só
 Objetivo: ampliar a consulta e importação existentes, preservando o funcionamento
 da Intelbras Mibo iM4-C.
 
-- [ ] Definir os próximos modelos e firmwares a validar; avaliar a Tapo C200 mencionada no README como candidata, sem presumir acesso ao histórico.
-- [ ] Investigar, por modelo, os serviços de busca e reprodução disponíveis, priorizando padrões interoperáveis quando suportados.
-- [ ] Identificar requisitos de autenticação e se o acesso pode funcionar localmente; documentar limitações antes de implementar cada integração.
+- [x] Definir os próximos modelos e firmwares a validar; avaliar a Tapo C200 mencionada no README como candidata, sem presumir acesso ao histórico.
+- [x] Investigar, por modelo, os serviços de busca e reprodução disponíveis, priorizando padrões interoperáveis quando suportados.
+- [x] Identificar requisitos de autenticação e se o acesso pode funcionar localmente; documentar limitações antes de implementar cada integração.
+- [x] Consultar os serviços anunciados pela C200 física (firmware 1.3.17 informado): RTSP acessível com autenticação; ONVIF sem Recording/Search/Replay nas respostas não autenticadas. Evidências em `docs/sd-card-support-plan.md`.
+- [x] Confirmar com o usuário a existência de gravações no microSD da C200 (2026-10-03).
+- [x] Repetir a consulta autenticada na C200: identidade e firmware `1.3.17 Build 260112 Rel.54862n(4555)` confirmados, RTSP principal acessível e Recording/Search/Replay ausentes.
+- [ ] Confirmar a revisão de hardware da C200 e validar um caminho de acesso ao histórico antes de anunciar suporte ao cartão SD.
 - [x] Separar a integração Mibo existente em um adaptador e estabelecer um contrato comum para capacidades, listagem e importação.
+- [x] Consultar a iM4-C física com credenciais salvas: identidade/firmware, dois perfis H.264 na resposta XML e RTSP principal autenticado confirmados; histórico ONVIF não anunciado. Não inclui teste da API Mibo de cartão SD.
 - [ ] Implementar um novo adaptador por vez, selecionado por capacidades ou identificação validada, com indicação explícita de modelo não suportado.
 - [x] Permitir credenciais específicas do serviço quando necessárias, mantendo-as cifradas e separadas de ONVIF/RTSP.
 - [ ] Normalizar datas, fuso horário, duração e identificadores; impedir duplicação de importações na biblioteca.
