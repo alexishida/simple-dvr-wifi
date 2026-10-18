@@ -3,7 +3,7 @@ import { createConnection } from "node:net";
 import { connect as createTlsConnection } from "node:tls";
 
 export type ProbeResult =
-  "ok" | "unreachable" | "timeout" | "auth_error" | "unsupported";
+  "ok" | "unreachable" | "timeout" | "auth_error" | "locked" | "unsupported";
 
 export interface HttpProbeOptions {
   url: string;
@@ -219,6 +219,7 @@ async function probeRtspTcp(
       });
 
     const first = await describe(null);
+    if (/^RTSP\/1\.0 \d{3}[^\r\n]*\blocked\b/i.test(first.text)) return "locked";
     if (/^RTSP\/1\.0 2\d\d/.test(first.text)) return "ok";
 
     if (first.status === 401) {
@@ -235,11 +236,13 @@ async function probeRtspTcp(
         );
         if (!response) return "auth_error";
         const second = await describe(`Digest ${response}`);
+        if (/^RTSP\/1\.0 \d{3}[^\r\n]*\blocked\b/i.test(second.text)) return "locked";
         return /^RTSP\/1\.0 2\d\d/.test(second.text) ? "ok" : "auth_error";
       }
       if (/^Basic/i.test(challenge)) {
         const authorization = buildAuthorization(username, password ?? "");
         const second = await describe(authorization);
+        if (/^RTSP\/1\.0 \d{3}[^\r\n]*\blocked\b/i.test(second.text)) return "locked";
         return /^RTSP\/1\.0 2\d\d/.test(second.text) ? "ok" : "auth_error";
       }
       return "auth_error";

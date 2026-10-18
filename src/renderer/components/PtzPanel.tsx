@@ -39,6 +39,7 @@ export function PtzPanel({
 }: PtzPanelProps): React.JSX.Element {
   const [speed, setSpeed] = useState(0.5);
   const [blocked, setBlocked] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<
     "idle" | "connecting" | "ready" | "error"
@@ -170,12 +171,16 @@ export function PtzPanel({
           ? "Não foi possível conectar o controle PTZ desta câmera."
           : result.error.message,
       );
+    }).catch(() => {
+      if (cancelled) return;
+      setConnectionState("error");
+      setCommandError("Não foi possível consultar o controle PTZ. Verifique a conexão e tente novamente.");
     });
 
     return () => {
       cancelled = true;
     };
-  }, [cameraId, supported, clearRepeat]);
+  }, [cameraId, supported, clearRepeat, connectionAttempt]);
 
   useEffect(() => {
     if (!cameraId || !presetsSupported || connectionState !== "ready") return;
@@ -360,7 +365,13 @@ export function PtzPanel({
       )}
 
       {commandError && (
-        <p className="form-message form-error">{commandError}</p>
+        <p className="form-message form-error" role="alert">{commandError}</p>
+      )}
+
+      {connectionState === "error" && (
+        <button type="button" className="btn btn-secondary" onClick={() => setConnectionAttempt((attempt) => attempt + 1)}>
+          <RefreshIcon size={16} /> Tentar conectar novamente
+        </button>
       )}
 
       {presetsSupported && (

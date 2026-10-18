@@ -151,7 +151,7 @@ export interface MediaApi {
     cameraId: string,
     profile: "main" | "sub",
   ) => Promise<Result<{ released: boolean }>>;
-  status: (cameraId: string) => Promise<Result<MediaSessionStatus | null>>;
+  status: (cameraId: string, profile?: "main" | "sub") => Promise<Result<MediaSessionStatus | null>>;
   whepEndpoint: (
     cameraId: string,
     profile: "main" | "sub",

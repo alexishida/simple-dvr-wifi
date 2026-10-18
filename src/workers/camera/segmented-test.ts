@@ -193,6 +193,8 @@ export async function runSegmentedTest(
             ? ok("rtsp", "Stream RTSP acessível.")
             : result === "auth_error"
               ? error("rtsp", "RTSP rejeitou as credenciais.")
+              : result === "locked"
+                ? error("rtsp", "A câmera bloqueou temporariamente o acesso ao vídeo. Revise a conta da câmera e aguarde o desbloqueio.")
               : error("rtsp", "Stream RTSP inacessível."),
         )
       : skipped("rtsp", "URL RTSP não informada."),

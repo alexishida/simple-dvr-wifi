@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { LiveVideo } from "../src/renderer/components/LiveVideo.tsx";
 import { audioCodecFromSdp } from "../src/renderer/media-codecs.ts";
+import { PtzPanel } from "../src/renderer/components/PtzPanel.tsx";
 
 export async function run() {
   const check = (condition, message) => {
@@ -32,8 +33,13 @@ export async function run() {
   const peers = [];
   let pendingAcquire;
   let delayAcquire = false;
+  const statusCalls = [];
   window.api = {
     media: {
+      async status(cameraId, profile) {
+        statusCalls.push({ cameraId, profile });
+        return { ok: true, value: { state: "running", error: "A câmera bloqueou temporariamente o acesso ao vídeo." } };
+      },
       async acquire(request) {
         acquisitions.push(request);
         if (delayAcquire)
@@ -154,12 +160,38 @@ export async function run() {
       !releases.some((item) => item.cameraId === "slow-camera"),
       "Visibility change released pending acquisition",
     );
+    window.fetch = async () => new Response("source unavailable", {status:500});
+    render("sub", "locked-camera");
+    await waitFor(() => container.textContent.includes("bloqueou temporariamente"));
+    await waitFor(() => releases.some(item=>item.cameraId === "locked-camera"));
+    check(statusCalls.at(-1).profile === "sub", "Error diagnosis must use the selected profile");
     flushSync(() => root.unmount());
-    await waitFor(() => releases.length === 3);
+    await waitFor(() => releases.length === 4);
+    check(releases.filter(item=>item.cameraId === "locked-camera").length === 1, "Blocked viewer must release exactly once");
     check(
       peers.every((peer) => peer.connectionState === "closed"),
       "Unmount leaked a peer",
     );
+    const ptzHost = document.createElement("div");
+    container.append(ptzHost);
+    const ptzRoot = createRoot(ptzHost);
+    let connectAttempts = 0;
+    window.api.ptz = {connect:async () => {
+      connectAttempts++;
+      if (connectAttempts === 1) return {ok:false,error:{message:"A câmera recusou a autenticação ONVIF."}};
+      if (connectAttempts === 2) throw new Error("offline");
+      return {ok:true,value:{connected:true}};
+    }};
+    try {
+      flushSync(() => ptzRoot.render(createElement(PtzPanel, {cameraId:"camera",cameraName:"Test",supported:true,zoomSupported:false,presetsSupported:false})));
+      await waitFor(() => ptzHost.textContent.includes("recusou a autenticação"));
+      const retry = () => [...ptzHost.querySelectorAll("button")].find(button=>button.textContent.includes("Tentar conectar novamente"));
+      flushSync(() => retry().click());
+      await waitFor(() => ptzHost.textContent.includes("Verifique a conexão"));
+      flushSync(() => retry().click());
+      await waitFor(() => !ptzHost.querySelector(".ptz-btn").disabled);
+      check(connectAttempts === 3 && !retry(), "PTZ must recover after an explicit retry");
+    } finally { ptzRoot.unmount(); }
     return {
       passed: true,
       acquisitions: acquisitions.length,

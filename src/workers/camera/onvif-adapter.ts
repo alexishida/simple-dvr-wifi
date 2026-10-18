@@ -101,7 +101,29 @@ function ptzVectorXml(
   return `<tptz:${element}>${components.join("")}</tptz:${element}>`;
 }
 
+export class OnvifAuthenticationError extends Error {
+  constructor() {
+    super("A câmera recusou a autenticação ONVIF. Verifique o usuário e a senha da conta da câmera; o acesso também pode estar temporariamente bloqueado.");
+    this.name = "OnvifAuthenticationError";
+  }
+}
+
+function assertSoapAuthentication(body: string, maxBytes: number): void {
+  let unauthorized = false;
+  try {
+    const node = parseXmlSafe(body, { maxBytes, maxDepth: 14 });
+    const code = queryText(node, "Body/Fault/Code/Subcode/Value") ?? "";
+    const reason = queryText(node, "Body/Fault/Reason/Text") ?? queryText(node, "Body/Fault/faultstring") ?? "";
+    unauthorized = /(?:NotAuthorized|FailedAuthentication|InvalidSecurity)/i.test(code)
+      || /(?:authority failure|not authorized|unauthorized|authentication failed)/i.test(reason);
+  } catch {
+    // A non-XML HTTP error still needs to be handled by its status code.
+  }
+  if (unauthorized) throw new OnvifAuthenticationError();
+}
+
 function successfulSoapBody(body: string, maxBytes: number): string {
+  assertSoapAuthentication(body, maxBytes);
   try {
     const fault = parseXmlSafe(body, { maxBytes, maxDepth: 14 });
     const reason =
@@ -601,6 +623,7 @@ export class OnvifAdapter implements CameraAdapter {
       timeoutMs: this.options.timeoutMs,
       headers,
     });
+    let lastResponse = initial;
     if (initial.status >= 200 && initial.status < 300) {
       return successfulSoapBody(
         initial.body,
@@ -623,6 +646,7 @@ export class OnvifAdapter implements CameraAdapter {
           headers,
         },
       );
+      lastResponse = bare;
       if (bare.status >= 200 && bare.status < 300) {
         return successfulSoapBody(
           bare.body,
@@ -650,6 +674,7 @@ export class OnvifAdapter implements CameraAdapter {
                 headers: { ...headers, Authorization: `Digest ${digest}` },
               },
             );
+            lastResponse = retry;
             if (retry.status >= 200 && retry.status < 300) {
               return successfulSoapBody(
                 retry.body,
@@ -661,7 +686,9 @@ export class OnvifAdapter implements CameraAdapter {
       }
     }
 
-    throw new Error(`ONVIF respondeu com status ${initial.status}.`);
+    assertSoapAuthentication(lastResponse.body, this.options.maxXmlBytes ?? DEFAULT_OPTIONS.maxXmlBytes);
+    if (lastResponse.status === 401 || lastResponse.status === 403) throw new OnvifAuthenticationError();
+    throw new Error(`ONVIF respondeu com status ${lastResponse.status}.`);
   }
 
   private parseXml(body: string) {
@@ -682,7 +709,8 @@ export class OnvifAdapter implements CameraAdapter {
         firmwareVersion: queryText(node, `${base}/FirmwareVersion`) ?? "",
         serialNumber: queryText(node, `${base}/SerialNumber`) ?? "",
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof OnvifAuthenticationError) throw error;
       return null;
     }
   }
@@ -701,7 +729,8 @@ export class OnvifAdapter implements CameraAdapter {
         if (xaddr) return xaddr;
       }
       return null;
-    } catch {
+    } catch (error) {
+      if (error instanceof OnvifAuthenticationError) throw error;
       return null;
     }
   }
@@ -720,7 +749,8 @@ export class OnvifAdapter implements CameraAdapter {
         if (xaddr) return xaddr;
       }
       return null;
-    } catch {
+    } catch (error) {
+      if (error instanceof OnvifAuthenticationError) throw error;
       return null;
     }
   }
@@ -827,7 +857,8 @@ export class OnvifAdapter implements CameraAdapter {
           ptzAvailable: Boolean(ptzConfig),
         };
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof OnvifAuthenticationError) throw error;
       return [];
     }
   }

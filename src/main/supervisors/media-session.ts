@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
+import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   generateMediaMtxConfig,
@@ -62,6 +63,7 @@ export class MediaSession {
   private configResult: ReturnType<typeof generateMediaMtxConfig> | null = null;
   private startPromise: Promise<MediaSessionStatus> | null = null;
   private stopped = false;
+  private sourceLogOffset = 0;
   private exited = false;
   private readonly factory: MediaProcessFactory;
 
@@ -92,6 +94,31 @@ export class MediaSession {
 
   get statusNow(): MediaSessionStatus {
     return { ...this.status };
+  }
+
+  async connectionStatus(): Promise<MediaSessionStatus> {
+    const status = this.statusNow;
+    if (!this.configResult || status.error) return status;
+    const file = await open(this.configResult.configPath.replace(/\.ya?ml$/i, ".log"), "r").catch(() => null);
+    if (!file) return status;
+    try {
+      const { size } = await file.stat();
+      const start = size < this.sourceLogOffset ? 0 : this.sourceLogOffset;
+      const buffer = Buffer.alloc(Math.min(size - start, 16 * 1024));
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, Math.max(start, size - buffer.length));
+      const log = buffer.subarray(0, bytesRead).toString("utf8");
+      if (/server is locked/i.test(log)) {
+        return { ...status, error: "A câmera bloqueou temporariamente o acesso ao vídeo. Revise a conta da câmera e aguarde o desbloqueio antes de tentar novamente." };
+      }
+      if (/(?:401 Unauthorized|403 Forbidden|authentication failed)/i.test(log)) {
+        return { ...status, error: "A câmera rejeitou a autenticação do vídeo. Verifique o usuário e a senha em Câmeras." };
+      }
+      return status;
+    } catch {
+      return status;
+    } finally {
+      await file.close();
+    }
   }
 
   get ports(): { http: number; api: number } | null {
@@ -187,6 +214,8 @@ export class MediaSession {
       sourceOnDemand: this.options.sourceOnDemand,
       configFileName: this.options.configFileName,
     });
+    this.sourceLogOffset = (await stat(this.configResult.configPath.replace(/\.ya?ml$/i, ".log")).catch(() => null))?.size ?? 0;
+    if (this.stopped) return this.status;
 
     this.exited = false;
     let processHandle: MediaProcessHandle;
@@ -458,6 +487,10 @@ export class MediaSessionSupervisor {
 
   status(cameraId: string): MediaSessionStatus | null {
     return this.sessions.get(cameraId)?.statusNow ?? null;
+  }
+
+  async connectionStatus(cameraId: string): Promise<MediaSessionStatus | null> {
+    return this.sessions.get(cameraId)?.connectionStatus() ?? null;
   }
 
   whepEndpoint(

@@ -1344,11 +1344,12 @@ function registerIpcHandlers(): void {
             status: available ? "ok" : "error",
             detail: available ? "ONVIF acessível." : "ONVIF não respondeu.",
           });
-        } catch {
+        } catch (error) {
           segments.push({
             name: "onvif",
             status: "error",
-            detail: "Falha ao consultar o endpoint ONVIF.",
+            detail: error instanceof Error && error.name === "OnvifAuthenticationError"
+              ? error.message : "Falha ao consultar o endpoint ONVIF.",
           });
         }
       } else {
@@ -1384,6 +1385,8 @@ function registerIpcHandlers(): void {
                 : "Stream RTSP acessível."
               : result === "auth_error"
                 ? "Credenciais RTSP rejeitadas."
+                : result === "locked"
+                  ? "A câmera bloqueou temporariamente o acesso ao vídeo. Revise a conta da câmera e aguarde o desbloqueio."
                 : "Stream RTSP inacessível.",
         });
       } else {
@@ -1534,11 +1537,12 @@ function registerIpcHandlers(): void {
               ? `${info.profiles.length} perfil(is) detectado(s).`
               : "O dispositivo não respondeu às operações ONVIF.",
           });
-        } catch {
+        } catch (error) {
           segments.push({
             name: "onvif",
             status: "error",
-            detail: "Falha ao consultar o endpoint ONVIF.",
+            detail: error instanceof Error && error.name === "OnvifAuthenticationError"
+              ? error.message : "Falha ao consultar o endpoint ONVIF.",
           });
         }
       } else {
@@ -1564,7 +1568,7 @@ function registerIpcHandlers(): void {
         finalStatus =
           result === "ok"
             ? "connected"
-            : result === "auth_error"
+            : result === "auth_error" || result === "locked"
               ? "auth_error"
               : "network_error";
         segments.push({
@@ -1575,6 +1579,8 @@ function registerIpcHandlers(): void {
               ? "Stream RTSP acessível."
               : result === "auth_error"
                 ? "Credenciais RTSP rejeitadas."
+                : result === "locked"
+                  ? "A câmera bloqueou temporariamente o acesso ao vídeo. Revise a conta da câmera e aguarde o desbloqueio."
                 : "Stream RTSP inacessível.",
         });
       } else {
@@ -1641,6 +1647,7 @@ function registerIpcHandlers(): void {
         sdCardUsername: sdCardUsername ?? null,
         sdCardPassword: sdCardPassword ?? null,
       });
+      await ptzRegistry?.release(id);
       await refreshMotionPrebuffer(id);
       await motionSubscriptions?.stop(id);
       motionNormalizer.reset(id);
@@ -1732,10 +1739,10 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("media:status", {
-    input: z.object({ cameraId: z.string().uuid() }),
-    handle: async ({ cameraId }) =>
+    input: z.object({ cameraId: z.string().uuid(), profile: z.enum(["main", "sub"]).default("main") }),
+    handle: async ({ cameraId, profile }) =>
       mediaSupervisor
-        ? mediaSupervisor.status(mediaSessionId(cameraId, "main"))
+        ? mediaSupervisor.connectionStatus(mediaSessionId(cameraId, profile))
         : null,
   });
 
@@ -2851,7 +2858,7 @@ async function initializeDatabase(): Promise<void> {
         "onvifUrl=",
         onvifUrl ?? "(sem onvif)",
       );
-      if (!onvifUrl) return null;
+      if (!onvifUrl) throw new Error("Esta câmera não possui um endereço ONVIF configurado. Revise o cadastro em Câmeras.");
       const { OnvifAdapter, createFetchOnvifTransport } =
         await import("../workers/camera/onvif-adapter.js");
       const credential = await cameraCredential(cameraId, "onvif");
@@ -2866,16 +2873,8 @@ async function initializeDatabase(): Promise<void> {
         transport: createFetchOnvifTransport(),
         timeoutMs: 10_000,
       });
-      let ptzSupported = false;
-      try {
-        const info = await adapter.detect();
-        ptzSupported = info.ptzSupported;
-      } catch (error) {
-        console.log(
-          "[ptz:getAdapter] detect() erro:",
-          error instanceof Error ? error.message : String(error),
-        );
-      }
+      const info = await adapter.detect();
+      const ptzSupported = info.ptzSupported;
       console.log("[ptz:getAdapter] ptzSupported=", ptzSupported);
       return ptzSupported ? adapter : null;
     },

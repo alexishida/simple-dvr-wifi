@@ -204,12 +204,21 @@ export const LiveVideo = memo(function LiveVideo({
     }
 
     const connectionTask = connect()
-    void connectionTask.catch((error: unknown) => {
+    void connectionTask.catch(async (error: unknown) => {
+      if (cancelled) return
+      const status = await window.api.media.status(cameraId, profile).catch(() => null)
       if (cancelled) return
       setState('error')
       setMessage(
-        error instanceof Error ? error.message : 'Falha ao abrir o vídeo.',
+        status?.ok && status.value?.error
+          ? status.value.error
+          : error instanceof Error ? error.message : 'Falha ao abrir o vídeo.',
       )
+      if (status?.ok && status.value?.error && mediaRequested) {
+        mediaRequested = false
+        peer?.close()
+        await window.api.media.release(cameraId, profile).catch(() => undefined)
+      }
     })
 
     return () => {

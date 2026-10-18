@@ -36,7 +36,7 @@ test("editing a camera tests stored per-service credentials without exposing the
 });
 import { autoRtspCandidate } from "../src/main/services/camera-auto-config.ts";
 import { presetForOnvifIdentity } from "../src/shared/camera-presets.ts";
-import { OnvifAdapter, createFetchOnvifTransport } from "../src/workers/camera/onvif-adapter.ts";
+import { OnvifAdapter, OnvifAuthenticationError, createFetchOnvifTransport } from "../src/workers/camera/onvif-adapter.ts";
 import { OnvifSimulator } from "../src/workers/simulators/onvif-simulator.ts";
 import { generateMediaMtxConfig } from "../src/workers/media/mediamtx-config.ts";
 
@@ -46,6 +46,23 @@ test("ONVIF identity uses the local RTSP reference only for specific models", ()
   assert.equal(presetForOnvifIdentity("D-Link", "DCS-942L")?.id, "dlink-942");
   assert.equal(presetForOnvifIdentity("Haiz", "IP Camera"), null);
   assert.equal(presetForOnvifIdentity("Unknown", "Tapo C310"), null);
+});
+
+test("ONVIF authentication faults on HTTP 400 cannot become an empty PTZ discovery", async () => {
+  for (const faultOperation of ["GetDeviceInformation", "GetProfiles"]) {
+    const requests = [];
+    const adapter = new OnvifAdapter({
+      deviceServiceUrl: "http://camera/onvif/device_service",
+      username: "user", password: "password",
+      transport: { post: async (_url, body) => {
+        requests.push(body);
+        const fault = body.includes(`<${faultOperation === "GetProfiles" ? "trt" : "tds"}:${faultOperation}`);
+        return { status: fault ? 400 : 200, body: `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>${fault ? '<s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:NotAuthorized</s:Value></s:Subcode></s:Code><s:Reason><s:Text>Authority failure</s:Text></s:Reason></s:Fault>' : ""}</s:Body></s:Envelope>` };
+      } },
+    });
+    await assert.rejects(() => adapter.detect(), error => error instanceof OnvifAuthenticationError && /autenticação ONVIF/.test(error.message));
+    if (faultOperation === "GetDeviceInformation") assert.equal(requests.length, 2, "Discovery must stop when authentication is rejected");
+  }
 });
 
 test("automatic RTSP prefers the ONVIF URI and keeps credentials out of the URL", () => {
@@ -1512,6 +1529,35 @@ test("RTSP probe accepts fragmented status and authentication headers", async (t
     "ok",
   );
   assert.equal(requests, 2);
+});
+
+test("RTSP server lock is distinguished from timeouts and does not trigger authentication retries", async (t) => {
+  let requests = 0;
+  const url = await rtspServer(t, socket => socket.on("data", () => {
+    requests++;
+    socket.write("RTSP/1.0 400 Server is locked\r\nContent-Length: 0\r\n\r\n");
+  }));
+  assert.equal(await probeRtsp({url,username:"user",password:"pass",timeoutMs:1000}), "locked");
+  assert.equal(requests, 1);
+});
+
+test("media connection errors report a source lock without exposing log credentials", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = join(directory, "media.exe");
+  await writeFile(binary, "fixture");
+  await writeFile(join(directory, "mediamtx.log"), "old session: Server is locked\n");
+  const session = new MediaSession({
+    cameraId:"camera",rtspUrl:"rtsp://user:secret@camera/live",path:"camera",binaryPath:binary,expectedHash:"",configDir:directory,
+    processFactory:{spawn:()=>({pid:1,kill(){},onExit(){}})},
+  });
+  t.after(() => session.stop());
+  await session.start();
+  assert.equal((await session.connectionStatus()).error, null, "A previous session's lock must not affect a new connection");
+  const logName = (await readdir(directory)).find(name=>name.endsWith(".yml")).replace(/\.yml$/, ".log");
+  await writeFile(join(directory,logName), "x".repeat(20_000) + "\nERR rtsp://user:secret@camera/live: bad status code: 400 (Server is locked)\n");
+  const status = await session.connectionStatus();
+  assert.match(status.error, /bloqueou temporariamente/);
+  assert.doesNotMatch(status.error, /secret|user|rtsp:/);
 });
 
 test(

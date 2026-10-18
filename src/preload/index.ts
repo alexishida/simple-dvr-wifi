@@ -261,8 +261,8 @@ const api = {
       profile: "main" | "sub",
     ): Promise<Result<{ released: boolean }>> =>
       ipcRenderer.invoke("media:release", { cameraId, profile }),
-    status: (cameraId: string): Promise<Result<MediaSessionStatus | null>> =>
-      ipcRenderer.invoke("media:status", { cameraId }),
+    status: (cameraId: string, profile: "main" | "sub" = "main"): Promise<Result<MediaSessionStatus | null>> =>
+      ipcRenderer.invoke("media:status", { cameraId, profile }),
     whepEndpoint: (
       cameraId: string,
       profile: "main" | "sub",
