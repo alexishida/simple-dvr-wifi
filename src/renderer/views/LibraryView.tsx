@@ -22,7 +22,11 @@ import {
   ShieldIcon,
   TrashIcon,
   VideoIcon,
+  SearchIcon,
+  RefreshIcon,
+  SettingsIcon,
 } from "../icons.js";
+import { RecordingSearch, EMPTY_RECORDING_FILTERS, type RecordingSearchFilters } from "./RecordingSearch.js";
 import { recordingStatusLabel } from "../status.js";
 import { SynchronizedPlayback } from "../components/SynchronizedPlayback.js";
 
@@ -236,6 +240,10 @@ export function LibraryView({
   mode,
 }: LibraryViewProps): React.JSX.Element {
   const [selectedCamera, setSelectedCamera] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState(EMPTY_RECORDING_FILTERS);
+  const [draftSearch, setDraftSearch] = useState(EMPTY_RECORDING_FILTERS);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const [startDate, setStartDate] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -250,6 +258,7 @@ export function LibraryView({
   const [recordings, setRecordings] = useState<RecordingLibraryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [playingRecording, setPlayingRecording] =
@@ -292,10 +301,29 @@ export function LibraryView({
   const [eventVideoFilter, setEventVideoFilter] = useState<"all" | "with-video" | "without-video">("all");
   const pendingMotionPlaybackAt = useRef<string | null>(null);
 
-  useEffect(() => {
-    let active = true;
+  function applySearch(filters: RecordingSearchFilters): void {
     setLoading(true);
     setError(null);
+    setAppliedSearch(filters);
+    setDraftSearch(filters);
+    setSelectedCamera(filters.cameraId);
+    setStartDate(filters.startDate);
+    setStartTime(filters.startTime);
+    setEndDate(filters.endDate);
+    setEndTime(filters.endTime);
+    setOccurrenceFilter(filters.occurrence);
+    setTimelineCamera(filters.cameraId);
+    setTimelineDate(filters.startDate);
+    setCurrentPage(1);
+    setSelectedIds(new Set());
+    setBatchResult(null);
+    setRefreshVersion((version) => version + 1);
+  }
+
+  useEffect(() => {
+    let active = true;
+    if (mode === "snapshots") setLoading(true);
+    setLoadError(null);
     const filters = {
       cameraId: selectedCamera || undefined,
       startAt: localDateTime(startDate, startTime),
@@ -310,7 +338,7 @@ export function LibraryView({
       .then((result) => {
         if (!active) return;
         if (!result.ok) {
-          setError(result.error.message);
+          setLoadError(result.error.message);
         } else if (mode === "snapshots") {
           setSnapshots(result.value as SnapshotRecord[]);
         } else {
@@ -320,7 +348,7 @@ export function LibraryView({
       })
       .catch(() => {
         if (!active) return;
-        setError("Não foi possível carregar a biblioteca.");
+        setLoadError("Não foi possível carregar a biblioteca.");
         setLoading(false);
       });
     return () => {
@@ -554,12 +582,13 @@ export function LibraryView({
     ...sortedRecordings.map((recording) => recording.cameraId),
   ]));
   useEffect(() => {
-    if (mode !== "recordings" || !timelineCameraId || !effectiveTimelineDate) return;
+    if (mode !== "recordings" || !timelineOpen || !timelineCameraId || !effectiveTimelineDate) return;
     let active = true;
     const dayStart = new Date(`${effectiveTimelineDate}T00:00:00`);
     const dayEnd = new Date(dayStart);
     dayEnd.setDate(dayEnd.getDate() + 1);
     setTimelineError(null);
+    setTimelineLoading(true);
     setTimelineRecordings([]);
     setTimelineEvents([]);
     void Promise.all([
@@ -577,9 +606,11 @@ export function LibraryView({
       if (!recordingsResult.ok || !eventsResult.ok) setTimelineError("Não foi possível carregar toda a linha do tempo.");
     }).catch(() => {
       if (active) setTimelineError("Não foi possível carregar a linha do tempo.");
+    }).finally(() => {
+      if (active) setTimelineLoading(false);
     });
     return () => { active = false; };
-  }, [mode, timelineCameraId, effectiveTimelineDate, eventStateFilter, refreshVersion]);
+  }, [mode, timelineOpen, timelineCameraId, effectiveTimelineDate, eventStateFilter, refreshVersion]);
   const visibleTimelineEvents = timelineEvents.filter((event) =>
     eventVideoFilter === "all" || (eventVideoFilter === "with-video" ? event.hasVideo : !event.hasVideo));
   const timelineSegments = useMemo(() => {
@@ -1002,7 +1033,11 @@ export function LibraryView({
   };
 
   return (
-    <div className="panel library-panel">
+    <div className={`panel library-panel${mode === "recordings" ? " recording-library" : ""}`}>
+      <div className="library-workspace">
+      {mode === "recordings" ? (
+        <RecordingSearch cameras={cameras} applied={appliedSearch} draft={draftSearch} onChange={setDraftSearch} loading={loading} onSearch={applySearch} />
+      ) : (
       <div className="library-toolbar">
         <div className="library-summary">
           <span className="library-summary-icon">
@@ -1113,20 +1148,23 @@ export function LibraryView({
         </div>
       </div>
 
+      )}
+      <div className="library-results">
+      {mode === "recordings" && (
+        <div className="recording-results-heading">
+          <div>
+            <h2>Resultados da busca <span className="recording-result-count" role="status">{loading ? "…" : loadError ? "—" : items.length}</span></h2>
+            <p>{selectedCamera ? cameraNames.get(selectedCamera) ?? "Câmera removida" : "Todas as câmeras"} · {startDate || endDate ? `${startDate ? new Date(`${startDate}T12:00:00`).toLocaleDateString("pt-BR") : "Início"}${startTime ? ` às ${startTime}` : ""} até ${endDate ? new Date(`${endDate}T12:00:00`).toLocaleDateString("pt-BR") : "agora"}${endTime ? ` às ${endTime}` : ""}` : "Todo o período"} · {occurrenceFilter === "all" ? "Todos os movimentos" : occurrenceFilter === "with-motion" ? "Com movimento" : "Sem movimento"}</p>
+          </div>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={loading} onClick={() => { setLoading(true); setRefreshVersion((version) => version + 1); }}><RefreshIcon size={16} /> Atualizar</button>
+        </div>
+      )}
+      <details className="library-display-options" open={mode === "snapshots" ? true : undefined}>
+        <summary><SettingsIcon size={16} /> Opções de exibição</summary>
       <div
         className="library-display-controls"
         aria-label="Exibição da biblioteca"
       >
-        {mode === "recordings" && (
-          <div className="library-field">
-            <label className="library-filter-label" htmlFor="recording-occurrence-filter">Ocorrência</label>
-            <select id="recording-occurrence-filter" className="field-input library-control-input" value={occurrenceFilter} onChange={(event) => { setOccurrenceFilter(event.target.value as typeof occurrenceFilter); setCurrentPage(1); }}>
-              <option value="all">Todas as gravações</option>
-              <option value="with-motion">Com movimento</option>
-              <option value="without-motion">Sem movimento</option>
-            </select>
-          </div>
-        )}
         <div className="library-field">
           <label className="library-filter-label" htmlFor={sortId}>
             Ordenar
@@ -1196,7 +1234,10 @@ export function LibraryView({
         </div>
       </div>
 
+      </details>
       {mode === "recordings" && (
+        <details className="recording-timeline-disclosure" onToggle={(event) => setTimelineOpen(event.currentTarget.open)}>
+          <summary><ActivityIcon size={17} /><span>Explorar linha do tempo<small>Veja os horários gravados e as ocorrências de movimento.</small></span></summary>
         <section className="recording-timeline" aria-labelledby="recording-timeline-title">
           <div className="recording-timeline-header">
             <div>
@@ -1250,7 +1291,7 @@ export function LibraryView({
             </div>
           </div>
           {timelineError && <p className="form-message form-error" role="alert">{timelineError}</p>}
-          {timelineCameraId && effectiveTimelineDate ? (
+          {timelineLoading ? <p className="library-loading" role="status">Carregando linha do tempo…</p> : timelineCameraId && effectiveTimelineDate ? (
             <>
               <div className="recording-timeline-hours" aria-hidden="true">
                 <span>00h</span><span>06h</span><span>12h</span><span>18h</span><span>24h</span>
@@ -1311,9 +1352,10 @@ export function LibraryView({
             <p className="recording-timeline-empty">Não há gravações para formar a linha do tempo.</p>
           )}
         </section>
+        </details>
       )}
 
-      {items.length > 0 && (
+      {!loading && !loadError && items.length > 0 && (
         <div className="library-selection-bar" aria-label="Ações em lote">
           <label className="library-selection-toggle">
             <input
@@ -1326,7 +1368,7 @@ export function LibraryView({
           <span className="library-selection-count" aria-live="polite">
             {selectedIds.size} selecionados
           </span>
-          <div className="library-selection-actions">
+          <div className="library-selection-actions" hidden={mode === "recordings" && selectedIds.size === 0}>
             <button
               type="button"
               className="btn btn-secondary btn-sm"
@@ -1377,22 +1419,24 @@ export function LibraryView({
         </div>
       )}
 
-      {error && <p className="form-message form-error">{error}</p>}
+      {error && <p className="form-message form-error" role="alert"><ActivityIcon size={16} /> {error}</p>}
+      {loadError && <div className="recording-search-error" role="alert"><ActivityIcon size={20} /><div><strong>Não foi possível carregar os resultados</strong><p>{loadError}</p></div><button type="button" className="btn btn-secondary" onClick={() => { setLoading(true); setRefreshVersion((version) => version + 1); }}><RefreshIcon size={16} /> Tentar novamente</button></div>}
       {loading ? (
         <p className="library-loading" role="status">
           Carregando biblioteca…
         </p>
-      ) : items.length === 0 ? (
+      ) : loadError ? null : items.length === 0 ? (
         <div className="empty-state">
           <span className="empty-state-icon">
             <Icon size={24} />
           </span>
-          <h3 className="empty-state-title">Nenhum item encontrado</h3>
+          <h3 className="empty-state-title">{mode === "recordings" ? "Nenhuma gravação neste filtro" : "Nenhum item encontrado"}</h3>
           <p className="empty-state-text">
             {mode === "snapshots"
               ? "Os snapshots capturados aparecerão aqui."
-              : "As gravações iniciadas pelo monitoramento aparecerão aqui."}
+              : "Tente outro período ou câmera. As gravações salvas pelo monitoramento aparecem aqui."}
           </p>
+          {mode === "recordings" && <button type="button" className="btn btn-secondary" onClick={() => applySearch(EMPTY_RECORDING_FILTERS)}><SearchIcon size={16} /> Ver todas as gravações</button>}
         </div>
       ) : (
         <>
@@ -1523,7 +1567,7 @@ export function LibraryView({
                         />
                         <span className="sr-only">Selecionar gravação</span>
                       </label>
-                      <div className="recording-preview">
+                      <button type="button" className="recording-preview" disabled={!recording.path} aria-label={`Reproduzir gravação de ${cameraNames.get(recording.cameraId) ?? "câmera removida"}, ${formatDate(recording.startedAt)}`} onClick={() => { setPlaybackError(null); setPlayingRecording(recording); }}>
                         <RecordingPreview
                           recordingId={recording.id}
                           cameraName={
@@ -1532,9 +1576,9 @@ export function LibraryView({
                           }
                         />
                         <span className="library-item-kind">
-                          {recordingStatusLabel(recording.status)}
+                          <RecIcon size={12} /> {recordingStatusLabel(recording.status)}
                         </span>
-                      </div>
+                      </button>
                       <div className="media-card-header">
                         <span className="library-item-icon">
                           <CameraIcon size={18} />
@@ -1599,10 +1643,12 @@ export function LibraryView({
                           type="button"
                           className="btn btn-secondary"
                           disabled={!recording.path}
+                          title="Reproduzir com outras câmeras"
+                          aria-label="Reproduzir com outras câmeras"
                           onClick={() => setSynchronizedRecording(recording)}
                         >
                           <VideoIcon size={16} />
-                          Sincronizar
+                          <span className="sr-only">Sincronizar</span>
                         </button>
                         <button
                           type="button"
@@ -1674,6 +1720,8 @@ export function LibraryView({
           </nav>
         </>
       )}
+      </div>
+      </div>
       {synchronizedRecording && (
         <SynchronizedPlayback
           anchorAt={synchronizedRecording.startedAt}

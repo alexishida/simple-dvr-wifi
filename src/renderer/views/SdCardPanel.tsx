@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import type { SdCardCamera, SdCardRecording } from "../../shared/sd-card.js";
 import {
   CameraIcon,
+  CalendarIcon,
+  CheckIcon,
+  ActivityIcon,
+  FolderIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ExportIcon,
@@ -29,6 +33,10 @@ export function SdCardPanel(): React.JSX.Element {
   const [downloading, setDownloading] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [searched, setSearched] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [loadingCameras, setLoadingCameras] = useState(true);
+  const busy = loading || downloading !== null;
   const pageSize = 20;
 
   useEffect(() => {
@@ -38,6 +46,7 @@ export function SdCardPanel(): React.JSX.Element {
       .then((result) => {
         if (!active) return;
         if (!result.ok) {
+          setFailed(true);
           setMessage(result.error.message);
           return;
         }
@@ -50,7 +59,13 @@ export function SdCardPanel(): React.JSX.Element {
         );
       })
       .catch(() => {
-        if (active) setMessage("Não foi possível carregar as câmeras.");
+        if (active) {
+          setFailed(true);
+          setMessage("Não foi possível carregar as câmeras.");
+        }
+      })
+      .finally(() => {
+        if (active) setLoadingCameras(false);
       });
     return () => {
       active = false;
@@ -65,7 +80,9 @@ export function SdCardPanel(): React.JSX.Element {
   const visible = sorted.slice((page - 1) * pageSize, page * pageSize);
 
   async function search(): Promise<void> {
-    if (!cameraId || !date) return;
+    if (!cameraId || !date || busy) return;
+    setSearched(true);
+    setFailed(false);
     setLoading(true);
     setItems([]);
     setPage(1);
@@ -73,6 +90,7 @@ export function SdCardPanel(): React.JSX.Element {
     try {
       const result = await window.api.sdCard.list(cameraId, date);
       if (!result.ok) {
+        setFailed(true);
         setMessage(result.error.message);
         return;
       }
@@ -83,6 +101,7 @@ export function SdCardPanel(): React.JSX.Element {
           : `${result.value.length} gravações encontradas no cartão.`,
       );
     } catch {
+      setFailed(true);
       setMessage("Não foi possível consultar o cartão SD.");
     } finally {
       setLoading(false);
@@ -90,11 +109,14 @@ export function SdCardPanel(): React.JSX.Element {
   }
 
   async function download(item: SdCardRecording): Promise<void> {
+    if (busy) return;
+    setFailed(false);
     setDownloading(item.id);
     setMessage(null);
     try {
       const result = await window.api.sdCard.download(cameraId, item.id);
       if (!result.ok) {
+        setFailed(true);
         setMessage(result.error.message);
         return;
       }
@@ -105,6 +127,7 @@ export function SdCardPanel(): React.JSX.Element {
       );
       setMessage("Vídeo importado para a biblioteca local.");
     } catch {
+      setFailed(true);
       setMessage("Não foi possível baixar o vídeo.");
     } finally {
       setDownloading(null);
@@ -113,13 +136,22 @@ export function SdCardPanel(): React.JSX.Element {
 
   return (
     <section className="panel sd-card-panel" aria-labelledby="sd-card-title">
-      <div className="sd-card-heading">
+      <div className="sd-card-heading recording-search-heading">
+        <span className="library-summary-icon">
+          <CameraIcon size={22} />
+        </span>
         <div>
           <h3 id="sd-card-title">Gravações no cartão SD</h3>
           <p>Consulte e importe vídeos gravados pela câmera.</p>
         </div>
       </div>
-      <div className="sd-card-controls">
+      <form
+        className="sd-card-controls"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void search();
+        }}
+      >
         <div className="library-field">
           <label className="library-filter-label" htmlFor="sd-card-camera">
             <CameraIcon size={15} /> Câmera
@@ -128,10 +160,13 @@ export function SdCardPanel(): React.JSX.Element {
             id="sd-card-camera"
             className="field-input"
             value={cameraId}
+            disabled={busy || loadingCameras}
             onChange={(event) => {
               setCameraId(event.target.value);
               setItems([]);
               setMessage(null);
+              setSearched(false);
+              setFailed(false);
             }}
           >
             <option value="">Selecione uma câmera</option>
@@ -149,31 +184,34 @@ export function SdCardPanel(): React.JSX.Element {
         </div>
         <div className="library-field">
           <label className="library-filter-label" htmlFor="sd-card-date">
-            Dia
+            <CalendarIcon size={15} /> Dia da gravação
           </label>
           <input
             id="sd-card-date"
             className="field-input library-date-input"
             type="date"
             value={date}
+            required
+            disabled={busy}
             max={today()}
             onChange={(event) => {
               setDate(event.target.value);
               setItems([]);
               setMessage(null);
+              setSearched(false);
+              setFailed(false);
             }}
           />
         </div>
         <button
-          type="button"
-          className="btn btn-secondary"
+          type="submit"
+          className="btn btn-primary"
           disabled={!cameraId || !date || loading || downloading !== null}
-          onClick={() => void search()}
         >
           <SearchIcon size={16} />
           {loading ? "Buscando…" : "Buscar no cartão"}
         </button>
-      </div>
+      </form>
       {cameras.some((camera) => !camera.supported) && (
         <p className="sd-card-note">
           A consulta do cartão ainda não está disponível nos modelos marcados
@@ -181,13 +219,61 @@ export function SdCardPanel(): React.JSX.Element {
         </p>
       )}
       {message && (
-        <p className="sd-card-message" role="status">
+        <p
+          className={`sd-card-message${failed ? " is-error" : ""}`}
+          role={failed ? "alert" : "status"}
+        >
+          {failed ? <ActivityIcon size={17} /> : <CheckIcon size={17} />}{" "}
           {message}
         </p>
       )}
+      {loadingCameras ? (
+        <p className="library-loading" role="status">
+          Carregando câmeras…
+        </p>
+      ) : loading ? (
+        <div className="empty-state" role="status">
+          <SearchIcon size={28} />
+          <h3>Consultando a câmera…</h3>
+          <p>Aguarde enquanto buscamos os vídeos deste dia.</p>
+        </div>
+      ) : (
+        !failed &&
+        items.length === 0 && (
+          <div className="empty-state">
+            <span className="empty-state-icon">
+              <SearchIcon size={28} />
+            </span>
+            <h3 className="empty-state-title">
+              {!cameras.some((camera) => camera.supported)
+                ? "Nenhuma câmera compatível"
+                : searched
+                  ? "Nenhuma gravação neste dia"
+                  : "Encontre vídeos no cartão da câmera"}
+            </h3>
+            <p className="empty-state-text">
+              {!cameras.some((camera) => camera.supported)
+                ? "Cadastre uma câmera compatível com a consulta ao cartão SD."
+                : searched
+                  ? "Escolha outra data e busque novamente."
+                  : "Selecione a câmera e o dia. Depois, importe os vídeos para assistir na biblioteca local."}
+            </p>
+          </div>
+        )
+      )}
       {items.length > 0 && (
         <>
-          <div className="sd-card-list">
+          <div className="sd-card-results-heading">
+            <h3>
+              Vídeos encontrados{" "}
+              <span className="recording-result-count">{items.length}</span>
+            </h3>
+            <p>
+              <FolderIcon size={15} /> Importe para assistir na biblioteca
+              local.
+            </p>
+          </div>
+          <div className="sd-card-list" aria-label="Gravações no cartão SD">
             {visible.map((item) => (
               <div key={item.id} className="sd-card-item">
                 <div>
@@ -203,7 +289,11 @@ export function SdCardPanel(): React.JSX.Element {
                   disabled={item.downloaded || downloading !== null}
                   onClick={() => void download(item)}
                 >
-                  <ExportIcon size={15} />
+                  {item.downloaded ? (
+                    <CheckIcon size={15} />
+                  ) : (
+                    <ExportIcon size={15} />
+                  )}
                   {item.downloaded
                     ? "Na biblioteca"
                     : downloading === item.id

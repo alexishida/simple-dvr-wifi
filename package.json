@@ -15,6 +15,7 @@
     "benchmark:library": "node scripts/run-media-library-benchmark.mjs",
     "test:all": "npm run build && npm test && npm run test:player && node scripts/verify-ptz-onvif.mjs && node scripts/electron-security-smoke.mjs && npm run verify:binaries && npm run lint",
     "test:player": "node scripts/live-video-smoke.mjs",
+    "test:recordings": "node scripts/recordings-smoke.mjs",
     "dev": "node scripts/dev.mjs",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",

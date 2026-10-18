@@ -7,6 +7,8 @@ interface LiveVideoProps {
   cameraName: string
   profile: 'main' | 'sub'
   videoRef?: React.RefObject<HTMLVideoElement | null>
+  actions?: React.ReactNode
+  feedback?: string | null
 }
 
 type PlayerState = 'connecting' | 'playing' | 'error'
@@ -64,6 +66,8 @@ export const LiveVideo = memo(function LiveVideo({
   cameraName,
   profile,
   videoRef: externalVideoRef,
+  actions,
+  feedback,
 }: LiveVideoProps): React.JSX.Element {
   const internalVideoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -282,13 +286,19 @@ export const LiveVideo = memo(function LiveVideo({
         muted={!audioEnabled}
         playsInline
       />
-      <div className="live-audio-controls" aria-label="Áudio da câmera" onClick={(event) => event.stopPropagation()}>
+      <div className="live-video-toolbar" onClick={(event) => event.stopPropagation()}>
+      {feedback && <p className="tile-action-feedback" role="status">{feedback}</p>}
+      <div className="live-video-controls-row">
+      <div className="live-audio-controls" aria-label="Áudio da câmera">
         <button type="button" className="btn-icon" aria-label={audioEnabled ? `Silenciar áudio de ${cameraName}` : `Ativar áudio de ${cameraName}`} title={hasAudio ? (audioEnabled ? 'Silenciar áudio' : 'Ativar áudio') : 'Esta câmera não enviou áudio'} disabled={!hasAudio} onClick={toggleAudio}>
           {audioEnabled ? <VolumeIcon size={16} /> : <VolumeMutedIcon size={16} />}
         </button>
         <input aria-label={`Volume de ${cameraName}`} type="range" min="0" max="100" value={volume} disabled={!hasAudio || !audioEnabled} onChange={changeVolume} />
         {audioState === 'available' && audioCodec && <span className="live-audio-codec">Áudio: {audioCodec}</span>}
         {audioState === 'unavailable' && <span className="live-audio-unavailable" role="status">Sem áudio compatível</span>}
+      </div>
+      {actions}
+      </div>
       </div>
       {state !== 'playing' && (
         <div

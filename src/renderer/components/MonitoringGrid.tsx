@@ -355,40 +355,9 @@ function MonitoringTile({
           cameraName={camera.name}
           profile="sub"
           videoRef={liveVideoRef}
-        />
-        <button
-          type="button"
-          className="btn-icon tile-arrange-action"
-          aria-label="Organizar posição das câmeras"
-          onClick={(event) => {
-            event.stopPropagation();
-            onStartReordering();
-          }}
-        >
-          <MoveIcon size={15} />
-        </button>
-        <button
-          type="button"
-          className="btn-icon tile-edit-action"
-          aria-label={`Editar ${camera.name}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onEdit(camera);
-          }}
-        >
-          <EditIcon size={15} />
-        </button>
-        {recording && (
-          <span
-            className="tile-recording-indicator"
-            role="status"
-            aria-label={`${camera.name} está gravando`}
-            title="Gravando"
-          >
-            <RecIcon size={18} />
-          </span>
-        )}
-        <div className="tile-actions">
+          feedback={actionMessage}
+          actions={
+            <div className="tile-actions">
           <button
             type="button"
             className="btn-icon"
@@ -436,11 +405,41 @@ function MonitoringTile({
             <MaximizeIcon size={16} />
           </button>
         </div>
-        {actionMessage && (
-          <p className="tile-action-feedback" role="status">
-            {actionMessage}
-          </p>
+          }
+        />
+        <button
+          type="button"
+          className="btn-icon tile-arrange-action"
+          aria-label="Organizar posição das câmeras"
+          onClick={(event) => {
+            event.stopPropagation();
+            onStartReordering();
+          }}
+        >
+          <MoveIcon size={15} />
+        </button>
+        <button
+          type="button"
+          className="btn-icon tile-edit-action"
+          aria-label={`Editar ${camera.name}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit(camera);
+          }}
+        >
+          <EditIcon size={15} />
+        </button>
+        {recording && (
+          <span
+            className="tile-recording-indicator"
+            role="status"
+            aria-label={`${camera.name} está gravando`}
+            title="Gravando"
+          >
+            <RecIcon size={18} />
+          </span>
         )}
+
       </div>
     </article>
   );

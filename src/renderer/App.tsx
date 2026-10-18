@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppConfig } from "../shared/config.js";
 import { SettingsView } from "./views/SettingsView.js";
 import { CamerasView } from "./views/CamerasView.js";
@@ -21,6 +21,8 @@ import {
   ImageIcon,
   RecIcon,
   SettingsIcon,
+  MoveIcon,
+  CloseIcon,
 } from "./icons.js";
 import wordmarkUrl from "../../docs/logo/simple-dvr-wifi-wordmark.svg";
 import logoUrl from "../../docs/logo/simple-dvr-wifi-logo.svg";
@@ -91,11 +93,31 @@ function SidebarPtz({
 }: {
   camera: CameraSummary | null;
 }): React.JSX.Element {
+  const [open, setOpen] = useState(false);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    const trigger = triggerRef.current;
+    return () => {
+      dialog?.close();
+      trigger?.focus();
+    };
+  }, [open]);
+
   return (
     <section className="sidebar-ptz" aria-labelledby="sidebar-ptz-title">
-      <p className="sidebar-ptz-title" id="sidebar-ptz-title">
-        Controle PTZ
-      </p>
+      <button ref={triggerRef} type="button" className="btn btn-secondary sidebar-ptz-trigger" id="sidebar-ptz-title" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+        <MoveIcon size={18} /> Controle PTZ
+      </button>
+      <p className="sidebar-ptz-camera">{camera?.name ?? "Selecione uma câmera na live"}</p>
+      {open && <dialog ref={dialogRef} className="modal sidebar-ptz-dialog" aria-labelledby="sidebar-ptz-dialog-title" onCancel={() => setOpen(false)} onClose={() => setOpen(false)}>
+        <header className="sidebar-ptz-dialog-heading">
+          <h2 id="sidebar-ptz-dialog-title">Controle PTZ</h2>
+          <button type="button" className="btn btn-icon" aria-label="Fechar controle PTZ" onClick={() => setOpen(false)}><CloseIcon size={18} /></button>
+        </header>
       <PtzPanel
         cameraId={camera?.active && camera.supportsPtz ? camera.id : null}
         cameraName={camera?.name ?? null}
@@ -103,6 +125,7 @@ function SidebarPtz({
         zoomSupported
         presetsSupported={Boolean(camera?.active && camera.supportsPtz)}
       />
+      </dialog>}
     </section>
   );
 }

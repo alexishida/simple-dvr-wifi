@@ -56,7 +56,9 @@ export function RecordingsView({
           onClick={() => setActiveTab("library")}
         >
           <FolderIcon size={18} />
-          Biblioteca local
+          <span>
+            Biblioteca local<small>Vídeos salvos neste computador</small>
+          </span>
         </button>
         <button
           ref={sdCardTabRef}
@@ -69,7 +71,9 @@ export function RecordingsView({
           onClick={() => setActiveTab("sd-card")}
         >
           <CameraIcon size={18} />
-          Cartão SD
+          <span>
+            Cartão SD<small>Vídeos armazenados na câmera</small>
+          </span>
         </button>
       </div>
       <div
