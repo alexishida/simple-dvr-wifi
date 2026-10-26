@@ -10,6 +10,7 @@ import {
 } from "../src/workers/database/migrations.ts";
 import { SqliteWorker } from "../src/workers/database/worker.ts";
 import { CredentialService } from "../src/main/services/credentials.ts";
+import { CameraManagementService } from "../src/main/services/camera-management.ts";
 import {
   DatabaseSupervisor,
   createInMemoryTransport,
@@ -29,6 +30,59 @@ function memoryDatabase(t) {
     },
   };
 }
+
+test("camera edits preserve separate secrets and persist cleared endpoints", async (t) => {
+  const { worker, request } = memoryDatabase(t);
+  const camera = await request("camera.create", {
+    name: "Original", host: "camera",
+    endpoints: [
+      { service: "onvif", url: "http://camera/onvif" },
+      { service: "rtsp", url: "rtsp://camera/live" },
+      { service: "snapshot", url: "http://camera/snapshot" },
+    ],
+  });
+  const writes = [];
+  const management = new CameraManagementService({
+    request: (op, payload) => worker.dispatch({ id: "edit", op, payload }),
+  }, {
+    getCredentialDetails: async (_id, service) => ({ username: "user", password: `${service}-secret` }),
+    setCredential: async (_id, input) => { writes.push(input); },
+  });
+  const updated = await management.update(camera.id, {
+    name: "Renamed", host: "camera", username: "user", password: null,
+    onvifUrl: null, rtspUrl: "rtsp://camera/new-stream",
+  });
+  assert.equal(updated.name, "Renamed");
+  assert.deepEqual(writes, [], "A blank password must not rewrite either service credential");
+  assert.deepEqual(updated.endpoints, [
+    { service: "rtsp", url: "rtsp://camera/new-stream" },
+    { service: "snapshot", url: "http://camera/snapshot" },
+  ]);
+  await assert.rejects(management.update(camera.id, {
+    name: "Must not persist", host: "other", username: "changed", password: null,
+  }), /usuário mudou/);
+  assert.equal((await request("camera.get", { id: camera.id })).name, "Renamed");
+  await management.update(camera.id, {
+    name: "Renamed", host: "camera", username: "user", password: "replacement",
+  });
+  assert.equal(writes.length, 2);
+  assert.ok(writes.every((entry) => entry.password === "replacement"));
+});
+
+test("camera configuration rolls back name and endpoints when an endpoint write fails", async (t) => {
+  const { worker, request } = memoryDatabase(t);
+  const camera = await request("camera.create", {
+    name: "Original", host: "camera", endpoints: [{ service: "rtsp", url: "rtsp://camera/live" }],
+  });
+  const result = await worker.dispatch({ id: "bad-edit", op: "camera.update", payload: {
+    id: camera.id, name: "Changed", endpoints: [
+      { service: "rtsp", url: null },
+      { service: null, url: "invalid" },
+    ],
+  } });
+  assert.equal(result.ok, false);
+  assert.deepEqual(await request("camera.get", { id: camera.id }), camera);
+});
 
 test('importing an SD card recording preserves the camera time and is idempotent', async (t) => {
   const { worker, request } = memoryDatabase(t)

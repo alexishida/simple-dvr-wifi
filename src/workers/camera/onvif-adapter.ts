@@ -225,10 +225,9 @@ function tapoRelativePanVelocity(
   velocity: Record<string, number>,
 ): Record<string, number> {
   const toStep = (value: number): number => {
-    if (value === 0) return 0;
-    const magnitude = Math.abs(value);
-    const step = magnitude <= 0.25 ? 5 : magnitude <= 0.75 ? 10 : 15;
-    return Math.sign(value) * step;
+    // TranslationGenericSpace uses signed normalized distances, not degrees.
+    // Keep each repeated step small and proportional to the selected speed.
+    return Math.max(-1, Math.min(1, value)) / 10;
   };
   return {
     ...velocity,
@@ -303,6 +302,10 @@ export class OnvifAdapter implements CameraAdapter {
     };
 
     const identity = await this.fetchIdentity();
+    if (identity === null) {
+      info.capabilities.onvif = "error";
+      return info;
+    }
     if (identity) info.identity = identity;
     this.useExplicitPtzSpaces = isTapoDevice(info.identity);
     this.useRelativeMoveForTapoPan = this.useExplicitPtzSpaces;

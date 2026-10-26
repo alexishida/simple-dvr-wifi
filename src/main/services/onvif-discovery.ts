@@ -12,6 +12,7 @@ const MAX_DEVICES = 100;
 export interface DiscoveryInterface {
   address: string;
   name: string;
+  netmask: string;
 }
 
 export interface DiscoveredOnvifDevice {
@@ -50,7 +51,7 @@ export function listDiscoveryInterfaces(): DiscoveryInterface[] {
             !entry.internal &&
             isUsableIpv4(entry.address),
         )
-        .map((entry) => ({ name, address: entry.address })),
+        .map((entry) => ({ name, address: entry.address, netmask: entry.netmask })),
     )
     .sort(
       (left, right) =>
@@ -63,11 +64,11 @@ export function buildProbeMessage(
   messageId = `urn:uuid:${randomUUID()}`,
 ): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://www.w3.org/2005/08/addressing" xmlns:d="http://docs.oasis-open.org/ws-dd/ns/discovery">
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
   <s:Header>
-    <a:Action>http://docs.oasis-open.org/ws-dd/ns/discovery/2009/01/Probe</a:Action>
+    <a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</a:Action>
     <a:MessageID>${messageId}</a:MessageID>
-    <a:To s:mustUnderstand="true">urn:docs-oasis-open-org:ws-dd:ns:discovery:2009:01</a:To>
+    <a:To s:mustUnderstand="true">urn:schemas-xmlsoap-org:ws:2005:04:discovery</a:To>
   </s:Header>
   <s:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></s:Body>
 </s:Envelope>`;
@@ -205,6 +206,7 @@ function abortedError(): Error {
 }
 
 const scanInterface: DiscoveryScanner = (network, timeoutMs, signal) => {
+  if (signal?.aborted) return Promise.reject(abortedError());
   return new Promise((resolve, reject) => {
     const socket = createSocket({ type: "udp4", reuseAddr: true });
     const devices: DiscoveredOnvifDevice[] = [];
@@ -225,10 +227,6 @@ const scanInterface: DiscoveryScanner = (network, timeoutMs, signal) => {
       else resolve(devices);
     };
     const abort = (): void => finish(abortedError());
-    if (signal?.aborted) {
-      abort();
-      return;
-    }
     const receive = (message: Buffer): void => {
       for (const device of parseProbeMatches(message.toString("utf8"))) {
         mergeDevice(devices, device);

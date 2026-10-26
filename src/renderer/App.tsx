@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AppConfig } from "../shared/config.js";
 import { SettingsView } from "./views/SettingsView.js";
 import { CamerasView } from "./views/CamerasView.js";
@@ -12,7 +12,10 @@ import {
 } from "./components/MonitoringGrid.js";
 import { PtzPanel } from "./components/PtzPanel.js";
 import { DashboardLayouts } from "./components/DashboardLayouts.js";
-import type { DashboardGroup, DashboardLayout } from "../shared/dashboard-layout.js";
+import type {
+  DashboardGroup,
+  DashboardLayout,
+} from "../shared/dashboard-layout.js";
 import { useAppStore, subscribeToCameraEvents } from "./store/appStore.js";
 import type { CameraSummary } from "../shared/contracts.js";
 import {
@@ -22,7 +25,6 @@ import {
   RecIcon,
   SettingsIcon,
   MoveIcon,
-  CloseIcon,
 } from "./icons.js";
 import wordmarkUrl from "../../docs/logo/simple-dvr-wifi-wordmark.svg";
 import logoUrl from "../../docs/logo/simple-dvr-wifi-logo.svg";
@@ -88,44 +90,54 @@ function DashboardView({
   );
 }
 
-function SidebarPtz({
+export function SidebarPtz({
   camera,
+  cameras,
+  onSelect,
 }: {
   camera: CameraSummary | null;
+  cameras: CameraSummary[];
+  onSelect: (id: string | null) => void;
 }): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const dialog = dialogRef.current;
-    dialog?.showModal();
-    const trigger = triggerRef.current;
-    return () => {
-      dialog?.close();
-      trigger?.focus();
-    };
-  }, [open]);
-
+  const available = Boolean(camera?.active && camera.hasOnvif);
   return (
     <section className="sidebar-ptz" aria-labelledby="sidebar-ptz-title">
-      <button ref={triggerRef} type="button" className="btn btn-secondary sidebar-ptz-trigger" id="sidebar-ptz-title" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <h2 className="sidebar-ptz-title" id="sidebar-ptz-title">
         <MoveIcon size={18} /> Controle PTZ
-      </button>
-      <p className="sidebar-ptz-camera">{camera?.name ?? "Selecione uma câmera na live"}</p>
-      {open && <dialog ref={dialogRef} className="modal sidebar-ptz-dialog" aria-labelledby="sidebar-ptz-dialog-title" onCancel={() => setOpen(false)} onClose={() => setOpen(false)}>
-        <header className="sidebar-ptz-dialog-heading">
-          <h2 id="sidebar-ptz-dialog-title">Controle PTZ</h2>
-          <button type="button" className="btn btn-icon" aria-label="Fechar controle PTZ" onClick={() => setOpen(false)}><CloseIcon size={18} /></button>
-        </header>
+      </h2>
+      <label className="field-label" htmlFor="sidebar-ptz-camera">
+        Câmera
+      </label>
+      <select
+        id="sidebar-ptz-camera"
+        className="field-input"
+        value={camera?.id ?? ""}
+        onChange={(event) => onSelect(event.target.value || null)}
+      >
+        <option value="">Selecione uma câmera</option>
+        {cameras.map((item) => (
+          <option
+            key={item.id}
+            value={item.id}
+            disabled={!item.active || !item.hasOnvif}
+          >
+            {item.name}
+            {!item.active
+              ? " — desativada"
+              : !item.hasOnvif
+                ? " — sem ONVIF"
+                : ""}
+          </option>
+        ))}
+      </select>
       <PtzPanel
-        cameraId={camera?.active && camera.supportsPtz ? camera.id : null}
+        key={camera?.id ?? "no-camera"}
+        cameraId={available ? (camera?.id ?? null) : null}
         cameraName={camera?.name ?? null}
-        supported={Boolean(camera?.active && camera.supportsPtz)}
+        supported={available}
         zoomSupported
-        presetsSupported={Boolean(camera?.active && camera.supportsPtz)}
+        presetsSupported={available}
       />
-      </dialog>}
     </section>
   );
 }
@@ -139,19 +151,58 @@ export function App(): React.JSX.Element {
     null,
   );
   const cameras = useAppStore((state) => state.cameras);
-  const activeLayout = config?.dashboard.layouts.find((layout) => layout.id === config.dashboard.selectedLayoutId) ?? null;
+  const activeLayout =
+    config?.dashboard.layouts.find(
+      (layout) => layout.id === config.dashboard.selectedLayoutId,
+    ) ?? null;
   const dashboardCameras = activeLayout?.groupId
-    ? cameras.filter((camera) => config?.dashboard.groups.find((group) => group.id === activeLayout.groupId)?.cameraIds.includes(camera.id))
+    ? cameras.filter((camera) =>
+        config?.dashboard.groups
+          .find((group) => group.id === activeLayout.groupId)
+          ?.cameraIds.includes(camera.id),
+      )
     : cameras;
   const saveLayout = (layout: DashboardLayout): void => {
     void window.api.dashboard.saveLayout(layout).then((result) => {
       if (!result.ok || !result.value.saved) return;
-      setConfig((current) => current ? { ...current, dashboard: { ...current.dashboard, layouts: [...current.dashboard.layouts.filter((item) => item.id !== layout.id), layout], selectedLayoutId: layout.id } } : current);
+      setConfig((current) =>
+        current
+          ? {
+              ...current,
+              dashboard: {
+                ...current.dashboard,
+                layouts: [
+                  ...current.dashboard.layouts.filter(
+                    (item) => item.id !== layout.id,
+                  ),
+                  layout,
+                ],
+                selectedLayoutId: layout.id,
+              },
+            }
+          : current,
+      );
     });
   };
   const saveGroup = (group: DashboardGroup): void => {
     void window.api.dashboard.saveGroup(group).then((result) => {
-      if (result.ok && result.value.saved) setConfig((current) => current ? { ...current, dashboard: { ...current.dashboard, groups: [...current.dashboard.groups.filter((item) => item.id !== group.id), group] } } : current);
+      if (result.ok && result.value.saved)
+        setConfig((current) =>
+          current
+            ? {
+                ...current,
+                dashboard: {
+                  ...current.dashboard,
+                  groups: [
+                    ...current.dashboard.groups.filter(
+                      (item) => item.id !== group.id,
+                    ),
+                    group,
+                  ],
+                },
+              }
+            : current,
+        );
     });
   };
   const fullscreenCamera = useAppStore((state) => state.fullscreenCamera);
@@ -214,8 +265,12 @@ export function App(): React.JSX.Element {
           ))}
         </nav>
 
+        <SidebarPtz
+          camera={selectedPtzCamera}
+          cameras={cameras}
+          onSelect={setSelectedPtzCameraId}
+        />
         <div className="sidebar-footer">
-          <SidebarPtz camera={selectedPtzCamera} />
           <p>v0.1.0 · Totalmente local</p>
         </div>
       </aside>
@@ -239,8 +294,95 @@ export function App(): React.JSX.Element {
 
         {section === "dashboard" && (
           <>
-            {config && <DashboardLayouts cameras={cameras} groups={config.dashboard.groups} layouts={config.dashboard.layouts} activeLayout={activeLayout} gridLayout={gridLayout} onSelect={(layout) => setConfig({ ...config, dashboard: { ...config.dashboard, selectedLayoutId: layout?.id ?? null } })} onSaveGroup={saveGroup} onDeleteGroup={(id) => void window.api.dashboard.deleteGroup(id).then((result) => result.ok && result.value.deleted && setConfig((current) => current ? { ...current, dashboard: { ...current.dashboard, groups: current.dashboard.groups.filter((group) => group.id !== id), layouts: current.dashboard.layouts.map((layout) => layout.groupId === id ? { ...layout, groupId: null } : layout) } } : current))} onSaveLayout={saveLayout} onDeleteLayout={(id) => void window.api.dashboard.deleteLayout(id).then((result) => result.ok && result.value.deleted && setConfig((current) => current ? { ...current, dashboard: { ...current.dashboard, layouts: current.dashboard.layouts.filter((layout) => layout.id !== id), selectedLayoutId: current.dashboard.selectedLayoutId === id ? null : current.dashboard.selectedLayoutId } } : current))} />}
-            <DashboardView cameras={dashboardCameras} layout={gridLayout} onPtzSelect={(camera) => setSelectedPtzCameraId(camera.id)} onEditCamera={(camera) => { setCameraToEditId(camera.id); setSection("cameras"); }} selectedPtzCameraId={selectedPtzCameraId} savedLayout={activeLayout} onSlotsChanged={(slots) => activeLayout && saveLayout({ ...activeLayout, columns: gridLayout, slots })} />
+            {config && (
+              <DashboardLayouts
+                cameras={cameras}
+                groups={config.dashboard.groups}
+                layouts={config.dashboard.layouts}
+                activeLayout={activeLayout}
+                gridLayout={gridLayout}
+                onSelect={(layout) =>
+                  setConfig({
+                    ...config,
+                    dashboard: {
+                      ...config.dashboard,
+                      selectedLayoutId: layout?.id ?? null,
+                    },
+                  })
+                }
+                onSaveGroup={saveGroup}
+                onDeleteGroup={(id) =>
+                  void window.api.dashboard
+                    .deleteGroup(id)
+                    .then(
+                      (result) =>
+                        result.ok &&
+                        result.value.deleted &&
+                        setConfig((current) =>
+                          current
+                            ? {
+                                ...current,
+                                dashboard: {
+                                  ...current.dashboard,
+                                  groups: current.dashboard.groups.filter(
+                                    (group) => group.id !== id,
+                                  ),
+                                  layouts: current.dashboard.layouts.map(
+                                    (layout) =>
+                                      layout.groupId === id
+                                        ? { ...layout, groupId: null }
+                                        : layout,
+                                  ),
+                                },
+                              }
+                            : current,
+                        ),
+                    )
+                }
+                onSaveLayout={saveLayout}
+                onDeleteLayout={(id) =>
+                  void window.api.dashboard
+                    .deleteLayout(id)
+                    .then(
+                      (result) =>
+                        result.ok &&
+                        result.value.deleted &&
+                        setConfig((current) =>
+                          current
+                            ? {
+                                ...current,
+                                dashboard: {
+                                  ...current.dashboard,
+                                  layouts: current.dashboard.layouts.filter(
+                                    (layout) => layout.id !== id,
+                                  ),
+                                  selectedLayoutId:
+                                    current.dashboard.selectedLayoutId === id
+                                      ? null
+                                      : current.dashboard.selectedLayoutId,
+                                },
+                              }
+                            : current,
+                        ),
+                    )
+                }
+              />
+            )}
+            <DashboardView
+              cameras={dashboardCameras}
+              layout={gridLayout}
+              onPtzSelect={(camera) => setSelectedPtzCameraId(camera.id)}
+              onEditCamera={(camera) => {
+                setCameraToEditId(camera.id);
+                setSection("cameras");
+              }}
+              selectedPtzCameraId={selectedPtzCameraId}
+              savedLayout={activeLayout}
+              onSlotsChanged={(slots) =>
+                activeLayout &&
+                saveLayout({ ...activeLayout, columns: gridLayout, slots })
+              }
+            />
           </>
         )}
         {section === "cameras" && (

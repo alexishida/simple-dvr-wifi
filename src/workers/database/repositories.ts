@@ -178,19 +178,35 @@ export class CameraRepository {
 
   update(
     id: string,
-    fields: Partial<{ name: string; host: string; port: number | null }>,
+    fields: Partial<{
+      name: string
+      host: string
+      port: number | null
+      endpoints: Array<{ service: CameraEndpoint['service']; url: string | null }>
+    }>,
   ): CameraRecord | null {
     if (!this.getById(id)) return null
     const existing = this.db.prepare('SELECT * FROM cameras WHERE id = ?').get(id) as Row
-    this.db
-      .prepare(`UPDATE cameras SET name = ?, host = ?, port = ?, updated_at = ? WHERE id = ?`)
-      .run(
-        fields.name ?? (existing.name as string),
-        fields.host ?? (existing.host as string),
-        fields.port !== undefined ? fields.port : (existing.port as number | null),
-        nowIso(),
-        id,
-      )
+    this.db.transaction(() => {
+      this.db
+        .prepare(`UPDATE cameras SET name = ?, host = ?, port = ?, updated_at = ? WHERE id = ?`)
+        .run(
+          fields.name ?? (existing.name as string),
+          fields.host ?? (existing.host as string),
+          fields.port !== undefined ? fields.port : (existing.port as number | null),
+          nowIso(),
+          id,
+        )
+      for (const endpoint of fields.endpoints ?? []) {
+        if (endpoint.url === null) {
+          this.db
+            .prepare('DELETE FROM camera_endpoints WHERE camera_id = ? AND service = ?')
+            .run(id, endpoint.service)
+        } else {
+          this.setEndpoint(id, { service: endpoint.service, url: endpoint.url })
+        }
+      }
+    })()
     return this.getById(id)
   }
 

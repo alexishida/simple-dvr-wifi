@@ -5,8 +5,11 @@ import type {
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
-import type { DashboardGroup, DashboardLayout } from "../shared/dashboard-layout.js";
-import type { SdCardCamera, SdCardRecording } from '../shared/sd-card.js';
+import type {
+  DashboardGroup,
+  DashboardLayout,
+} from "../shared/dashboard-layout.js";
+import type { SdCardCamera, SdCardRecording } from "../shared/sd-card.js";
 import type {
   MediaKind,
   MediaMetadata,
@@ -71,17 +74,33 @@ export interface CameraTestResult {
   } | null;
 }
 
+export interface CameraAutoConfigureResult extends CameraTestResult {
+  onvifUrl: string | null;
+}
+
 export interface DiscoveryInterface {
   name: string;
   address: string;
+  netmask: string;
 }
 
 export interface DiscoveredOnvifDevice {
+  identity?: { manufacturer: string | null; model: string | null } | null;
   endpointReference: string | null;
   host: string;
   onvifUrl: string;
   scopes: string[];
   types: string[];
+}
+export interface NetworkCameraResult {
+  endpointReference: string | null;
+  host: string;
+  onvifUrl: string | null;
+  scopes: string[];
+  types: string[];
+  services: Array<"http" | "https" | "rtsp" | "onvif">;
+  identity: { manufacturer: string | null; model: string | null };
+  origins: Array<"active-scan" | "onvif-multicast">;
 }
 
 export interface CameraApi {
@@ -90,8 +109,17 @@ export interface CameraApi {
   details: (id: string) => Promise<Result<CameraEditDetails>>;
   metrics: (id: string) => Promise<Result<CameraMetrics>>;
   discoveryInterfaces: () => Promise<Result<DiscoveryInterface[]>>;
-  discover: (input: { requestId: string; address?: string }) => Promise<Result<DiscoveredOnvifDevice[]>>;
-  cancelDiscovery: (requestId: string) => Promise<Result<{ cancelled: boolean }>>;
+  discover: (input: {
+    requestId: string;
+    address?: string;
+  }) => Promise<Result<DiscoveredOnvifDevice[]>>;
+  discoverActive: (input: {
+    requestId: string;
+    address: string;
+  }) => Promise<Result<NetworkCameraResult[]>>;
+  cancelDiscovery: (
+    requestId: string,
+  ) => Promise<Result<{ cancelled: boolean }>>;
   create: (input: CameraCreateInput) => Promise<Result<CameraCreateResult>>;
   checkDuplicate: (input: {
     host?: string;
@@ -108,6 +136,12 @@ export interface CameraApi {
     username?: string | null;
     password?: string | null;
   }) => Promise<Result<CameraTestResult>>;
+  autoConfigure: (input: {
+    host: string;
+    onvifUrl?: string | null;
+    username?: string | null;
+    password?: string | null;
+  }) => Promise<Result<CameraAutoConfigureResult>>;
   update: (input: {
     id: string;
     name: string;
@@ -151,7 +185,10 @@ export interface MediaApi {
     cameraId: string,
     profile: "main" | "sub",
   ) => Promise<Result<{ released: boolean }>>;
-  status: (cameraId: string, profile?: "main" | "sub") => Promise<Result<MediaSessionStatus | null>>;
+  status: (
+    cameraId: string,
+    profile?: "main" | "sub",
+  ) => Promise<Result<MediaSessionStatus | null>>;
   whepEndpoint: (
     cameraId: string,
     profile: "main" | "sub",
@@ -190,10 +227,22 @@ export interface PtzApi {
   ) => Promise<Result<{ started: boolean }>>;
   stop: (cameraId: string, trigger: PtzStopTrigger) => Promise<Result<void>>;
   status: (cameraId: string) => Promise<Result<PtzControlSnapshot | null>>;
-  listPresets: (cameraId: string) => Promise<Result<Array<{ token: string; name: string }>>>;
-  gotoPreset: (cameraId: string, presetToken: string) => Promise<Result<{ moved: boolean }>>;
-  setPreset: (cameraId: string, name: string, presetToken?: string) => Promise<Result<{ token: string | null }>>;
-  removePreset: (cameraId: string, presetToken: string) => Promise<Result<{ removed: boolean }>>;
+  listPresets: (
+    cameraId: string,
+  ) => Promise<Result<Array<{ token: string; name: string }>>>;
+  gotoPreset: (
+    cameraId: string,
+    presetToken: string,
+  ) => Promise<Result<{ moved: boolean }>>;
+  setPreset: (
+    cameraId: string,
+    name: string,
+    presetToken?: string,
+  ) => Promise<Result<{ token: string | null }>>;
+  removePreset: (
+    cameraId: string,
+    presetToken: string,
+  ) => Promise<Result<{ removed: boolean }>>;
 }
 
 export interface SnapshotCaptureResult {
@@ -247,26 +296,28 @@ export interface LibraryFilter {
 }
 
 export interface LibraryApi {
-  storageUsage: () => Promise<Result<{
-    freeBytes: number | null;
-    totalBytes: number | null;
-    usedBytes: number;
-    byCamera: Array<{ cameraId: string; bytes: number }>;
-  }>>;
+  storageUsage: () => Promise<
+    Result<{
+      freeBytes: number | null;
+      totalBytes: number | null;
+      usedBytes: number;
+      byCamera: Array<{ cameraId: string; bytes: number }>;
+    }>
+  >;
   snapshots: (filters?: LibraryFilter) => Promise<Result<SnapshotRecord[]>>;
   recordings: (
     filters?: LibraryFilter,
   ) => Promise<Result<RecordingLibraryItem[]>>;
   recordingById: (id: string) => Promise<Result<RecordingLibraryItem | null>>;
-  motionEvents: (filters: MotionEventFilter) => Promise<Result<MotionEventRecord[]>>;
+  motionEvents: (
+    filters: MotionEventFilter,
+  ) => Promise<Result<MotionEventRecord[]>>;
   recordingSegments: (id: string) => Promise<Result<RecordingSegmentRecord[]>>;
   metadata: (input: {
     kind: MediaKind;
     mediaId: string;
   }) => Promise<Result<MediaMetadata | null>>;
-  updateMetadata: (
-    input: MediaMetadataInput,
-  ) => Promise<Result<MediaMetadata>>;
+  updateMetadata: (input: MediaMetadataInput) => Promise<Result<MediaMetadata>>;
   recordingPreview: (id: string) => Promise<Result<{ dataUrl: string | null }>>;
   readRecording: (
     id: string,
@@ -284,13 +335,17 @@ export interface LibraryApi {
     jobId: string;
     startAt: string;
     endAt: string;
-  }) => Promise<Result<{
-    exported: boolean;
-    jobId: string;
-    gaps: Array<{ startsAt: string; endsAt: string }>;
-  }>>;
+  }) => Promise<
+    Result<{
+      exported: boolean;
+      jobId: string;
+      gaps: Array<{ startsAt: string; endsAt: string }>;
+    }>
+  >;
   cancelClipExport: (jobId: string) => Promise<Result<{ cancelled: boolean }>>;
-  clipExportStatus: (jobId: string) => Promise<Result<{ active: boolean; percent: number }>>;
+  clipExportStatus: (
+    jobId: string,
+  ) => Promise<Result<{ active: boolean; percent: number }>>;
   deleteSnapshot: (id: string) => Promise<Result<{ deleted: boolean }>>;
   deleteRecording: (id: string) => Promise<Result<{ deleted: boolean }>>;
 }
@@ -298,8 +353,14 @@ export interface LibraryApi {
 export interface ExposedApi {
   sdCard: {
     cameras: () => Promise<Result<SdCardCamera[]>>;
-    list: (cameraId: string, date: string) => Promise<Result<SdCardRecording[]>>;
-    download: (cameraId: string, id: string) => Promise<Result<{ path: string; imported: boolean }>>;
+    list: (
+      cameraId: string,
+      date: string,
+    ) => Promise<Result<SdCardRecording[]>>;
+    download: (
+      cameraId: string,
+      id: string,
+    ) => Promise<Result<{ path: string; imported: boolean }>>;
   };
   cameras: CameraApi;
   config: ConfigApi;
@@ -310,36 +371,108 @@ export interface ExposedApi {
   library: LibraryApi;
   shell: ShellApi;
   alerts: {
-    list: () => Promise<Result<Array<{ id: string; kind: string; cameraId: string | null; message: string; count: number; firstOccurredAt: string; lastOccurredAt: string }>>>;
+    list: () => Promise<
+      Result<
+        Array<{
+          id: string;
+          kind: string;
+          cameraId: string | null;
+          message: string;
+          count: number;
+          firstOccurredAt: string;
+          lastOccurredAt: string;
+        }>
+      >
+    >;
     dismiss: (id: string) => Promise<Result<{ dismissed: boolean }>>;
   };
   diagnostics: {
     export: () => Promise<Result<{ exported: boolean }>>;
   };
   backup: {
-    export: () => Promise<Result<{
-      exported: boolean;
-      preview?: { bytes: number; cameras: number; recordings: number; snapshots: number; schedules: number; hasConfiguration: boolean; credentialsExcluded: boolean };
-    }>>;
-    inspectRestore: () => Promise<Result<{
-      selected: boolean;
-      token?: string;
-      preview?: { bytes: number; cameras: number; recordings: number; snapshots: number; schedules: number; hasConfiguration: boolean; credentialsExcluded: boolean };
-    }>>;
+    export: () => Promise<
+      Result<{
+        exported: boolean;
+        preview?: {
+          bytes: number;
+          cameras: number;
+          recordings: number;
+          snapshots: number;
+          schedules: number;
+          hasConfiguration: boolean;
+          credentialsExcluded: boolean;
+        };
+      }>
+    >;
+    inspectRestore: () => Promise<
+      Result<{
+        selected: boolean;
+        token?: string;
+        preview?: {
+          bytes: number;
+          cameras: number;
+          recordings: number;
+          snapshots: number;
+          schedules: number;
+          hasConfiguration: boolean;
+          credentialsExcluded: boolean;
+        };
+      }>
+    >;
     restore: (token: string) => Promise<Result<{ scheduled: boolean }>>;
   };
   retention: {
-    status: () => Promise<Result<{ lastRunAt: string | null; deleted: number; freedBytes: number; failures: number; noCandidates: boolean }>>;
+    status: () => Promise<
+      Result<{
+        lastRunAt: string | null;
+        deleted: number;
+        freedBytes: number;
+        failures: number;
+        noCandidates: boolean;
+      }>
+    >;
   };
   schedules: {
-    list: (cameraId: string) => Promise<Result<Array<{ id: string; weekday: number; start: string; end: string; enabled: boolean }>>>;
-    replace: (input: { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> }) => Promise<Result<{ saved: boolean }>>;
-    status: (cameraId: string) => Promise<Result<{ active: boolean; source: "manual" | "scheduled" | null; blocked: string | null; nextAt: string | null; appMustRun: boolean }>>;
+    list: (
+      cameraId: string,
+    ) => Promise<
+      Result<
+        Array<{
+          id: string;
+          weekday: number;
+          start: string;
+          end: string;
+          enabled: boolean;
+        }>
+      >
+    >;
+    replace: (input: {
+      cameraId: string;
+      periods: Array<{
+        weekday: number;
+        start: string;
+        end: string;
+        enabled: boolean;
+      }>;
+    }) => Promise<Result<{ saved: boolean }>>;
+    status: (
+      cameraId: string,
+    ) => Promise<
+      Result<{
+        active: boolean;
+        source: "manual" | "scheduled" | null;
+        blocked: string | null;
+        nextAt: string | null;
+        appMustRun: boolean;
+      }>
+    >;
   };
   dashboard: {
     saveGroup: (group: DashboardGroup) => Promise<Result<{ saved: boolean }>>;
     deleteGroup: (id: string) => Promise<Result<{ deleted: boolean }>>;
-    saveLayout: (layout: DashboardLayout) => Promise<Result<{ saved: boolean }>>;
+    saveLayout: (
+      layout: DashboardLayout,
+    ) => Promise<Result<{ saved: boolean }>>;
     deleteLayout: (id: string) => Promise<Result<{ deleted: boolean }>>;
   };
 }

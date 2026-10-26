@@ -35,7 +35,7 @@ export function FullscreenView({
   const recording =
     camera.recordingStatus === 'recording' ||
     camera.recordingStatus === 'starting'
-  const ptzAvailable = camera.active && camera.supportsPtz
+  const ptzAvailable = camera.active && camera.hasOnvif
 
   useEffect(() => {
     backRef.current?.focus()
@@ -196,7 +196,7 @@ export function FullscreenView({
                   presetsSupported
                 />
                 <p className="fullscreen-control-hint">
-                  Mantenha uma direção pressionada para mover. Solte para parar.
+                  Use passos curtos para ajustar o enquadramento ou selecione movimento contínuo.
                 </p>
               </>
             ) : (

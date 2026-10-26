@@ -21,6 +21,7 @@ export interface RtspProbeOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   checkImpl?: (options: RtspCheckOptions) => Promise<ProbeResult>;
+  discoveryOnly?: boolean;
 }
 
 export interface RtspCheckOptions {
@@ -29,6 +30,7 @@ export interface RtspCheckOptions {
   password?: string | null;
   timeoutMs: number;
   signal?: AbortSignal;
+  discoveryOnly?: boolean;
 }
 
 function parseUrl(raw: string): URL {
@@ -114,6 +116,7 @@ export async function probeRtsp(
     });
 
   return checkImpl({
+    discoveryOnly: options.discoveryOnly,
     url,
     username: options.username,
     password: options.password,
@@ -219,6 +222,8 @@ async function probeRtspTcp(
       });
 
     const first = await describe(null);
+    // A valid RTSP error still identifies the service; it does not validate a stream.
+    if (options.discoveryOnly && first.status >= 200 && first.status < 600) return "ok";
     if (/^RTSP\/1\.0 \d{3}[^\r\n]*\blocked\b/i.test(first.text)) return "locked";
     if (/^RTSP\/1\.0 2\d\d/.test(first.text)) return "ok";
 
@@ -248,7 +253,7 @@ async function probeRtspTcp(
       return "auth_error";
     }
 
-    return /^RTSP\/1\.0 2\d\d/.test(first.text) ? "ok" : "timeout";
+    return "unreachable";
   } finally {
     socket.destroy();
   }

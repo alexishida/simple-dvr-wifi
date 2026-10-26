@@ -70,7 +70,9 @@ if (!process.versions.electron) {
         ),
       );
       await mkdir(resolve("test-results/camera-form"), { recursive: true });
-      for (const width of [1440, 900, 390]) {
+      for (const screen of ["choice", "discovery", "ip", "manual", "confirmed"]) {
+        await window.webContents.executeJavaScript(`cameraFormRegression.preview(${JSON.stringify(screen)})`);
+        for (const width of [1440, 900, 390]) {
         window.setContentSize(width, 1000);
         await new Promise((resolveSize) => setTimeout(resolveSize, 100));
         const overflow = await window.webContents.executeJavaScript(
@@ -79,11 +81,12 @@ if (!process.versions.electron) {
         if (overflow)
           throw new Error(`Camera form layout overflow at ${width}px`);
         await writeFile(
-          resolve(`test-results/camera-form/${width}.png`),
+          resolve(`test-results/camera-form/${screen}-${width}.png`),
           (await window.webContents.capturePage()).toPNG(),
         );
+        }
       }
-      console.log("Camera form layout passed at 1440, 900 and 390 pixels.");
+      console.log("Choice, discovery, IP and manual camera layouts passed at 1440, 900 and 390 pixels.");
       clearTimeout(timeout);
       window.destroy();
       app.exit(0);

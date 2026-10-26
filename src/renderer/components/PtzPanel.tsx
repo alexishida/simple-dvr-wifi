@@ -23,11 +23,12 @@ interface PtzPanelProps {
   presetsSupported: boolean;
 }
 
-const SPEED_STEP = 0.25;
+const SPEED_STEP = 0.05;
 const MAX_SPEED = 1;
+const SHORT_MOVE_MS = 200;
 
 function clampSpeed(value: number): number {
-  return Math.min(MAX_SPEED, Math.max(0, value));
+  return Math.min(MAX_SPEED, Math.max(SPEED_STEP, value));
 }
 
 export function PtzPanel({
@@ -38,6 +39,7 @@ export function PtzPanel({
   presetsSupported,
 }: PtzPanelProps): React.JSX.Element {
   const [speed, setSpeed] = useState(0.5);
+  const [shortMoves, setShortMoves] = useState(true);
   const [blocked, setBlocked] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [commandError, setCommandError] = useState<string | null>(null);
@@ -55,6 +57,9 @@ export function PtzPanel({
   const activeAxis = useRef<{ pan: number; tilt: number } | null>(null);
   const activeMove = useRef(false);
   const repeatTimer = useRef<number | null>(null);
+  const shortMoveTimer = useRef<number | null>(null);
+  const movePending = useRef(false);
+  const commandRevision = useRef(0);
 
   useEffect(() => {
     if (!presetsOpen) return;
@@ -72,6 +77,10 @@ export function PtzPanel({
   }, [cameraId]);
 
   const clearRepeat = useCallback(() => {
+    if (shortMoveTimer.current !== null) {
+      window.clearTimeout(shortMoveTimer.current);
+      shortMoveTimer.current = null;
+    }
     if (repeatTimer.current !== null) {
       window.clearInterval(repeatTimer.current);
       repeatTimer.current = null;
@@ -80,48 +89,85 @@ export function PtzPanel({
 
   const dispatchMove = useCallback(
     (velocity: PtzVelocityInput) => {
-      if (!cameraId) return;
+      if (!cameraId || movePending.current) return;
+      const revision = commandRevision.current;
+      movePending.current = true;
       activeMove.current = true;
-      void window.api.ptz.move(cameraId, velocity).then((result) => {
-        const started = result.ok && result.value.started;
-        activeMove.current = started;
-        setCommandError(
-          result.ok
-            ? started
-              ? null
-              : "A câmera não aceitou este movimento PTZ."
-            : result.error.message,
-        );
-        if (!started) clearRepeat();
-      });
+      void window.api.ptz
+        .move(cameraId, velocity)
+        .then((result) => {
+          if (revision !== commandRevision.current) return;
+          const started = result.ok && result.value.started;
+          activeMove.current = started;
+          setCommandError(
+            result.ok
+              ? started
+                ? null
+                : "A câmera não aceitou este movimento PTZ."
+              : result.error.message,
+          );
+          if (!started) clearRepeat();
+        })
+        .catch(() => {
+          if (revision !== commandRevision.current) return;
+          clearRepeat();
+          setCommandError(
+            "Falha ao enviar o movimento. Solte o controle e tente novamente.",
+          );
+        })
+        .finally(() => {
+          movePending.current = false;
+        });
+    },
+    [cameraId, clearRepeat],
+  );
+
+  const stopMove = useCallback(
+    (trigger: "pointer_release" | "key_release" | "blur" | "unmount", force = false) => {
+      clearRepeat();
+      if (!cameraId || (!force && !activeMove.current && !activeAxis.current)) return;
+      commandRevision.current++;
+      activeAxis.current = null;
+      activeMove.current = false;
+      void window.api.ptz
+        .stop(cameraId, trigger)
+        .then((result) => {
+          if (!result.ok) {
+            setBlocked(true);
+            setCommandError(result.error.message);
+          } else {
+            setBlocked(false);
+            setCommandError(null);
+          }
+        })
+        .catch(() => {
+          setBlocked(true);
+          setCommandError(
+            "Não foi possível confirmar a parada. Tente parar novamente.",
+          );
+        });
     },
     [cameraId, clearRepeat],
   );
 
   const startMove = useCallback(
     (velocity: PtzVelocityInput) => {
-      if (connectionState !== "ready" || blocked) return;
+      if (connectionState !== "ready" || blocked || movePending.current) return;
       clearRepeat();
       dispatchMove(velocity);
-      repeatTimer.current = window.setInterval(
-        () => dispatchMove(velocity),
-        500,
-      );
+      if (shortMoves) {
+        shortMoveTimer.current = window.setTimeout(
+          () => stopMove("pointer_release"),
+          SHORT_MOVE_MS,
+        );
+      } else {
+        repeatTimer.current = window.setInterval(
+          () => dispatchMove(velocity),
+          500,
+        );
+      }
     },
-    [connectionState, blocked, clearRepeat, dispatchMove],
-  );
-
-  const stopMove = useCallback(
-    (trigger: "pointer_release" | "key_release" | "blur" | "unmount") => {
-      clearRepeat();
-      if (!cameraId || (!activeMove.current && !activeAxis.current)) return;
-      activeAxis.current = null;
-      activeMove.current = false;
-      void window.api.ptz.stop(cameraId, trigger).then((result) => {
-        if (!result.ok) setBlocked(true);
-      });
-    },
-    [cameraId, clearRepeat],
+    [connectionState, blocked, clearRepeat, dispatchMove, shortMoves, stopMove],
   );
 
   const pressAxis = useCallback(
@@ -138,14 +184,20 @@ export function PtzPanel({
 
   useEffect(() => {
     const onBlur = (): void => void stopMove("blur");
+    const onVisibility = (): void => {
+      if (document.hidden) stopMove("blur");
+    };
     window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
       void stopMove("unmount");
     };
   }, [stopMove]);
 
   useEffect(() => {
+    commandRevision.current++;
     setBlocked(false);
     setCommandError(null);
     activeAxis.current = null;
@@ -159,23 +211,28 @@ export function PtzPanel({
 
     let cancelled = false;
     setConnectionState("connecting");
-    void window.api.ptz.connect(cameraId).then((result) => {
-      if (cancelled) return;
-      if (result.ok && result.value.connected) {
-        setConnectionState("ready");
-        return;
-      }
-      setConnectionState("error");
-      setCommandError(
-        result.ok
-          ? "Não foi possível conectar o controle PTZ desta câmera."
-          : result.error.message,
-      );
-    }).catch(() => {
-      if (cancelled) return;
-      setConnectionState("error");
-      setCommandError("Não foi possível consultar o controle PTZ. Verifique a conexão e tente novamente.");
-    });
+    void window.api.ptz
+      .connect(cameraId)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.ok && result.value.connected) {
+          setConnectionState("ready");
+          return;
+        }
+        setConnectionState("error");
+        setCommandError(
+          result.ok
+            ? "Não foi possível conectar o controle PTZ desta câmera."
+            : result.error.message,
+        );
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setConnectionState("error");
+        setCommandError(
+          "Não foi possível consultar o controle PTZ. Verifique a conexão e tente novamente.",
+        );
+      });
 
     return () => {
       cancelled = true;
@@ -183,11 +240,26 @@ export function PtzPanel({
   }, [cameraId, supported, clearRepeat, connectionAttempt]);
 
   useEffect(() => {
-    if (!cameraId || !presetsSupported || connectionState !== "ready") return;
-    void window.api.ptz.status(cameraId).then((result) => {
-      if (result.ok && result.value) setBlocked(result.value.stopBlocked);
-    });
-  }, [cameraId, presetsSupported, connectionState]);
+    if (!cameraId || connectionState !== "ready") return;
+    let cancelled = false;
+    const refresh = (): void => {
+      void window.api.ptz
+        .status(cameraId)
+        .then((result) => {
+          if (!cancelled && result.ok && result.value)
+            setBlocked(result.value.stopBlocked);
+        })
+        .catch(() => {
+          /* Command errors remain visible; a failed status poll cannot confirm a stop. */
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 750);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [cameraId, connectionState]);
 
   const loadPresets = useCallback(() => {
     if (!cameraId || !presetsSupported) return;
@@ -260,8 +332,13 @@ export function PtzPanel({
         void stopMove("pointer_release");
       }}
       onPointerCancel={() => void stopMove("pointer_release")}
+      onLostPointerCapture={() => stopMove("pointer_release")}
+      onBlur={() => stopMove("blur")}
       onKeyDown={(event) => {
-        if (event.key === " " || event.key === "Enter") pressAxis(pan, tilt);
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          if (!event.repeat) pressAxis(pan, tilt);
+        }
       }}
       onKeyUp={(event) => {
         if (event.key === " " || event.key === "Enter")
@@ -292,7 +369,16 @@ export function PtzPanel({
         <div className="ptz-row">{direction(0, 1, "Cima")}</div>
         <div className="ptz-row">
           {direction(-1, 0, "Esquerda")}
-          <span className="ptz-center" aria-hidden="true" />
+          <button
+            type="button"
+            className="ptz-center"
+            aria-label="Parar movimento"
+            title="Parar movimento"
+            disabled={connectionState !== "ready"}
+            onClick={() => stopMove("pointer_release", true)}
+          >
+            <CloseIcon size={18} />
+          </button>
           {direction(1, 0, "Direita")}
         </div>
         <div className="ptz-row">{direction(0, -1, "Baixo")}</div>
@@ -315,6 +401,18 @@ export function PtzPanel({
               void stopMove("pointer_release");
             }}
             onPointerCancel={() => void stopMove("pointer_release")}
+            onLostPointerCapture={() => stopMove("pointer_release")}
+            onBlur={() => stopMove("blur")}
+            onKeyDown={(event) => {
+              if (event.key === " " || event.key === "Enter") {
+                event.preventDefault();
+                if (!event.repeat) startMove({ zoom: speed });
+              }
+            }}
+            onKeyUp={(event) => {
+              if (event.key === " " || event.key === "Enter")
+                stopMove("key_release");
+            }}
             disabled={controlsDisabled}
           >
             +
@@ -334,6 +432,18 @@ export function PtzPanel({
               void stopMove("pointer_release");
             }}
             onPointerCancel={() => void stopMove("pointer_release")}
+            onLostPointerCapture={() => stopMove("pointer_release")}
+            onBlur={() => stopMove("blur")}
+            onKeyDown={(event) => {
+              if (event.key === " " || event.key === "Enter") {
+                event.preventDefault();
+                if (!event.repeat) startMove({ zoom: -speed });
+              }
+            }}
+            onKeyUp={(event) => {
+              if (event.key === " " || event.key === "Enter")
+                stopMove("key_release");
+            }}
             disabled={controlsDisabled}
           >
             −
@@ -342,14 +452,34 @@ export function PtzPanel({
       )}
 
       <div className="ptz-speed">
+        <label className="field-label" htmlFor={`${presetId}-mode`}>
+          Movimento
+        </label>
+        <select
+          id={`${presetId}-mode`}
+          className="field-input"
+          value={shortMoves ? "short" : "continuous"}
+          onChange={(event) => {
+            stopMove("blur");
+            setShortMoves(event.target.value === "short");
+          }}
+        >
+          <option value="short">Passos curtos</option>
+          <option value="continuous">Contínuo ao segurar</option>
+        </select>
+        <p className="field-hint">
+          {shortMoves
+            ? "Um passo por toque, com parada automática em 0,2 s."
+            : "Mantenha pressionado para mover. Solte para parar."}
+        </p>
         <label className="field-label" htmlFor="ptz-speed">
-          Velocidade
+          Velocidade <span>{Math.round(speed * 100)}%</span>
         </label>
         <input
           id="ptz-speed"
           className="field-input"
           type="range"
-          min={0}
+          min={SPEED_STEP}
           max={MAX_SPEED}
           step={SPEED_STEP}
           value={speed}
@@ -359,17 +489,47 @@ export function PtzPanel({
       </div>
 
       {blocked && (
-        <p className="form-message form-error">
-          Movimento bloqueado após falha de parada. Aguarde a reconciliação.
-        </p>
+        <>
+          <p className="form-message form-error">
+            Movimento bloqueado até confirmar a parada.
+          </p>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              if (!cameraId) return;
+              void window.api.ptz
+                .stop(cameraId, "failure")
+                .then((result) => {
+                  if (result.ok) {
+                    setBlocked(false);
+                    setCommandError(null);
+                  } else setCommandError(result.error.message);
+                })
+                .catch(() =>
+                  setCommandError(
+                    "Não foi possível confirmar a parada. Tente novamente.",
+                  ),
+                );
+            }}
+          >
+            <CloseIcon size={16} /> Tentar parar novamente
+          </button>
+        </>
       )}
 
       {commandError && (
-        <p className="form-message form-error" role="alert">{commandError}</p>
+        <p className="form-message form-error" role="alert">
+          {commandError}
+        </p>
       )}
 
       {connectionState === "error" && (
-        <button type="button" className="btn btn-secondary" onClick={() => setConnectionAttempt((attempt) => attempt + 1)}>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={() => setConnectionAttempt((attempt) => attempt + 1)}
+        >
           <RefreshIcon size={16} /> Tentar conectar novamente
         </button>
       )}

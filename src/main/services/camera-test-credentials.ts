@@ -18,7 +18,7 @@ export async function cameraTestCredentials(input: {
     throw new Error('O endereço do serviço mudou. Digite a senha para testar este endereço.')
   }
   const stored = await input.load(input.camera.id, input.service)
-  if (!stored) throw new Error('Não há senha salva para este serviço. Preencha o campo Senha da câmera para testar.')
+  if (!stored) return { username: input.username, password: null }
   if (input.username && input.username !== stored.username) {
     throw new Error('O usuário mudou. Digite a senha para testar com este usuário.')
   }

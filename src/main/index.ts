@@ -61,6 +61,7 @@ import {
   autoRtspCandidate,
   type AutoRtspCandidate,
 } from "./services/camera-auto-config.js";
+import { autoConfigureCameraHost } from "./services/camera-host-auto-config.js";
 import { MediaSessionSupervisor } from "./supervisors/media-session.js";
 import { expectedMediaMtxHashFromManifest } from "../workers/media/mediamtx-config.js";
 import { PtzControllerRegistry } from "./services/ptz-registry.js";
@@ -69,14 +70,35 @@ import { ClipExportService } from "./services/clip-export.js";
 import { FfmpegRunner } from "../workers/media/ffmpeg-runner.js";
 import { LocalAlertCenter } from "./services/alert-center.js";
 import { selectRetentionCandidates } from "./services/retention-policy.js";
-import { SchedulePeriodSchema, isScheduledAt, nextScheduledAt, type SchedulePeriod } from "../shared/recording-schedule.js";
-import { RecordingScheduler, shouldScheduleRecording } from "./services/recording-scheduler.js";
+import {
+  SchedulePeriodSchema,
+  isScheduledAt,
+  nextScheduledAt,
+  type SchedulePeriod,
+} from "../shared/recording-schedule.js";
+import {
+  RecordingScheduler,
+  shouldScheduleRecording,
+} from "./services/recording-scheduler.js";
 import { MotionSubscriptionRegistry } from "./services/motion-subscriptions.js";
-import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotifications } from "./services/motion-events.js";
+import {
+  MotionEventNormalizer,
+  MotionRecordingTimers,
+  MOTION_MISSING_END_TIMEOUT_MS,
+  parseOnvifMotionNotifications,
+} from "./services/motion-events.js";
 import { MotionPrebufferService } from "./services/motion-prebuffer.js";
-import { discoverOnvifDevices, listDiscoveryInterfaces } from "./services/onvif-discovery.js";
+import {
+  discoverOnvifDevices,
+  listDiscoveryInterfaces,
+} from "./services/onvif-discovery.js";
+import { discoverActiveNetworkCameras } from "./services/network-camera-discovery.js";
+import { identifyDiscoveredOnvifDevices } from "./services/onvif-discovery-identity.js";
 import { AppConfigSchema, type AppConfig } from "../shared/config.js";
-import { DashboardGroupSchema, DashboardLayoutSchema } from "../shared/dashboard-layout.js";
+import {
+  DashboardGroupSchema,
+  DashboardLayoutSchema,
+} from "../shared/dashboard-layout.js";
 import type { CameraEditDetails, CameraSummary } from "../shared/contracts.js";
 import type {
   CameraRecord,
@@ -107,7 +129,10 @@ let ptzRegistry: PtzControllerRegistry | null = null;
 let config: AppConfig | null = null;
 let configRepository: ConfigRepository | null = null;
 let backupService: BackupService | null = null;
-const restoreCandidates = new Map<string, { source: string; preview: BackupPreview }>();
+const restoreCandidates = new Map<
+  string,
+  { source: string; preview: BackupPreview }
+>();
 const activeDiscoveries = new Map<string, AbortController>();
 const activeRecordings = new Map<
   string,
@@ -115,13 +140,21 @@ const activeRecordings = new Map<
 >();
 const recordingSources = new Map<string, "manual" | "scheduled" | "motion">();
 const motionStopTimers = new MotionRecordingTimers((cameraId, reason) => {
-  void withRecordingLock(cameraId, () => recordingSources.get(cameraId) === "motion"
-    ? stopActiveRecording(cameraId)
-    : Promise.resolve({ stopped: false, saved: false })).catch(() => {
-    localAlerts.report("recording_interrupted", "Não foi possível finalizar a gravação por movimento.", cameraId);
-  }).finally(() => {
-    if (reason === "missing-end") motionNormalizer.reset(cameraId);
-  });
+  void withRecordingLock(cameraId, () =>
+    recordingSources.get(cameraId) === "motion"
+      ? stopActiveRecording(cameraId)
+      : Promise.resolve({ stopped: false, saved: false }),
+  )
+    .catch(() => {
+      localAlerts.report(
+        "recording_interrupted",
+        "Não foi possível finalizar a gravação por movimento.",
+        cameraId,
+      );
+    })
+    .finally(() => {
+      if (reason === "missing-end") motionNormalizer.reset(cameraId);
+    });
 });
 const scheduleSuppressedUntil = new Map<string, number>();
 let recordingScheduler: RecordingScheduler | null = null;
@@ -142,13 +175,23 @@ let libraryStorageCache: {
   };
 } | null = null;
 let libraryMutation: Promise<void> = Promise.resolve();
-let retentionStatus = { lastRunAt: null as string | null, deleted: 0, freedBytes: 0, failures: 0, noCandidates: true };
+let retentionStatus = {
+  lastRunAt: null as string | null,
+  deleted: 0,
+  freedBytes: 0,
+  failures: 0,
+  noCandidates: true,
+};
 const localAlerts = new LocalAlertCenter();
 
-async function withLibraryMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+async function withLibraryMutationLock<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
   const previous = libraryMutation;
   let release!: () => void;
-  libraryMutation = new Promise<void>((resolveRelease) => { release = resolveRelease; });
+  libraryMutation = new Promise<void>((resolveRelease) => {
+    release = resolveRelease;
+  });
   await previous.catch(() => undefined);
   try {
     return await operation();
@@ -274,7 +317,10 @@ async function cameraCredential(
   const services = await credentials.listCredentialServices(cameraId);
   if (!services.includes(service)) {
     if (
-      (service === "snapshot" || service === "rtsp" || service === "ptz" || service === "sd_card") &&
+      (service === "snapshot" ||
+        service === "rtsp" ||
+        service === "ptz" ||
+        service === "sd_card") &&
       services.includes("onvif")
     ) {
       return credentials.getCredentialDetails(cameraId, "onvif");
@@ -401,43 +447,116 @@ function getClipExporter(): ClipExportService {
   return clipExporter;
 }
 
-async function runRetentionCleanup(): Promise<{ deleted: number; freedBytes: number }> {
-  if (!config?.retention.enabled || !database) return { deleted: 0, freedBytes: 0 };
+async function runRetentionCleanup(): Promise<{
+  deleted: number;
+  freedBytes: number;
+}> {
+  if (!config?.retention.enabled || !database)
+    return { deleted: 0, freedBytes: 0 };
   const { maxAgeDays, maxBytes } = config.retention;
   if (maxAgeDays === 0 && maxBytes === 0) {
-    retentionStatus = { lastRunAt: new Date().toISOString(), deleted: 0, freedBytes: 0, failures: 0, noCandidates: true };
+    retentionStatus = {
+      lastRunAt: new Date().toISOString(),
+      deleted: 0,
+      freedBytes: 0,
+      failures: 0,
+      noCandidates: true,
+    };
     return { deleted: 0, freedBytes: 0 };
   }
-  const recordingsRoot = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
-  const snapshotsRoot = resolve(config.snapshotDir || resolve(userDataPath, "snapshots"));
-  type Candidate = { kind: "snapshot" | "recording"; id: string; timestamp: number; bytes: number; paths: string[] };
+  const recordingsRoot = resolve(
+    config.recordingsDir || resolve(userDataPath, "recordings"),
+  );
+  const snapshotsRoot = resolve(
+    config.snapshotDir || resolve(userDataPath, "snapshots"),
+  );
+  type Candidate = {
+    kind: "snapshot" | "recording";
+    id: string;
+    timestamp: number;
+    bytes: number;
+    paths: string[];
+  };
   const candidates: Candidate[] = [];
   const snapshots = await database.request("snapshot.list", {});
-  if (snapshots.ok) for (const snapshot of snapshots.value as SnapshotRecord[]) {
-    const metadata = await database.request("media.metadata.get", { kind: "snapshot", mediaId: snapshot.id });
-    if (metadata.ok && (metadata.value as MediaMetadata | null)?.protected) continue;
-    try {
-      const path = await resolveLibraryFile(snapshotsRoot, snapshot.path, new Set([".jpg", ".jpeg", ".png"]));
-      candidates.push({ kind: "snapshot", id: snapshot.id, timestamp: Date.parse(snapshot.capturedAt), bytes: (await stat(path)).size, paths: [path] });
-    } catch { /* unavailable media is never removed by retention */ }
-  }
+  if (snapshots.ok)
+    for (const snapshot of snapshots.value as SnapshotRecord[]) {
+      const metadata = await database.request("media.metadata.get", {
+        kind: "snapshot",
+        mediaId: snapshot.id,
+      });
+      if (metadata.ok && (metadata.value as MediaMetadata | null)?.protected)
+        continue;
+      try {
+        const path = await resolveLibraryFile(
+          snapshotsRoot,
+          snapshot.path,
+          new Set([".jpg", ".jpeg", ".png"]),
+        );
+        candidates.push({
+          kind: "snapshot",
+          id: snapshot.id,
+          timestamp: Date.parse(snapshot.capturedAt),
+          bytes: (await stat(path)).size,
+          paths: [path],
+        });
+      } catch {
+        /* unavailable media is never removed by retention */
+      }
+    }
   const recordings = await database.request("recording.library", {});
-  if (recordings.ok) for (const recording of recordings.value as RecordingRecord[]) {
-    if (activeRecordings.has(recording.cameraId) || getClipExporter().isUsingRecording(recording.id) || ["starting", "recording", "stopping"].includes(recording.status)) continue;
-    const metadata = await database.request("media.metadata.get", { kind: "recording", mediaId: recording.id });
-    if (metadata.ok && (metadata.value as MediaMetadata | null)?.protected) continue;
-    const segments = await database.request("recording.segment.list", { recordingId: recording.id });
-    if (!segments.ok) continue;
-    try {
-      const paths = await Promise.all((segments.value as RecordingSegmentRecord[]).map((segment) => resolveLibraryFile(recordingsRoot, segment.path, new Set([".mp4", ".m4s"]))));
-      const sizes = await Promise.all(paths.map(async (path) => (await stat(path)).size));
-      candidates.push({ kind: "recording", id: recording.id, timestamp: Date.parse(recording.endedAt ?? recording.startedAt), bytes: sizes.reduce((a, b) => a + b, 0), paths });
-    } catch { /* preserve catalogue when a segment cannot be verified */ }
-  }
-  const selectedIds = new Set(selectRetentionCandidates(
-    candidates.map((candidate) => ({ ...candidate, protected: false, active: false })),
-    { now: Date.now(), maxAgeDays, maxBytes },
-  ));
+  if (recordings.ok)
+    for (const recording of recordings.value as RecordingRecord[]) {
+      if (
+        activeRecordings.has(recording.cameraId) ||
+        getClipExporter().isUsingRecording(recording.id) ||
+        ["starting", "recording", "stopping"].includes(recording.status)
+      )
+        continue;
+      const metadata = await database.request("media.metadata.get", {
+        kind: "recording",
+        mediaId: recording.id,
+      });
+      if (metadata.ok && (metadata.value as MediaMetadata | null)?.protected)
+        continue;
+      const segments = await database.request("recording.segment.list", {
+        recordingId: recording.id,
+      });
+      if (!segments.ok) continue;
+      try {
+        const paths = await Promise.all(
+          (segments.value as RecordingSegmentRecord[]).map((segment) =>
+            resolveLibraryFile(
+              recordingsRoot,
+              segment.path,
+              new Set([".mp4", ".m4s"]),
+            ),
+          ),
+        );
+        const sizes = await Promise.all(
+          paths.map(async (path) => (await stat(path)).size),
+        );
+        candidates.push({
+          kind: "recording",
+          id: recording.id,
+          timestamp: Date.parse(recording.endedAt ?? recording.startedAt),
+          bytes: sizes.reduce((a, b) => a + b, 0),
+          paths,
+        });
+      } catch {
+        /* preserve catalogue when a segment cannot be verified */
+      }
+    }
+  const selectedIds = new Set(
+    selectRetentionCandidates(
+      candidates.map((candidate) => ({
+        ...candidate,
+        protected: false,
+        active: false,
+      })),
+      { now: Date.now(), maxAgeDays, maxBytes },
+    ),
+  );
   let deleted = 0;
   let freedBytes = 0;
   let failures = 0;
@@ -451,22 +570,40 @@ async function runRetentionCleanup(): Promise<{ deleted: number; freedBytes: num
         await rename(path, temporary);
         staged.push({ original: path, temporary });
       }
-      const response = await database.request(candidate.kind === "snapshot" ? "snapshot.delete" : "recording.delete", { id: candidate.id });
-      if (!response.ok || response.value !== true) throw new Error("catalogue delete failed");
+      const response = await database.request(
+        candidate.kind === "snapshot" ? "snapshot.delete" : "recording.delete",
+        { id: candidate.id },
+      );
+      if (!response.ok || response.value !== true)
+        throw new Error("catalogue delete failed");
       catalogueDeleted = true;
-      await Promise.all(staged.map(({ temporary }) => unlink(temporary).catch(() => undefined)));
+      await Promise.all(
+        staged.map(({ temporary }) => unlink(temporary).catch(() => undefined)),
+      );
       freedBytes += candidate.bytes;
       deleted += 1;
     } catch {
       failures += 1;
       // Restore every staged file when the catalogue was not changed.
       if (catalogueDeleted) continue;
-      await Promise.all(staged.map(async ({ original, temporary }) => {
-        try { await rename(temporary, original); } catch { /* best effort recovery */ }
-      }));
+      await Promise.all(
+        staged.map(async ({ original, temporary }) => {
+          try {
+            await rename(temporary, original);
+          } catch {
+            /* best effort recovery */
+          }
+        }),
+      );
     }
   }
-  retentionStatus = { lastRunAt: new Date().toISOString(), deleted, freedBytes, failures, noCandidates: candidates.length === 0 };
+  retentionStatus = {
+    lastRunAt: new Date().toISOString(),
+    deleted,
+    freedBytes,
+    failures,
+    noCandidates: candidates.length === 0,
+  };
   return { deleted, freedBytes };
 }
 
@@ -483,8 +620,12 @@ async function stopActiveRecording(
       )
     : false;
   const segmentCount = disabled ? await catalogRecordingFiles(active) : 0;
-  const buffered = await database.request("recording.segment.list", { recordingId: active.recordingId });
-  const saved = segmentCount > 0 || (buffered.ok && (buffered.value as RecordingSegmentRecord[]).length > 0);
+  const buffered = await database.request("recording.segment.list", {
+    recordingId: active.recordingId,
+  });
+  const saved =
+    segmentCount > 0 ||
+    (buffered.ok && (buffered.value as RecordingSegmentRecord[]).length > 0);
   await database.request("recording.complete", {
     id: active.recordingId,
     status: disabled && saved ? status : "interrupted",
@@ -494,7 +635,11 @@ async function stopActiveRecording(
     status: "idle",
   });
   if (status === "interrupted" || !disabled || !saved) {
-    localAlerts.report("recording_interrupted", "Gravação interrompida antes de ser finalizada.", cameraId);
+    localAlerts.report(
+      "recording_interrupted",
+      "Gravação interrompida antes de ser finalizada.",
+      cameraId,
+    );
   }
   activeRecordings.delete(cameraId);
   if (recordingSources.get(cameraId) === "motion") {
@@ -507,11 +652,14 @@ async function stopActiveRecording(
   return { stopped: true, saved };
 }
 
-async function catalogRecordingFiles(active: {
-  recordingId: string;
-  startedAt: string;
-  recordDir: string;
-}, segmentStatus: "completed" | "interrupted" = "completed"): Promise<number> {
+async function catalogRecordingFiles(
+  active: {
+    recordingId: string;
+    startedAt: string;
+    recordDir: string;
+  },
+  segmentStatus: "completed" | "interrupted" = "completed",
+): Promise<number> {
   if (!database) return 0;
   const databaseConnection = database;
   const listFiles = async (): Promise<string[]> => {
@@ -580,57 +728,120 @@ async function startRecording(
       if (source === "manual") recordingSources.set(cameraId, "manual");
       if (source === "manual") motionStopTimers.clear(cameraId);
       return {
-        ok: true, writeAllowed: true, cameraId, recordingId: existing.recordingId,
-        startedAt: existing.startedAt, status: "recording", newlyStarted: false,
+        ok: true,
+        writeAllowed: true,
+        cameraId,
+        recordingId: existing.recordingId,
+        startedAt: existing.startedAt,
+        status: "recording",
+        newlyStarted: false,
       };
     }
     const camera = await getCameraRecord(cameraId);
     if (!camera) throw new Error("Câmera não encontrada.");
     if (!camera.active) throw new Error("A câmera está desativada.");
     const rtspUrl = await cameraRtspUrl(camera);
-    if (!rtspUrl) throw new Error("A câmera não possui um endpoint RTSP configurado.");
-    const libraryRoot = config.recordingsDir || resolve(userDataPath, "recordings");
+    if (!rtspUrl)
+      throw new Error("A câmera não possui um endpoint RTSP configurado.");
+    const libraryRoot =
+      config.recordingsDir || resolve(userDataPath, "recordings");
     await mkdir(libraryRoot, { recursive: true });
-    const { checkStorageStatus, shouldAllowWrite } = await import("./services/storage-monitor.js");
+    const { checkStorageStatus, shouldAllowWrite } =
+      await import("./services/storage-monitor.js");
     const storage = await checkStorageStatus(libraryRoot);
     if (!shouldAllowWrite(storage)) {
-      localAlerts.report(storage.lowSpace ? "storage_low" : "storage_unavailable", storage.lowSpace ? "Espaço em disco insuficiente para gravar." : "Diretório de gravação indisponível.", cameraId);
+      localAlerts.report(
+        storage.lowSpace ? "storage_low" : "storage_unavailable",
+        storage.lowSpace
+          ? "Espaço em disco insuficiente para gravar."
+          : "Diretório de gravação indisponível.",
+        cameraId,
+      );
       return { ok: false, writeAllowed: false, cameraId, status: "failed" };
     }
     const mainSessionId = mediaSessionId(cameraId, "main");
     const recordPath = resolve(libraryRoot, "%path", "%Y-%m-%d", "%H-%M-%S-%f");
     const currentMediaStatus = mediaSupervisor.status(mainSessionId);
-    const mediaStatus = currentMediaStatus?.state === "running" ? currentMediaStatus : await mediaSupervisor.acquire(mainSessionId, rtspUrl, `${mediaPath(cameraId)}_main`, recordPath, false);
-    if (mediaStatus.state !== "running") throw new Error(mediaStatus.error || "Gateway de mídia indisponível.");
+    const mediaStatus =
+      currentMediaStatus?.state === "running"
+        ? currentMediaStatus
+        : await mediaSupervisor.acquire(
+            mainSessionId,
+            rtspUrl,
+            `${mediaPath(cameraId)}_main`,
+            recordPath,
+            false,
+          );
+    if (mediaStatus.state !== "running")
+      throw new Error(mediaStatus.error || "Gateway de mídia indisponível.");
     const response = await database.request("recording.create", { cameraId });
-    if (!response.ok) throw new Error("Não foi possível criar o catálogo da gravação.");
+    if (!response.ok)
+      throw new Error("Não foi possível criar o catálogo da gravação.");
     const recording = response.value as { id: string; startedAt: string };
     const enabled = await mediaSupervisor.setRecording(mainSessionId, true);
     if (!enabled) {
-      await database.request("recording.complete", { id: recording.id, status: "failed" });
-      if (!activeViewSessions.has(mainSessionId)) await mediaSupervisor.release(mainSessionId);
+      await database.request("recording.complete", {
+        id: recording.id,
+        status: "failed",
+      });
+      if (!activeViewSessions.has(mainSessionId))
+        await mediaSupervisor.release(mainSessionId);
       throw new Error("O gateway recusou o início da gravação.");
     }
-    activeRecordings.set(cameraId, { recordingId: recording.id, startedAt: recording.startedAt, recordDir: resolve(libraryRoot, `${mediaPath(cameraId)}_main`) });
+    activeRecordings.set(cameraId, {
+      recordingId: recording.id,
+      startedAt: recording.startedAt,
+      recordDir: resolve(libraryRoot, `${mediaPath(cameraId)}_main`),
+    });
     recordingSources.set(cameraId, source);
-    await database.request("camera.setRecordingStatus", { cameraId, status: "recording" });
+    await database.request("camera.setRecordingStatus", {
+      cameraId,
+      status: "recording",
+    });
     await emitCameraChanged();
-    return { ok: true, writeAllowed: true, recordingId: recording.id, cameraId, status: "recording", startedAt: recording.startedAt, newlyStarted: true };
+    return {
+      ok: true,
+      writeAllowed: true,
+      recordingId: recording.id,
+      cameraId,
+      status: "recording",
+      startedAt: recording.startedAt,
+      newlyStarted: true,
+    };
   });
 }
 
 async function startMotionPrebuffer(cameraId: string): Promise<void> {
-  if (!motionPrebuffer || !config?.motion.enabled || !config.motion.prebufferSeconds) return;
+  if (
+    !motionPrebuffer ||
+    !config?.motion.enabled ||
+    !config.motion.prebufferSeconds
+  )
+    return;
   const camera = await getCameraRecord(cameraId);
   if (!camera?.active) return;
   const rtspUrl = await cameraRtspUrl(camera);
   if (!rtspUrl) return;
   try {
-    if (!await motionPrebuffer.start(cameraId, rtspUrl, config.motion.prebufferSeconds)) {
-      localAlerts.report("recording_interrupted", "O buffer anterior ao movimento não pôde ser iniciado.", cameraId);
+    if (
+      !(await motionPrebuffer.start(
+        cameraId,
+        rtspUrl,
+        config.motion.prebufferSeconds,
+      ))
+    ) {
+      localAlerts.report(
+        "recording_interrupted",
+        "O buffer anterior ao movimento não pôde ser iniciado.",
+        cameraId,
+      );
     }
   } catch {
-    localAlerts.report("recording_interrupted", "O buffer anterior ao movimento não pôde ser iniciado.", cameraId);
+    localAlerts.report(
+      "recording_interrupted",
+      "O buffer anterior ao movimento não pôde ser iniciado.",
+      cameraId,
+    );
   }
 }
 
@@ -642,23 +853,41 @@ async function refreshMotionPrebuffer(cameraId: string): Promise<void> {
 async function reconcileMotionPrebuffer(): Promise<void> {
   await motionPrebuffer?.stopAll();
   motionPrebuffer = null;
-  if (!mediaSupervisor || !config?.motion.enabled || !config.motion.prebufferSeconds || !database) return;
-  const libraryRoot = config.recordingsDir || resolve(userDataPath, "recordings");
+  if (
+    !mediaSupervisor ||
+    !config?.motion.enabled ||
+    !config.motion.prebufferSeconds ||
+    !database
+  )
+    return;
+  const libraryRoot =
+    config.recordingsDir || resolve(userDataPath, "recordings");
   motionPrebuffer = new MotionPrebufferService(
     mediaSupervisor,
     resolve(userDataPath, "motion-prebuffer"),
     libraryRoot,
   );
   const cameras = await database.request("camera.list", undefined);
-  if (cameras.ok) await Promise.all((cameras.value as CameraRecord[])
-    .filter((camera) => camera.active)
-    .map((camera) => startMotionPrebuffer(camera.id)));
+  if (cameras.ok)
+    await Promise.all(
+      (cameras.value as CameraRecord[])
+        .filter((camera) => camera.active)
+        .map((camera) => startMotionPrebuffer(camera.id)),
+    );
 }
 
-async function saveMotionPrebufferSegments(cameraId: string, recordingId: string, eventAt: string): Promise<void> {
+async function saveMotionPrebufferSegments(
+  cameraId: string,
+  recordingId: string,
+  eventAt: string,
+): Promise<void> {
   if (!motionPrebuffer || !database) return;
   try {
-    const segments = await motionPrebuffer.capture(cameraId, recordingId, eventAt);
+    const segments = await motionPrebuffer.capture(
+      cameraId,
+      recordingId,
+      eventAt,
+    );
     let earliest: string | null = null;
     for (const segment of segments) {
       const stored = await database.request("recording.segment.create", {
@@ -670,15 +899,27 @@ async function saveMotionPrebufferSegments(cameraId: string, recordingId: string
         await unlink(segment.path).catch(() => undefined);
         continue;
       }
-      if (!earliest || segment.startedAt < earliest) earliest = segment.startedAt;
+      if (!earliest || segment.startedAt < earliest)
+        earliest = segment.startedAt;
     }
-    if (earliest) await database.request("recording.extendStart", { id: recordingId, startedAt: earliest });
+    if (earliest)
+      await database.request("recording.extendStart", {
+        id: recordingId,
+        startedAt: earliest,
+      });
   } catch {
-    localAlerts.report("recording_interrupted", "Não foi possível preservar todo o vídeo anterior ao movimento.", cameraId);
+    localAlerts.report(
+      "recording_interrupted",
+      "Não foi possível preservar todo o vídeo anterior ao movimento.",
+      cameraId,
+    );
   }
 }
 
-async function handleMotionMessages(cameraId: string, messages: string[]): Promise<void> {
+async function handleMotionMessages(
+  cameraId: string,
+  messages: string[],
+): Promise<void> {
   for (const message of messages) {
     for (const parsed of parseOnvifMotionNotifications(message)) {
       const event = motionNormalizer.normalize({
@@ -688,8 +929,19 @@ async function handleMotionMessages(cameraId: string, messages: string[]): Promi
       });
       if (!event) continue;
       if (event.repeated) {
-        if (config?.motion.enabled && event.state === "started" && recordingSources.get(cameraId) === "motion") {
-          motionStopTimers.arm(cameraId, "missing-end", Math.max(MOTION_MISSING_END_TIMEOUT_MS, config.motion.postRecordSeconds * 1_000));
+        if (
+          config?.motion.enabled &&
+          event.state === "started" &&
+          recordingSources.get(cameraId) === "motion"
+        ) {
+          motionStopTimers.arm(
+            cameraId,
+            "missing-end",
+            Math.max(
+              MOTION_MISSING_END_TIMEOUT_MS,
+              config.motion.postRecordSeconds * 1_000,
+            ),
+          );
         }
         continue;
       }
@@ -698,28 +950,66 @@ async function handleMotionMessages(cameraId: string, messages: string[]): Promi
         ...event,
         recordingId: activeRecordings.get(cameraId)?.recordingId ?? null,
       });
-      if (!config?.motion.enabled || recordingSources.get(cameraId) === "manual") continue;
+      if (
+        !config?.motion.enabled ||
+        recordingSources.get(cameraId) === "manual"
+      )
+        continue;
       motionStopTimers.clear(cameraId);
 
       if (event.state === "started") {
         try {
           const result = await startRecording(cameraId, "motion");
-          if (result.ok === true && typeof result.recordingId === "string" && stored?.ok) {
+          if (
+            result.ok === true &&
+            typeof result.recordingId === "string" &&
+            stored?.ok
+          ) {
             const eventId = (stored.value as { id: string | null }).id;
-            if (eventId) await database?.request("motionEvent.link", { id: eventId, recordingId: result.recordingId });
+            if (eventId)
+              await database?.request("motionEvent.link", {
+                id: eventId,
+                recordingId: result.recordingId,
+              });
           }
-          if (result.ok === true && result.newlyStarted === true && typeof result.recordingId === "string") {
+          if (
+            result.ok === true &&
+            result.newlyStarted === true &&
+            typeof result.recordingId === "string"
+          ) {
             // Cache files use this machine's clock, not the camera's ONVIF timestamp.
-            await saveMotionPrebufferSegments(cameraId, result.recordingId, event.receivedAt);
+            await saveMotionPrebufferSegments(
+              cameraId,
+              result.recordingId,
+              event.receivedAt,
+            );
           }
-          if (result.ok === true && recordingSources.get(cameraId) === "motion") {
-            motionStopTimers.arm(cameraId, "missing-end", Math.max(MOTION_MISSING_END_TIMEOUT_MS, config.motion.postRecordSeconds * 1_000));
+          if (
+            result.ok === true &&
+            recordingSources.get(cameraId) === "motion"
+          ) {
+            motionStopTimers.arm(
+              cameraId,
+              "missing-end",
+              Math.max(
+                MOTION_MISSING_END_TIMEOUT_MS,
+                config.motion.postRecordSeconds * 1_000,
+              ),
+            );
           }
         } catch {
-          localAlerts.report("recording_interrupted", "O movimento não pôde iniciar a gravação.", cameraId);
+          localAlerts.report(
+            "recording_interrupted",
+            "O movimento não pôde iniciar a gravação.",
+            cameraId,
+          );
         }
       } else if (recordingSources.get(cameraId) === "motion") {
-        motionStopTimers.arm(cameraId, "post-event", config.motion.postRecordSeconds * 1_000);
+        motionStopTimers.arm(
+          cameraId,
+          "post-event",
+          config.motion.postRecordSeconds * 1_000,
+        );
       }
     }
   }
@@ -731,18 +1021,35 @@ async function reconcileScheduledRecordings(): Promise<void> {
   if (!cameras.ok) return;
   const now = new Date();
   for (const camera of cameras.value as CameraRecord[]) {
-    const scheduled = await database.request("schedule.list", { cameraId: camera.id });
+    const scheduled = await database.request("schedule.list", {
+      cameraId: camera.id,
+    });
     if (!scheduled.ok) continue;
-    const suppressed = (scheduleSuppressedUntil.get(camera.id) ?? 0) > now.getTime();
-    if (suppressed && !isScheduledAt(scheduled.value as SchedulePeriod[], now)) {
+    const suppressed =
+      (scheduleSuppressedUntil.get(camera.id) ?? 0) > now.getTime();
+    if (
+      suppressed &&
+      !isScheduledAt(scheduled.value as SchedulePeriod[], now)
+    ) {
       scheduleSuppressedUntil.delete(camera.id);
     }
     const action = shouldScheduleRecording({
-      periods: scheduled.value as SchedulePeriod[], now, cameraActive: camera.active,
-      manualRecording: recordingSources.get(camera.id) === "manual", scheduledRecording: recordingSources.get(camera.id) === "scheduled",
+      periods: scheduled.value as SchedulePeriod[],
+      now,
+      cameraActive: camera.active,
+      manualRecording: recordingSources.get(camera.id) === "manual",
+      scheduledRecording: recordingSources.get(camera.id) === "scheduled",
     });
     if (action === "start" && !suppressed) {
-      try { await startRecording(camera.id, "scheduled"); } catch { localAlerts.report("recording_interrupted", "A gravação agendada não pôde ser iniciada.", camera.id); }
+      try {
+        await startRecording(camera.id, "scheduled");
+      } catch {
+        localAlerts.report(
+          "recording_interrupted",
+          "A gravação agendada não pôde ser iniciada.",
+          camera.id,
+        );
+      }
     } else if (action === "stop") {
       await withRecordingLock(camera.id, () => stopActiveRecording(camera.id));
       await emitCameraChanged();
@@ -1135,11 +1442,24 @@ const CameraConnectionTestSchema = z.object({
   username: z.string().max(253).nullable().optional(),
   password: z.string().max(2048).nullable().optional(),
 });
+const CameraAutoConfigureSchema = z.object({
+  host: z.string().trim().min(1).max(253),
+  onvifUrl: z.string().max(2048).nullable().optional(),
+  username: z.string().max(253).nullable().optional(),
+  password: z.string().max(2048).nullable().optional(),
+});
 const CameraDiscoveryScanSchema = z.object({
-  address: z.string().regex(/^\d{1,3}(?:\.\d{1,3}){3}$/).optional(),
+  address: z
+    .string()
+    .regex(/^\d{1,3}(?:\.\d{1,3}){3}$/)
+    .optional(),
   requestId: z.string().uuid(),
 });
 const CameraDiscoveryCancelSchema = z.object({ requestId: z.string().uuid() });
+const CameraActiveDiscoverySchema = z.object({
+  address: z.string().regex(/^\d{1,3}(?:\.\d{1,3}){3}$/),
+  requestId: z.string().uuid(),
+});
 const LibraryRequestSchema = z
   .object({
     cameraId: z.string().uuid().optional(),
@@ -1177,10 +1497,46 @@ function registerIpcHandlers(): void {
       ]);
       return {
         connection: camera.status,
-        mainSession: mediaSupervisor?.status(mediaSessionId(id, "main"))?.state ?? null,
-        subSession: mediaSupervisor?.status(mediaSessionId(id, "sub"))?.state ?? null,
-        profiles: profiles.ok ? (profiles.value as Array<{ streamType: "main" | "sub"; name: string | null; codec: string | null; audioCodec: string | null; width: number | null; height: number | null; fps: number | null }>).map(({ streamType, name, codec, audioCodec, width, height, fps }) => ({ streamType, name, codec, audioCodec, width, height, fps })) : [],
-        onvifRecordingSearch: capabilities.ok && Boolean((capabilities.value as { recording?: boolean } | null)?.recording),
+        mainSession:
+          mediaSupervisor?.status(mediaSessionId(id, "main"))?.state ?? null,
+        subSession:
+          mediaSupervisor?.status(mediaSessionId(id, "sub"))?.state ?? null,
+        profiles: profiles.ok
+          ? (
+              profiles.value as Array<{
+                streamType: "main" | "sub";
+                name: string | null;
+                codec: string | null;
+                audioCodec: string | null;
+                width: number | null;
+                height: number | null;
+                fps: number | null;
+              }>
+            ).map(
+              ({
+                streamType,
+                name,
+                codec,
+                audioCodec,
+                width,
+                height,
+                fps,
+              }) => ({
+                streamType,
+                name,
+                codec,
+                audioCodec,
+                width,
+                height,
+                fps,
+              }),
+            )
+          : [],
+        onvifRecordingSearch:
+          capabilities.ok &&
+          Boolean(
+            (capabilities.value as { recording?: boolean } | null)?.recording,
+          ),
         manufacturer: camera.manufacturer,
         model: camera.model,
         firmwareVersion: camera.firmwareVersion,
@@ -1201,7 +1557,11 @@ function registerIpcHandlers(): void {
       const controller = new AbortController();
       activeDiscoveries.set(requestId, controller);
       try {
-        return await discoverOnvifDevices({ address, signal: controller.signal });
+        const devices = await discoverOnvifDevices({
+          address,
+          signal: controller.signal,
+        });
+        return await identifyDiscoveredOnvifDevices(devices, controller.signal);
       } finally {
         activeDiscoveries.delete(requestId);
       }
@@ -1215,6 +1575,21 @@ function registerIpcHandlers(): void {
       if (!controller) return { cancelled: false };
       controller.abort();
       return { cancelled: true };
+    },
+  });
+
+  registry.register("cameras:discoverActive", {
+    input: CameraActiveDiscoverySchema,
+    handle: async ({ address, requestId }) => {
+      const network = listDiscoveryInterfaces().find((entry) => entry.address === address);
+      if (!network) throw new Error("A interface de rede selecionada não está disponível.");
+      const controller = new AbortController();
+      activeDiscoveries.set(requestId, controller);
+      try {
+        return await discoverActiveNetworkCameras({ ...network, signal: controller.signal });
+      } finally {
+        activeDiscoveries.delete(requestId);
+      }
     },
   });
 
@@ -1233,7 +1608,8 @@ function registerIpcHandlers(): void {
         duplicate: result.duplicate,
       };
       if (!result.duplicate) await startMotionPrebuffer(result.camera.id);
-      if (result.camera.active) void motionSubscriptions?.start(result.camera.id);
+      if (result.camera.active)
+        void motionSubscriptions?.start(result.camera.id);
       await emitCameraChanged();
       return response;
     },
@@ -1256,6 +1632,7 @@ function registerIpcHandlers(): void {
     input: CameraUpdateRequestSchema,
     handle: async ({ id, ...input }) => {
       if (!cameraManagement) throw new Error("Serviço indisponível.");
+      await ptzRegistry?.release(id);
       const updated = await cameraManagement.update(id, input);
       if (!updated) throw new Error("Câmera não encontrada.");
       await refreshMotionPrebuffer(id);
@@ -1269,7 +1646,15 @@ function registerIpcHandlers(): void {
 
   registry.register("cameras:testConnection", {
     input: CameraConnectionTestSchema,
-    handle: async ({ cameraId, host, port, rtspUrl, onvifUrl, username, password }) => {
+    handle: async ({
+      cameraId,
+      host,
+      port,
+      rtspUrl,
+      onvifUrl,
+      username,
+      password,
+    }) => {
       const parsedRtsp = rtspUrl ? parseRtspUrl(rtspUrl) : null;
       if (rtspUrl && !parsedRtsp) throw new Error("URL RTSP inválida.");
       const parsedOnvif = onvifUrl ? parseHttpUrl(onvifUrl) : null;
@@ -1295,7 +1680,13 @@ function registerIpcHandlers(): void {
       const camera = cameraId ? await getCameraRecord(cameraId) : null;
       if (cameraId && !camera) throw new Error("Câmera não encontrada.");
       const testCredential = (service: "onvif" | "rtsp", url: string) =>
-        cameraTestCredentials({ camera, service, url, ...connection, load: cameraCredential });
+        cameraTestCredentials({
+          camera,
+          service,
+          url,
+          ...connection,
+          load: cameraCredential,
+        });
       // Resolve before the generic network error handler so actionable credential errors reach the form.
       const onvifCredential = parsedOnvif
         ? await testCredential("onvif", parsedOnvif.sanitizedUrl)
@@ -1348,8 +1739,11 @@ function registerIpcHandlers(): void {
           segments.push({
             name: "onvif",
             status: "error",
-            detail: error instanceof Error && error.name === "OnvifAuthenticationError"
-              ? error.message : "Falha ao consultar o endpoint ONVIF.",
+            detail:
+              error instanceof Error &&
+              error.name === "OnvifAuthenticationError"
+                ? error.message
+                : "Falha ao consultar o endpoint ONVIF.",
           });
         }
       } else {
@@ -1363,7 +1757,10 @@ function registerIpcHandlers(): void {
       const effectiveRtsp =
         parsedRtsp ?? (autoCandidate && parseRtspUrl(autoCandidate.url));
       if (effectiveRtsp) {
-        const rtspCredential = await testCredential("rtsp", effectiveRtsp.sanitizedUrl);
+        const rtspCredential = await testCredential(
+          "rtsp",
+          effectiveRtsp.sanitizedUrl,
+        );
         const { probeRtsp } = await import("../workers/camera/probes.js");
         const result = await probeRtsp({
           url: effectiveRtsp.sanitizedUrl,
@@ -1387,7 +1784,7 @@ function registerIpcHandlers(): void {
                 ? "Credenciais RTSP rejeitadas."
                 : result === "locked"
                   ? "A câmera bloqueou temporariamente o acesso ao vídeo. Revise a conta da câmera e aguarde o desbloqueio."
-                : "Stream RTSP inacessível.",
+                  : "Stream RTSP inacessível.",
         });
       } else {
         segments.push({
@@ -1398,13 +1795,18 @@ function registerIpcHandlers(): void {
       }
 
       return {
-        status: segments.some((segment) => segment.status === "ok")
+        status: segments.some((segment) => segment.name === "rtsp" && segment.status === "ok")
           ? "connected"
           : "unavailable",
         segments,
         identified,
       };
     },
+  });
+
+  registry.register("cameras:autoConfigure", {
+    input: CameraAutoConfigureSchema,
+    handle: autoConfigureCameraHost,
   });
 
   registry.register("cameras:test", {
@@ -1541,8 +1943,11 @@ function registerIpcHandlers(): void {
           segments.push({
             name: "onvif",
             status: "error",
-            detail: error instanceof Error && error.name === "OnvifAuthenticationError"
-              ? error.message : "Falha ao consultar o endpoint ONVIF.",
+            detail:
+              error instanceof Error &&
+              error.name === "OnvifAuthenticationError"
+                ? error.message
+                : "Falha ao consultar o endpoint ONVIF.",
           });
         }
       } else {
@@ -1581,7 +1986,7 @@ function registerIpcHandlers(): void {
                 ? "Credenciais RTSP rejeitadas."
                 : result === "locked"
                   ? "A câmera bloqueou temporariamente o acesso ao vídeo. Revise a conta da câmera e aguarde o desbloqueio."
-                : "Stream RTSP inacessível.",
+                  : "Stream RTSP inacessível.",
         });
       } else {
         segments.push({
@@ -1594,8 +1999,16 @@ function registerIpcHandlers(): void {
         cameraId: id,
         status: finalStatus,
       });
-      if (finalStatus === "network_error" || finalStatus === "unavailable" || finalStatus === "auth_error") {
-        localAlerts.report("camera_disconnected", "Câmera desconectada ou inacessível.", id);
+      if (
+        finalStatus === "network_error" ||
+        finalStatus === "unavailable" ||
+        finalStatus === "auth_error"
+      ) {
+        localAlerts.report(
+          "camera_disconnected",
+          "Câmera desconectada ou inacessível.",
+          id,
+        );
       }
       await emitCameraChanged();
       return { status: finalStatus, segments };
@@ -1638,7 +2051,14 @@ function registerIpcHandlers(): void {
 
   registry.register("cameras:updateCredentials", {
     input: CameraUpdateCredentialsSchema,
-    handle: async ({ id, username, password, rtspPassword, sdCardUsername, sdCardPassword }) => {
+    handle: async ({
+      id,
+      username,
+      password,
+      rtspPassword,
+      sdCardUsername,
+      sdCardPassword,
+    }) => {
       if (!cameraManagement) return false;
       await cameraManagement.updateCredentials(id, {
         username: username ?? null,
@@ -1714,7 +2134,11 @@ function registerIpcHandlers(): void {
           status: status.state === "running" ? "connected" : "media_error",
         });
         if (status.state !== "running") {
-          localAlerts.report("camera_disconnected", "Câmera desconectada durante a transmissão.", cameraId);
+          localAlerts.report(
+            "camera_disconnected",
+            "Câmera desconectada durante a transmissão.",
+            cameraId,
+          );
         }
       }
       await emitCameraChanged();
@@ -1739,7 +2163,10 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("media:status", {
-    input: z.object({ cameraId: z.string().uuid(), profile: z.enum(["main", "sub"]).default("main") }),
+    input: z.object({
+      cameraId: z.string().uuid(),
+      profile: z.enum(["main", "sub"]).default("main"),
+    }),
     handle: async ({ cameraId, profile }) =>
       mediaSupervisor
         ? mediaSupervisor.connectionStatus(mediaSessionId(cameraId, profile))
@@ -1797,10 +2224,11 @@ function registerIpcHandlers(): void {
     handle: async ({ cameraId }) => {
       if (!ptzRegistry) return { connected: false };
       const camera = await getCameraRecord(cameraId);
-      if (!camera || !camera.active || !camera.supportsPtz) {
+      if (!camera || !camera.active || !camera.endpoints.some((endpoint) => endpoint.service === "onvif")) {
         return { connected: false };
       }
-      return ptzRegistry.connect(cameraId, camera.supportsPtz);
+      // Registration can precede capability discovery. The adapter confirms PTZ before enabling motion.
+      return ptzRegistry.connect(cameraId, true);
     },
   });
 
@@ -1820,6 +2248,9 @@ function registerIpcHandlers(): void {
     handle: async ({ cameraId, trigger }) => {
       if (!ptzRegistry) return;
       await ptzRegistry.stop(cameraId, trigger);
+      if (ptzRegistry.state(cameraId)?.stopBlocked) {
+        throw new Error("A câmera não confirmou a parada PTZ. Tente parar novamente.");
+      }
     },
   });
 
@@ -1831,7 +2262,8 @@ function registerIpcHandlers(): void {
 
   const ptzCamera = async (cameraId: string): Promise<CameraRecord> => {
     const camera = await getCameraRecord(cameraId);
-    if (!camera || !camera.active || !camera.supportsPtz) throw new Error("PTZ indisponível para esta câmera.");
+    if (!camera || !camera.active || !camera.supportsPtz)
+      throw new Error("PTZ indisponível para esta câmera.");
     return camera;
   };
   registry.register("ptz:presets:list", {
@@ -1842,7 +2274,10 @@ function registerIpcHandlers(): void {
     },
   });
   registry.register("ptz:presets:goto", {
-    input: z.object({ cameraId: z.string().uuid(), presetToken: z.string().min(1).max(512) }),
+    input: z.object({
+      cameraId: z.string().uuid(),
+      presetToken: z.string().min(1).max(512),
+    }),
     handle: async ({ cameraId, presetToken }) => {
       const camera = await ptzCamera(cameraId);
       await ptzRegistry?.gotoPreset(cameraId, presetToken, camera.supportsPtz);
@@ -1850,18 +2285,34 @@ function registerIpcHandlers(): void {
     },
   });
   registry.register("ptz:presets:set", {
-    input: z.object({ cameraId: z.string().uuid(), name: z.string().trim().min(1).max(120), presetToken: z.string().min(1).max(512).optional() }),
+    input: z.object({
+      cameraId: z.string().uuid(),
+      name: z.string().trim().min(1).max(120),
+      presetToken: z.string().min(1).max(512).optional(),
+    }),
     handle: async ({ cameraId, name, presetToken }) => {
       const camera = await ptzCamera(cameraId);
-      const token = await ptzRegistry?.setPreset(cameraId, name, presetToken, camera.supportsPtz);
+      const token = await ptzRegistry?.setPreset(
+        cameraId,
+        name,
+        presetToken,
+        camera.supportsPtz,
+      );
       return { token: token ?? null };
     },
   });
   registry.register("ptz:presets:remove", {
-    input: z.object({ cameraId: z.string().uuid(), presetToken: z.string().min(1).max(512) }),
+    input: z.object({
+      cameraId: z.string().uuid(),
+      presetToken: z.string().min(1).max(512),
+    }),
     handle: async ({ cameraId, presetToken }) => {
       const camera = await ptzCamera(cameraId);
-      await ptzRegistry?.removePreset(cameraId, presetToken, camera.supportsPtz);
+      await ptzRegistry?.removePreset(
+        cameraId,
+        presetToken,
+        camera.supportsPtz,
+      );
       return { removed: true };
     },
   });
@@ -1948,7 +2399,10 @@ function registerIpcHandlers(): void {
         if (!database || !mediaSupervisor) return { stopped: false };
         if (recordingSources.get(cameraId) === "scheduled") {
           // A parada explícita vence a agenda até que a janela atual termine.
-          scheduleSuppressedUntil.set(cameraId, Date.now() + 24 * 60 * 60 * 1_000);
+          scheduleSuppressedUntil.set(
+            cameraId,
+            Date.now() + 24 * 60 * 60 * 1_000,
+          );
         }
         const wasMotion = recordingSources.get(cameraId) === "motion";
         const stopped = await stopActiveRecording(cameraId);
@@ -2024,15 +2478,20 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("library:motionEvents", {
-    input: z.object({
-      cameraId: z.string().uuid(),
-      startAt: z.string().datetime({ offset: true }),
-      endAt: z.string().datetime({ offset: true }),
-      state: z.enum(["started", "ended"]).optional(),
-    }).refine(({ startAt, endAt }) => {
-      const span = Date.parse(endAt) - Date.parse(startAt);
-      return span > 0 && span <= 25 * 60 * 60 * 1000;
-    }, { message: "Selecione um período de até um dia." }),
+    input: z
+      .object({
+        cameraId: z.string().uuid(),
+        startAt: z.string().datetime({ offset: true }),
+        endAt: z.string().datetime({ offset: true }),
+        state: z.enum(["started", "ended"]).optional(),
+      })
+      .refine(
+        ({ startAt, endAt }) => {
+          const span = Date.parse(endAt) - Date.parse(startAt);
+          return span > 0 && span <= 25 * 60 * 60 * 1000;
+        },
+        { message: "Selecione um período de até um dia." },
+      ),
     handle: async (filters) => {
       if (!database) return [];
       const result = await database.request("motionEvent.list", filters);
@@ -2041,52 +2500,91 @@ function registerIpcHandlers(): void {
     },
   });
 
-  registry.register('sdCard:cameras', {
+  registry.register("sdCard:cameras", {
     input: EmptyRequestSchema,
     handle: async () => {
       if (!database) return [];
-      const response = await database.request('camera.listAll', undefined);
-      if (!response.ok) throw new Error('Não foi possível listar as câmeras.');
-      return (response.value as CameraRecord[]).filter((camera) => camera.active).map((camera) => {
-        const support = sdCardAdapters.describe(camera);
-        return {
-          id: camera.id,
-          name: camera.name,
-          ...support,
-        };
+      const response = await database.request("camera.listAll", undefined);
+      if (!response.ok) throw new Error("Não foi possível listar as câmeras.");
+      return (response.value as CameraRecord[])
+        .filter((camera) => camera.active)
+        .map((camera) => {
+          const support = sdCardAdapters.describe(camera);
+          return {
+            id: camera.id,
+            name: camera.name,
+            ...support,
+          };
+        });
+    },
+  });
+
+  registry.register("sdCard:list", {
+    input: z.object({ cameraId: z.string().uuid(), date: z.iso.date() }),
+    handle: async ({ cameraId, date }) => {
+      if (!config) throw new Error("Configuração indisponível.");
+      const camera = await getCameraRecord(cameraId);
+      if (!camera?.active) {
+        throw new Error(
+          "A consulta do cartão SD não é suportada nesta câmera.",
+        );
+      }
+      const adapter = sdCardAdapters.forCamera(camera);
+      if (!adapter)
+        throw new Error(
+          "A consulta do cartão SD não é suportada nesta câmera.",
+        );
+      const credential = await cameraCredential(cameraId, "sd_card");
+      if (!credential?.username)
+        throw new Error(
+          "Cadastre a credencial da câmera antes de consultar o cartão SD.",
+        );
+      return adapter.list({
+        camera,
+        credential: {
+          username: credential.username,
+          password: credential.password,
+        },
+        date,
+        libraryRoot:
+          config.recordingsDir || resolve(userDataPath, "recordings"),
       });
     },
   });
 
-  registry.register('sdCard:list', {
-    input: z.object({ cameraId: z.string().uuid(), date: z.iso.date() }),
-    handle: async ({ cameraId, date }) => {
-      if (!config) throw new Error('Configuração indisponível.');
-      const camera = await getCameraRecord(cameraId);
-      if (!camera?.active) {
-        throw new Error('A consulta do cartão SD não é suportada nesta câmera.');
-      }
-      const adapter = sdCardAdapters.forCamera(camera);
-      if (!adapter) throw new Error('A consulta do cartão SD não é suportada nesta câmera.');
-      const credential = await cameraCredential(cameraId, 'sd_card');
-      if (!credential?.username) throw new Error('Cadastre a credencial da câmera antes de consultar o cartão SD.');
-      return adapter.list({ camera, credential: { username: credential.username, password: credential.password }, date, libraryRoot: config.recordingsDir || resolve(userDataPath, 'recordings') });
-    },
-  });
-
-  registry.register('sdCard:download', {
-    input: z.object({ cameraId: z.string().uuid(), id: z.string().regex(/^[a-f0-9]{64}$/) }),
+  registry.register("sdCard:download", {
+    input: z.object({
+      cameraId: z.string().uuid(),
+      id: z.string().regex(/^[a-f0-9]{64}$/),
+    }),
     handle: async ({ cameraId, id }) => {
-      if (!config || !database) throw new Error('Biblioteca indisponível.');
+      if (!config || !database) throw new Error("Biblioteca indisponível.");
       const camera = await getCameraRecord(cameraId);
       if (!camera?.active) {
-        throw new Error('O download do cartão SD não é suportado nesta câmera.');
+        throw new Error(
+          "O download do cartão SD não é suportado nesta câmera.",
+        );
       }
       const adapter = sdCardAdapters.forCamera(camera);
-      if (!adapter) throw new Error('O download do cartão SD não é suportado nesta câmera.');
-      const credential = await cameraCredential(cameraId, 'sd_card');
-      if (!credential?.username) throw new Error('Credencial da câmera indisponível.');
-      const result = await adapter.download({ camera, credential: { username: credential.username, password: credential.password }, id, libraryRoot: config.recordingsDir || resolve(userDataPath, 'recordings'), ffmpegPath: bundledFfmpegPath(), database });
+      if (!adapter)
+        throw new Error(
+          "O download do cartão SD não é suportado nesta câmera.",
+        );
+      const credential = await cameraCredential(cameraId, "sd_card");
+      if (!credential?.username)
+        throw new Error("Credencial da câmera indisponível.");
+      const result = await adapter.download({
+        camera,
+        credential: {
+          username: credential.username,
+          password: credential.password,
+        },
+        id,
+        libraryRoot:
+          config.recordingsDir || resolve(userDataPath, "recordings"),
+        ffmpegPath: bundledFfmpegPath(),
+        database,
+      });
       libraryStorageCache = null;
       return result;
     },
@@ -2119,12 +2617,13 @@ function registerIpcHandlers(): void {
 
   registry.register("library:updateMetadata", {
     input: MediaMetadataInputSchema,
-    handle: async (input) => withLibraryMutationLock(async () => {
-      if (!database) throw new Error("Biblioteca indisponível.");
-      const result = await database.request("media.metadata.upsert", input);
-      if (!result.ok) throw new Error(result.error.message);
-      return result.value as MediaMetadata;
-    }),
+    handle: async (input) =>
+      withLibraryMutationLock(async () => {
+        if (!database) throw new Error("Biblioteca indisponível.");
+        const result = await database.request("media.metadata.upsert", input);
+        if (!result.ok) throw new Error(result.error.message);
+        return result.value as MediaMetadata;
+      }),
   });
 
   registry.register("library:recordingPreview", {
@@ -2183,69 +2682,77 @@ function registerIpcHandlers(): void {
 
   registry.register("library:deleteSnapshot", {
     input: z.object({ id: z.string().uuid() }),
-    handle: async ({ id }) => withLibraryMutationLock(async () => {
-      if (!config || !database) return { deleted: false };
-      const response = await database.request("snapshot.get", { id });
-      const snapshot = response.ok
-        ? (response.value as SnapshotRecord | null)
-        : null;
-      if (!snapshot) throw new Error("Foto não encontrada.");
+    handle: async ({ id }) =>
+      withLibraryMutationLock(async () => {
+        if (!config || !database) return { deleted: false };
+        const response = await database.request("snapshot.get", { id });
+        const snapshot = response.ok
+          ? (response.value as SnapshotRecord | null)
+          : null;
+        if (!snapshot) throw new Error("Foto não encontrada.");
 
-      const root = resolve(
-        config.snapshotDir || resolve(userDataPath, "snapshots"),
-      );
-      await deleteLibraryFile(
-        root,
-        snapshot.path,
-        new Set([".jpg", ".jpeg", ".png"]),
-      );
-      const deleted = await database.request("snapshot.delete", { id });
-      if (!deleted.ok || deleted.value !== true)
-        throw new Error("Não foi possível excluir a foto.");
-      return { deleted: true };
-    }),
+        const root = resolve(
+          config.snapshotDir || resolve(userDataPath, "snapshots"),
+        );
+        await deleteLibraryFile(
+          root,
+          snapshot.path,
+          new Set([".jpg", ".jpeg", ".png"]),
+        );
+        const deleted = await database.request("snapshot.delete", { id });
+        if (!deleted.ok || deleted.value !== true)
+          throw new Error("Não foi possível excluir a foto.");
+        return { deleted: true };
+      }),
   });
 
   registry.register("library:deleteRecording", {
     input: z.object({ id: z.string().uuid() }),
-    handle: async ({ id }) => withLibraryMutationLock(async () => {
-      if (!config || !database) return { deleted: false };
-      const response = await database.request("recording.get", { id });
-      const recording = response.ok
-        ? (response.value as RecordingRecord | null)
-        : null;
-      if (!recording) throw new Error("Gravação não encontrada.");
-      if (
-        activeRecordings.has(recording.cameraId) ||
-        ["starting", "recording", "stopping"].includes(recording.status)
-      ) {
-        throw new Error("Finalize a gravação antes de excluí-la.");
-      }
+    handle: async ({ id }) =>
+      withLibraryMutationLock(async () => {
+        if (!config || !database) return { deleted: false };
+        const response = await database.request("recording.get", { id });
+        const recording = response.ok
+          ? (response.value as RecordingRecord | null)
+          : null;
+        if (!recording) throw new Error("Gravação não encontrada.");
+        if (
+          activeRecordings.has(recording.cameraId) ||
+          ["starting", "recording", "stopping"].includes(recording.status)
+        ) {
+          throw new Error("Finalize a gravação antes de excluí-la.");
+        }
 
-      const segmentsResponse = await database.request(
-        "recording.segment.list",
-        { recordingId: id },
-      );
-      if (!segmentsResponse.ok)
-        throw new Error("Não foi possível consultar os arquivos da gravação.");
-      const segments = segmentsResponse.value as RecordingSegmentRecord[];
-      const root = resolve(
-        config.recordingsDir || resolve(userDataPath, "recordings"),
-      );
-      const { deleteRecordingPreview } =
-        await import("./services/recording-preview.js");
-      await deleteRecordingPreview(
-        resolve(userDataPath, "recording-previews"),
-        id,
-      );
-      for (const segment of segments) {
-        await deleteLibraryFile(root, segment.path, new Set([".mp4", ".m4s"]));
-      }
-      const deleted = await database.request("recording.delete", { id });
-      if (!deleted.ok || deleted.value !== true)
-        throw new Error("Não foi possível excluir a gravação.");
-      return { deleted: true };
-    }),
+        const segmentsResponse = await database.request(
+          "recording.segment.list",
+          { recordingId: id },
+        );
+        if (!segmentsResponse.ok)
+          throw new Error(
+            "Não foi possível consultar os arquivos da gravação.",
+          );
+        const segments = segmentsResponse.value as RecordingSegmentRecord[];
+        const root = resolve(
+          config.recordingsDir || resolve(userDataPath, "recordings"),
+        );
+        const { deleteRecordingPreview } =
+          await import("./services/recording-preview.js");
+        await deleteRecordingPreview(
+          resolve(userDataPath, "recording-previews"),
+          id,
+        );
+        for (const segment of segments) {
+          await deleteLibraryFile(
+            root,
+            segment.path,
+            new Set([".mp4", ".m4s"]),
+          );
+        }
+        const deleted = await database.request("recording.delete", { id });
+        if (!deleted.ok || deleted.value !== true)
+          throw new Error("Não foi possível excluir a gravação.");
+        return { deleted: true };
+      }),
   });
 
   registry.register("library:openSnapshot", {
@@ -2287,7 +2794,9 @@ function registerIpcHandlers(): void {
     handle: async ({ id }) => {
       if (!config || !database) return { revealed: false };
       const result = await database.request("snapshot.get", { id });
-      const snapshot = result.ok ? (result.value as SnapshotRecord | null) : null;
+      const snapshot = result.ok
+        ? (result.value as SnapshotRecord | null)
+        : null;
       if (!snapshot) throw new Error("Foto não encontrada.");
       const target = await resolveLibraryFile(
         resolve(config.snapshotDir || resolve(userDataPath, "snapshots")),
@@ -2304,7 +2813,9 @@ function registerIpcHandlers(): void {
     handle: async ({ id }) => {
       if (!config || !database) return { exported: false };
       const result = await database.request("snapshot.get", { id });
-      const snapshot = result.ok ? (result.value as SnapshotRecord | null) : null;
+      const snapshot = result.ok
+        ? (result.value as SnapshotRecord | null)
+        : null;
       if (!snapshot) throw new Error("Foto não encontrada.");
       const target = await resolveLibraryFile(
         resolve(config.snapshotDir || resolve(userDataPath, "snapshots")),
@@ -2319,7 +2830,8 @@ function registerIpcHandlers(): void {
       const destination = mainWindow
         ? await dialog.showSaveDialog(mainWindow, dialogOptions)
         : await dialog.showSaveDialog(dialogOptions);
-      if (destination.canceled || !destination.filePath) return { exported: false };
+      if (destination.canceled || !destination.filePath)
+        return { exported: false };
       await assertNewExportDestination(destination.filePath);
       await copyFile(target, destination.filePath, fsConstants.COPYFILE_EXCL);
       return { exported: true };
@@ -2330,8 +2842,12 @@ function registerIpcHandlers(): void {
     input: z.object({ id: z.string().uuid() }),
     handle: async ({ id }) => {
       if (!config || !database) return { revealed: false };
-      const result = await database.request("recording.segment.list", { recordingId: id });
-      const segment = result.ok ? (result.value as RecordingSegmentRecord[])[0] : undefined;
+      const result = await database.request("recording.segment.list", {
+        recordingId: id,
+      });
+      const segment = result.ok
+        ? (result.value as RecordingSegmentRecord[])[0]
+        : undefined;
       if (!segment) throw new Error("Arquivo de vídeo não encontrado.");
       const target = await resolveLibraryFile(
         resolve(config.recordingsDir || resolve(userDataPath, "recordings")),
@@ -2347,10 +2863,17 @@ function registerIpcHandlers(): void {
     input: z.object({ id: z.string().uuid() }),
     handle: async ({ id }) => {
       if (!config || !database) return { exported: false, files: 0 };
-      const result = await database.request("recording.segment.list", { recordingId: id });
-      const segments = result.ok ? (result.value as RecordingSegmentRecord[]) : [];
-      if (segments.length === 0) throw new Error("Arquivo de vídeo não encontrado.");
-      const root = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
+      const result = await database.request("recording.segment.list", {
+        recordingId: id,
+      });
+      const segments = result.ok
+        ? (result.value as RecordingSegmentRecord[])
+        : [];
+      if (segments.length === 0)
+        throw new Error("Arquivo de vídeo não encontrado.");
+      const root = resolve(
+        config.recordingsDir || resolve(userDataPath, "recordings"),
+      );
       const sources = await Promise.all(
         segments.map((segment) =>
           resolveLibraryFile(root, segment.path, new Set([".mp4", ".m4s"])),
@@ -2386,21 +2909,32 @@ function registerIpcHandlers(): void {
     }),
     handle: async ({ id, jobId, startAt, endAt }) => {
       if (!config || !database) return { exported: false, jobId, gaps: [] };
-      const result = await database.request("recording.segment.list", { recordingId: id });
-      if (!result.ok) throw new Error("Não foi possível consultar os segmentos.");
-      const root = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
-      const sources: Array<RecordingSegmentRecord & { absolutePath: string }> = [];
+      const result = await database.request("recording.segment.list", {
+        recordingId: id,
+      });
+      if (!result.ok)
+        throw new Error("Não foi possível consultar os segmentos.");
+      const root = resolve(
+        config.recordingsDir || resolve(userDataPath, "recordings"),
+      );
+      const sources: Array<RecordingSegmentRecord & { absolutePath: string }> =
+        [];
       for (const segment of result.value as RecordingSegmentRecord[]) {
         try {
           sources.push({
             ...segment,
-            absolutePath: await resolveLibraryFile(root, segment.path, new Set([".mp4", ".m4s"])),
+            absolutePath: await resolveLibraryFile(
+              root,
+              segment.path,
+              new Set([".mp4", ".m4s"]),
+            ),
           });
         } catch {
           // Missing segments become explicit gaps in the exported time range.
         }
       }
-      if (sources.length === 0) throw new Error("Nenhum arquivo de vídeo está disponível.");
+      if (sources.length === 0)
+        throw new Error("Nenhum arquivo de vídeo está disponível.");
       const dialogOptions: Electron.SaveDialogOptions = {
         defaultPath: `trecho-${id.slice(0, 8)}.mp4`,
         filters: [{ name: "Vídeo MP4", extensions: ["mp4"] }],
@@ -2409,7 +2943,8 @@ function registerIpcHandlers(): void {
       const destination = mainWindow
         ? await dialog.showSaveDialog(mainWindow, dialogOptions)
         : await dialog.showSaveDialog(dialogOptions);
-      if (destination.canceled || !destination.filePath) return { exported: false, jobId, gaps: [] };
+      if (destination.canceled || !destination.filePath)
+        return { exported: false, jobId, gaps: [] };
       await assertNewExportDestination(destination.filePath);
       const exported = await getClipExporter().export({
         recordingId: id,
@@ -2436,11 +2971,24 @@ function registerIpcHandlers(): void {
   registry.register("library:storageUsage", {
     input: EmptyRequestSchema,
     handle: async () => {
-      if (!config || !database) return { freeBytes: null, totalBytes: null, usedBytes: 0, byCamera: [] };
-      const recordingsRoot = resolve(config.recordingsDir || resolve(userDataPath, "recordings"));
-      const snapshotsRoot = resolve(config.snapshotDir || resolve(userDataPath, "snapshots"));
+      if (!config || !database)
+        return {
+          freeBytes: null,
+          totalBytes: null,
+          usedBytes: 0,
+          byCamera: [],
+        };
+      const recordingsRoot = resolve(
+        config.recordingsDir || resolve(userDataPath, "recordings"),
+      );
+      const snapshotsRoot = resolve(
+        config.snapshotDir || resolve(userDataPath, "snapshots"),
+      );
       const key = `${recordingsRoot}\0${snapshotsRoot}`;
-      if (libraryStorageCache?.key === key && libraryStorageCache.expiresAt > Date.now()) {
+      if (
+        libraryStorageCache?.key === key &&
+        libraryStorageCache.expiresAt > Date.now()
+      ) {
         return libraryStorageCache.value;
       }
       const bytesFor = async (root: string, path: string): Promise<number> => {
@@ -2464,14 +3012,20 @@ function registerIpcHandlers(): void {
       const recordings = await database.request("recording.library", {});
       if (recordings.ok) {
         for (const recording of recordings.value as RecordingRecord[]) {
-          const segments = await database.request("recording.segment.list", { recordingId: recording.id });
+          const segments = await database.request("recording.segment.list", {
+            recordingId: recording.id,
+          });
           if (!segments.ok) continue;
           for (const segment of segments.value as RecordingSegmentRecord[]) {
-            add(recording.cameraId, await bytesFor(recordingsRoot, segment.path));
+            add(
+              recording.cameraId,
+              await bytesFor(recordingsRoot, segment.path),
+            );
           }
         }
       }
-      const { checkStorageStatus } = await import("./services/storage-monitor.js");
+      const { checkStorageStatus } =
+        await import("./services/storage-monitor.js");
       const disk = await checkStorageStatus(recordingsRoot);
       const byCamera = [...totals.entries()]
         .map(([cameraId, bytes]) => ({ cameraId, bytes }))
@@ -2498,10 +3052,16 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("schedules:replace", {
-    input: z.object({ cameraId: z.string().uuid(), periods: z.array(SchedulePeriodSchema).max(56) }),
+    input: z.object({
+      cameraId: z.string().uuid(),
+      periods: z.array(SchedulePeriodSchema).max(56),
+    }),
     handle: async ({ cameraId, periods }) => {
       if (!database) return { saved: false };
-      const result = await database.request("schedule.replace", { cameraId, periods });
+      const result = await database.request("schedule.replace", {
+        cameraId,
+        periods,
+      });
       if (!result.ok) throw new Error(result.error.message);
       await recordingScheduler?.refresh();
       return { saved: result.value === true };
@@ -2514,13 +3074,28 @@ function registerIpcHandlers(): void {
       const camera = await getCameraRecord(cameraId);
       if (!camera) throw new Error("Câmera não encontrada.");
       const periods = await database?.request("schedule.list", { cameraId });
-      const schedule = periods?.ok ? periods.value as SchedulePeriod[] : [];
+      const schedule = periods?.ok ? (periods.value as SchedulePeriod[]) : [];
       const now = new Date();
       const active = isScheduledAt(schedule, now);
       const source = recordingSources.get(cameraId) ?? null;
-      const suppressed = (scheduleSuppressedUntil.get(cameraId) ?? 0) > Date.now();
-      const blocked = !camera.active ? "Câmera desativada." : suppressed ? "Pausada manualmente até o fim do período atual." : !active ? "Fora do horário programado." : source === "manual" ? "Gravação manual tem prioridade." : null;
-      return { active, source, blocked, nextAt: nextScheduledAt(schedule, now)?.toISOString() ?? null, appMustRun: true };
+      const suppressed =
+        (scheduleSuppressedUntil.get(cameraId) ?? 0) > Date.now();
+      const blocked = !camera.active
+        ? "Câmera desativada."
+        : suppressed
+          ? "Pausada manualmente até o fim do período atual."
+          : !active
+            ? "Fora do horário programado."
+            : source === "manual"
+              ? "Gravação manual tem prioridade."
+              : null;
+      return {
+        active,
+        source,
+        blocked,
+        nextAt: nextScheduledAt(schedule, now)?.toISOString() ?? null,
+        appMustRun: true,
+      };
     },
   });
 
@@ -2564,7 +3139,12 @@ function registerIpcHandlers(): void {
       if (!backupService) return { selected: false };
       const options: Electron.OpenDialogOptions = {
         properties: ["openFile"],
-        filters: [{ name: "Backup do Simple DVR", extensions: ["sqlite", "db", "sqlite3"] }],
+        filters: [
+          {
+            name: "Backup do Simple DVR",
+            extensions: ["sqlite", "db", "sqlite3"],
+          },
+        ],
       };
       const result = mainWindow
         ? await dialog.showOpenDialog(mainWindow, options)
@@ -2579,15 +3159,23 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("backup:restore", {
-    input: z.object({ token: z.string().uuid(), strategy: z.literal("replace") }),
+    input: z.object({
+      token: z.string().uuid(),
+      strategy: z.literal("replace"),
+    }),
     handle: async ({ token }) => {
       if (!database || !backupService) return { scheduled: false };
       if (activeRecordings.size > 0) {
-        throw new Error("Finalize as gravações ativas antes de restaurar um backup.");
+        throw new Error(
+          "Finalize as gravações ativas antes de restaurar um backup.",
+        );
       }
       const candidate = restoreCandidates.get(token);
       restoreCandidates.delete(token);
-      if (!candidate) throw new Error("A prévia do backup expirou. Selecione o arquivo novamente.");
+      if (!candidate)
+        throw new Error(
+          "A prévia do backup expirou. Selecione o arquivo novamente.",
+        );
       const restoreDirectory = resolve(userDataPath, "restore-imports");
       const staged = join(restoreDirectory, `${token}.sqlite`);
       await mkdir(restoreDirectory, { recursive: true });
@@ -2599,7 +3187,8 @@ function registerIpcHandlers(): void {
           destination: databasePath,
           backupDir,
         });
-        if (!restored.ok) throw new Error("Não foi possível restaurar o backup.");
+        if (!restored.ok)
+          throw new Error("Não foi possível restaurar o backup.");
       } catch (error) {
         await rm(staged, { force: true });
         throw error;
@@ -2613,10 +3202,21 @@ function registerIpcHandlers(): void {
   registry.register("diagnostics:export", {
     input: EmptyRequestSchema,
     handle: async () => {
-      const options: Electron.SaveDialogOptions = { defaultPath: "simple-dvr-diagnostico.json", filters: [{ name: "Diagnóstico JSON", extensions: ["json"] }], properties: ["showOverwriteConfirmation"] };
-      const destination = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options);
-      if (destination.canceled || !destination.filePath) return { exported: false };
-      await writeFile(destination.filePath, JSON.stringify(localAlerts.diagnosticReport(), null, 2), { encoding: "utf8", flag: "wx" });
+      const options: Electron.SaveDialogOptions = {
+        defaultPath: "simple-dvr-diagnostico.json",
+        filters: [{ name: "Diagnóstico JSON", extensions: ["json"] }],
+        properties: ["showOverwriteConfirmation"],
+      };
+      const destination = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, options)
+        : await dialog.showSaveDialog(options);
+      if (destination.canceled || !destination.filePath)
+        return { exported: false };
+      await writeFile(
+        destination.filePath,
+        JSON.stringify(localAlerts.diagnosticReport(), null, 2),
+        { encoding: "utf8", flag: "wx" },
+      );
       return { exported: true };
     },
   });
@@ -2630,8 +3230,13 @@ function registerIpcHandlers(): void {
     input: DashboardGroupSchema,
     handle: async (group) => {
       if (!config || !configRepository) return { saved: false };
-      const groups = config.dashboard.groups.filter((item) => item.id !== group.id);
-      config = { ...config, dashboard: { ...config.dashboard, groups: [...groups, group] } };
+      const groups = config.dashboard.groups.filter(
+        (item) => item.id !== group.id,
+      );
+      config = {
+        ...config,
+        dashboard: { ...config.dashboard, groups: [...groups, group] },
+      };
       await configRepository.save(config);
       return { saved: true };
     },
@@ -2646,7 +3251,9 @@ function registerIpcHandlers(): void {
         dashboard: {
           ...config.dashboard,
           groups: config.dashboard.groups.filter((group) => group.id !== id),
-          layouts: config.dashboard.layouts.map((layout) => layout.groupId === id ? { ...layout, groupId: null } : layout),
+          layouts: config.dashboard.layouts.map((layout) =>
+            layout.groupId === id ? { ...layout, groupId: null } : layout,
+          ),
         },
       };
       await configRepository.save(config);
@@ -2658,14 +3265,31 @@ function registerIpcHandlers(): void {
     input: DashboardLayoutSchema,
     handle: async (layout) => {
       if (!config || !configRepository) return { saved: false };
-      const knownCameraIds = new Set((await listCameraSummaries()).map((camera) => camera.id));
+      const knownCameraIds = new Set(
+        (await listCameraSummaries()).map((camera) => camera.id),
+      );
       const sanitized = {
         ...layout,
-        groupId: config.dashboard.groups.some((group) => group.id === layout.groupId) ? layout.groupId : null,
-        slots: layout.slots.map((id) => id && knownCameraIds.has(id) ? id : null),
+        groupId: config.dashboard.groups.some(
+          (group) => group.id === layout.groupId,
+        )
+          ? layout.groupId
+          : null,
+        slots: layout.slots.map((id) =>
+          id && knownCameraIds.has(id) ? id : null,
+        ),
       };
-      const layouts = config.dashboard.layouts.filter((item) => item.id !== layout.id);
-      config = { ...config, dashboard: { ...config.dashboard, layouts: [...layouts, sanitized], selectedLayoutId: layout.id } };
+      const layouts = config.dashboard.layouts.filter(
+        (item) => item.id !== layout.id,
+      );
+      config = {
+        ...config,
+        dashboard: {
+          ...config.dashboard,
+          layouts: [...layouts, sanitized],
+          selectedLayoutId: layout.id,
+        },
+      };
       await configRepository.save(config);
       return { saved: true };
     },
@@ -2675,8 +3299,20 @@ function registerIpcHandlers(): void {
     input: z.object({ id: z.string().uuid() }),
     handle: async ({ id }) => {
       if (!config || !configRepository) return { deleted: false };
-      const selectedLayoutId = config.dashboard.selectedLayoutId === id ? null : config.dashboard.selectedLayoutId;
-      config = { ...config, dashboard: { ...config.dashboard, layouts: config.dashboard.layouts.filter((layout) => layout.id !== id), selectedLayoutId } };
+      const selectedLayoutId =
+        config.dashboard.selectedLayoutId === id
+          ? null
+          : config.dashboard.selectedLayoutId;
+      config = {
+        ...config,
+        dashboard: {
+          ...config.dashboard,
+          layouts: config.dashboard.layouts.filter(
+            (layout) => layout.id !== id,
+          ),
+          selectedLayoutId,
+        },
+      };
       await configRepository.save(config);
       return { deleted: true };
     },
@@ -2688,10 +3324,13 @@ function registerIpcHandlers(): void {
       if (!configRepository) return { saved: false };
       const parsed = AppConfigSchema.safeParse(incoming);
       if (!parsed.success) return { saved: false };
-      const motionEnabledChanged = config?.motion.enabled !== parsed.data.motion.enabled;
-      const prebufferChanged = config?.motion.enabled !== parsed.data.motion.enabled
-        || config?.motion.prebufferSeconds !== parsed.data.motion.prebufferSeconds
-        || config?.recordingsDir !== parsed.data.recordingsDir;
+      const motionEnabledChanged =
+        config?.motion.enabled !== parsed.data.motion.enabled;
+      const prebufferChanged =
+        config?.motion.enabled !== parsed.data.motion.enabled ||
+        config?.motion.prebufferSeconds !==
+          parsed.data.motion.prebufferSeconds ||
+        config?.recordingsDir !== parsed.data.recordingsDir;
       await configRepository.save(parsed.data);
       await saveHardwareAcceleration(
         userDataPath,
@@ -2701,9 +3340,13 @@ function registerIpcHandlers(): void {
       if (motionEnabledChanged) motionNormalizer.resetAll();
       if (!config.motion.enabled) {
         motionStopTimers.clearAll();
-        await Promise.all([...recordingSources.entries()]
-          .filter(([, source]) => source === "motion")
-          .map(([cameraId]) => withRecordingLock(cameraId, () => stopActiveRecording(cameraId))));
+        await Promise.all(
+          [...recordingSources.entries()]
+            .filter(([, source]) => source === "motion")
+            .map(([cameraId]) =>
+              withRecordingLock(cameraId, () => stopActiveRecording(cameraId)),
+            ),
+        );
       }
       if (prebufferChanged) await reconcileMotionPrebuffer();
       await withLibraryMutationLock(() => runRetentionCleanup());
@@ -2783,12 +3426,16 @@ async function initializeDatabase(): Promise<void> {
           id: recording.id,
           status: "interrupted",
         });
-        const libraryRoot = config.recordingsDir || resolve(userDataPath, "recordings");
-        await catalogRecordingFiles({
-          recordingId: recording.id,
-          startedAt: recording.startedAt,
-          recordDir: resolve(libraryRoot, `${mediaPath(camera.id)}_main`),
-        }, "interrupted");
+        const libraryRoot =
+          config.recordingsDir || resolve(userDataPath, "recordings");
+        await catalogRecordingFiles(
+          {
+            recordingId: recording.id,
+            startedAt: recording.startedAt,
+            recordDir: resolve(libraryRoot, `${mediaPath(camera.id)}_main`),
+          },
+          "interrupted",
+        );
       }
       await database.request("camera.setRecordingStatus", {
         cameraId: camera.id,
@@ -2816,26 +3463,53 @@ async function initializeDatabase(): Promise<void> {
   recordingScheduler = new RecordingScheduler(
     reconcileScheduledRecordings,
     30_000,
-    () => localAlerts.report("recording_interrupted", "Não foi possível atualizar as gravações agendadas."),
+    () =>
+      localAlerts.report(
+        "recording_interrupted",
+        "Não foi possível atualizar as gravações agendadas.",
+      ),
   );
-  motionSubscriptions = new MotionSubscriptionRegistry({
-    getClient: async (cameraId) => {
-      const camera = await getCameraRecord(cameraId);
-      const onvifUrl = camera?.endpoints.find((endpoint) => endpoint.service === "onvif")?.url;
-      if (!camera?.active || !onvifUrl) return null;
-      const credential = await cameraCredential(cameraId, "onvif");
-      const { OnvifAdapter, createFetchOnvifTransport } = await import("../workers/camera/onvif-adapter.js");
-      const adapter = new OnvifAdapter({ deviceServiceUrl: onvifUrl, username: credential?.username, password: credential?.password, transport: createFetchOnvifTransport(), timeoutMs: 10_000 });
-      if (!await adapter.getEventServiceUrl()) return null;
-      let reference: string | null = null;
-      return {
-        subscribe: async () => { const created = await adapter.createPullPointSubscription(); reference = created.reference; return created; },
-        renew: async () => { if (!reference) throw new Error("Assinatura PullPoint ausente."); return adapter.renewPullPointSubscription(reference); },
-        unsubscribe: async () => { if (reference) await adapter.unsubscribePullPointSubscription(reference); },
-        pull: async () => reference ? adapter.pullPointMessages(reference) : [],
-      };
+  motionSubscriptions = new MotionSubscriptionRegistry(
+    {
+      getClient: async (cameraId) => {
+        const camera = await getCameraRecord(cameraId);
+        const onvifUrl = camera?.endpoints.find(
+          (endpoint) => endpoint.service === "onvif",
+        )?.url;
+        if (!camera?.active || !onvifUrl) return null;
+        const credential = await cameraCredential(cameraId, "onvif");
+        const { OnvifAdapter, createFetchOnvifTransport } =
+          await import("../workers/camera/onvif-adapter.js");
+        const adapter = new OnvifAdapter({
+          deviceServiceUrl: onvifUrl,
+          username: credential?.username,
+          password: credential?.password,
+          transport: createFetchOnvifTransport(),
+          timeoutMs: 10_000,
+        });
+        if (!(await adapter.getEventServiceUrl())) return null;
+        let reference: string | null = null;
+        return {
+          subscribe: async () => {
+            const created = await adapter.createPullPointSubscription();
+            reference = created.reference;
+            return created;
+          },
+          renew: async () => {
+            if (!reference) throw new Error("Assinatura PullPoint ausente.");
+            return adapter.renewPullPointSubscription(reference);
+          },
+          unsubscribe: async () => {
+            if (reference)
+              await adapter.unsubscribePullPointSubscription(reference);
+          },
+          pull: async () =>
+            reference ? adapter.pullPointMessages(reference) : [],
+        };
+      },
     },
-  }, handleMotionMessages);
+    handleMotionMessages,
+  );
   await reconcileMotionPrebuffer();
   if (cameraList.ok) {
     for (const camera of cameraList.value as CameraRecord[]) {
@@ -2843,7 +3517,9 @@ async function initializeDatabase(): Promise<void> {
     }
   }
   recordingScheduler.start();
-  app.on("browser-window-focus", () => recordingScheduler?.refreshInBackground());
+  app.on("browser-window-focus", () =>
+    recordingScheduler?.refreshInBackground(),
+  );
   powerMonitor.on("resume", () => recordingScheduler?.refreshInBackground());
 
   ptzRegistry = new PtzControllerRegistry({
@@ -2858,23 +3534,41 @@ async function initializeDatabase(): Promise<void> {
         "onvifUrl=",
         onvifUrl ?? "(sem onvif)",
       );
-      if (!onvifUrl) throw new Error("Esta câmera não possui um endereço ONVIF configurado. Revise o cadastro em Câmeras.");
-      const { OnvifAdapter, createFetchOnvifTransport } =
+      if (!onvifUrl)
+        throw new Error(
+          "Esta câmera não possui um endereço ONVIF configurado. Revise o cadastro em Câmeras.",
+        );
+      const { createFetchOnvifTransport } =
         await import("../workers/camera/onvif-adapter.js");
       const credential = await cameraCredential(cameraId, "onvif");
       console.log(
         "[ptz:getAdapter] credencial=",
         credential ? `user=${credential.username}` : "(sem credencial)",
       );
-      const adapter = new OnvifAdapter({
+      const { connectOnvifPtz } = await import("./services/ptz-connection.js");
+      const { adapter, info } = await connectOnvifPtz({
         deviceServiceUrl: onvifUrl,
         username: credential?.username,
         password: credential?.password,
         transport: createFetchOnvifTransport(),
-        timeoutMs: 10_000,
+        timeoutMs: 3_000,
       });
-      const info = await adapter.detect();
       const ptzSupported = info.ptzSupported;
+      if (database && info.capabilities.onvif !== "error") {
+        const saved = await database.request("camera.setCapabilities", {
+          cameraId,
+          onvif: true,
+          rtsp: info.capabilities.rtsp === "supported",
+          snapshot: info.capabilities.snapshot === "supported",
+          ptz: ptzSupported,
+          h264: info.capabilities.h264 === "supported",
+          h265: info.capabilities.h265 === "supported",
+          mjpeg: info.capabilities.mjpeg === "supported",
+          recording: info.capabilities.recording === "supported",
+        });
+        if (!saved.ok) throw new Error("Não foi possível atualizar as capacidades PTZ da câmera.");
+        if (camera?.supportsPtz !== ptzSupported) await emitCameraChanged();
+      }
       console.log("[ptz:getAdapter] ptzSupported=", ptzSupported);
       return ptzSupported ? adapter : null;
     },

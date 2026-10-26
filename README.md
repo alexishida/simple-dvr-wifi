@@ -50,14 +50,18 @@ O projeto exige Node.js `>=22 <26` e npm somente para desenvolvimento.
 
 ## Começar a monitorar
 
-1. Abra **Câmeras** e escolha **Descobrir na rede** ou **Adicionar manualmente**.
-2. Informe nome e credenciais da câmera. Na descoberta, o endereço ONVIF já vem preenchido.
-3. Clique em **Testar conexão**. Quando a câmera fornece uma URL RTSP via ONVIF,
-   o aplicativo testa e preenche essa URL. Para alguns modelos identificados com
-   precisão, também pode testar um endpoint da [referência local de marca e
-   modelo](docs/referencias-rtsp-marca-modelo.md).
-4. Confira a URL preenchida e confirme o cadastro. Você também pode escolher um
-   preset ou informar uma URL RTSP manualmente.
+1. Abra **Câmeras** e escolha **Adicionar câmera**.
+2. Escolha um dos três métodos:
+   - **Detectar automaticamente** inicia uma busca rápida ONVIF. Se a câmera não aparecer, use **Buscar por portas** e selecione a interface de rede. A varredura TCP não exige resposta a ping e só exibe dispositivos com evidência de RTSP ou ONVIF; respostas HTTP/HTTPS isoladas são descartadas;
+   - **Configurar por IP** para informar IP ou hostname e as credenciais;
+   - **Adicionar URL manualmente** para equipamentos sem descoberta compatível.
+3. Nos dois fluxos automáticos, o aplicativo identifica fabricante/modelo,
+   consulta o ONVIF e valida o stream RTSP antes de liberar o cadastro. A URL é
+   tratada como configuração avançada.
+4. Se a conexão falhar, corrija as credenciais e tente novamente na mesma tela.
+   **Voltar** retorna à etapa anterior, preservando os resultados da busca.
+   Se não houver stream compatível, use **Inserir URL manual**. O endereço,
+   identidade e endpoint ONVIF já descobertos são preservados quando disponíveis.
 5. Em **Live**, organize as câmeras na grade e use os controles para tela cheia,
    snapshot ou gravação.
 

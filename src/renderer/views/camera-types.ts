@@ -18,6 +18,9 @@ export interface CameraDraft {
 export interface CameraFormProps {
   initial?: CameraDraft;
   editingId?: string | null;
+  advancedInitially?: boolean;
+  verifiedAutomatically?: boolean;
   onSaved: () => void;
   onCancel: () => void;
+  onBack?: (draft: CameraDraft) => void;
 }

@@ -277,52 +277,46 @@ export class CameraManagementService {
     const parsedOnvif = input.onvifUrl ? parseHttpUrl(input.onvifUrl) : null;
     if (input.onvifUrl && !parsedOnvif) throw new Error("URL ONVIF inválida.");
 
-    const camera = await this.updateAddress(cameraId, {
-      host: input.host.trim() || parsedRtsp?.host,
-      port: input.port ?? parsedRtsp?.port ?? null,
-    });
-    if (!camera) return null;
+    const password =
+      input.password || parsedRtsp?.password || parsedOnvif?.password;
+    const username =
+      input.username?.trim() || parsedRtsp?.username || parsedOnvif?.username;
+    // A blank password preserves each service's secret, including distinct ONVIF/RTSP accounts.
+    if (!password && username) {
+      const stored = await Promise.all([
+        this.credentials.getCredentialDetails(cameraId, "onvif"),
+        this.credentials.getCredentialDetails(cameraId, "rtsp"),
+      ]);
+      if (!stored.some((credential) => credential?.username === username)) {
+        throw new Error(
+          "O usuário mudou. Digite a senha para salvar com este usuário.",
+        );
+      }
+    }
+    const endpoints: Array<{ service: "onvif" | "rtsp"; url: string | null }> = [];
+    if (input.onvifUrl !== undefined)
+      endpoints.push({ service: "onvif", url: parsedOnvif?.sanitizedUrl ?? null });
+    if (input.rtspUrl !== undefined)
+      endpoints.push({ service: "rtsp", url: parsedRtsp?.sanitizedUrl ?? null });
     const response = await this.database.request("camera.update", {
       id: cameraId,
       name: input.name.trim(),
+      host: input.host.trim() || parsedRtsp?.host,
+      port: input.port ?? parsedRtsp?.port ?? null,
+      endpoints,
     });
-    if (!response.ok) return null;
-
-    if (parsedOnvif) {
-      await this.database.request("camera.setEndpoint", {
-        cameraId,
-        service: "onvif",
-        url: parsedOnvif.sanitizedUrl,
-      });
-    }
-    if (parsedRtsp) {
-      await this.database.request("camera.setEndpoint", {
-        cameraId,
-        service: "rtsp",
-        url: parsedRtsp.sanitizedUrl,
-      });
-    }
-    if (input.password) {
+    if (!response.ok)
+      throw new Error("Não foi possível salvar a configuração da câmera.");
+    if (password) {
       await this.updateCredentials(cameraId, {
-        username: input.username ?? null,
-        password: input.password,
-        rtspPassword: input.password,
+        username: username ?? null,
+        password,
+        rtspPassword: password,
         sdCardUsername: input.sdCardUsername,
         sdCardPassword: input.sdCardPassword,
       });
-    } else if (input.username?.trim()) {
-      const current =
-        (await this.credentials.getCredentialDetails(cameraId, "onvif")) ??
-        (await this.credentials.getCredentialDetails(cameraId, "rtsp"));
-      if (current) {
-        await this.updateCredentials(cameraId, {
-          username: input.username,
-          password: current.password,
-          rtspPassword: current.password,
-        });
-      }
     }
-    if (input.sdCardPassword && !input.password) {
+    if (input.sdCardPassword && !password) {
       await this.updateCredentials(cameraId, {
         sdCardUsername: input.sdCardUsername,
         sdCardPassword: input.sdCardPassword,

@@ -105,6 +105,18 @@ const tapoAdapter = new OnvifAdapter({
   transport: tapoTransport,
 })
 await tapoAdapter.detect()
+for (const pan of [-1, -0.5, -0.1, -0.05, 0.05, 0.1, 0.5, 1]) {
+  await tapoAdapter.continuousMove({
+    profileToken: 'profile-1',
+    velocity: { pan, tilt: 0 },
+  })
+  const body = tapoRequests.at(-1)
+  assert.match(body, /<tptz:RelativeMove>/)
+  const translation = Number(body.match(/<tt:PanTilt x="([^"]+)"/)?.[1])
+  assert.ok(Math.abs(translation) <= 0.1, 'Tapo steps must stay small and within the normalized ONVIF range')
+  assert.equal(Math.sign(translation), Math.sign(pan), 'Left and right must preserve their direction')
+  assert.ok(Math.abs(translation - pan / 10) < 1e-10, 'Lower speeds must produce smaller steps')
+}
 await tapoAdapter.continuousMove({
   profileToken: 'profile-1',
   velocity: { pan: 0.5 },
@@ -116,7 +128,7 @@ assert.match(
 )
 assert.match(
   tapoMove,
-  /<tt:PanTilt x="10" y="0" space="http:\/\/www\.onvif\.org\/ver10\/tptz\/PanTiltSpaces\/TranslationGenericSpace"\/>/,
+  /<tt:PanTilt x="0.05" y="0" space="http:\/\/www\.onvif\.org\/ver10\/tptz\/PanTiltSpaces\/TranslationGenericSpace"\/>/,
 )
 await tapoAdapter.stop({
   profileToken: 'profile-1',

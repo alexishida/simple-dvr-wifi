@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { LiveVideo } from "../src/renderer/components/LiveVideo.tsx";
 import { audioCodecFromSdp } from "../src/renderer/media-codecs.ts";
 import { PtzPanel } from "../src/renderer/components/PtzPanel.tsx";
+import { SidebarPtz } from "../src/renderer/App.tsx";
 
 export async function run() {
   const check = (condition, message) => {
@@ -176,7 +177,7 @@ export async function run() {
     container.append(ptzHost);
     const ptzRoot = createRoot(ptzHost);
     let connectAttempts = 0;
-    window.api.ptz = {connect:async () => {
+    window.api.ptz = {status: async () => ({ok:true,value:{stopBlocked:false}}), connect:async () => {
       connectAttempts++;
       if (connectAttempts === 1) return {ok:false,error:{message:"A câmera recusou a autenticação ONVIF."}};
       if (connectAttempts === 2) throw new Error("offline");
@@ -191,6 +192,84 @@ export async function run() {
       flushSync(() => retry().click());
       await waitFor(() => !ptzHost.querySelector(".ptz-btn").disabled);
       check(connectAttempts === 3 && !retry(), "PTZ must recover after an explicit retry");
+      const moves = [];
+      const stops = [];
+      const connections = [];
+      let finishMove;
+      let stopBlocked = false;
+      window.api.ptz = {
+        connect: async (id) => { connections.push(id); return {ok:true,value:{connected:true}}; },
+        status: async () => ({ok:true,value:{stopBlocked}}),
+        listPresets: async () => ({ok:true,value:[]}),
+        move: (id, velocity) => {
+          moves.push({id,velocity});
+          return new Promise(resolve => { finishMove = resolve; });
+        },
+        stop: async (id, trigger) => {
+          stops.push({id,trigger});
+          return stopBlocked ? {ok:false,error:{message:"Parada não confirmada"}} : {ok:true};
+        },
+      };
+      const camera = {id:"new-onvif-camera",name:"Entrada",active:true,hasOnvif:true,supportsPtz:false};
+      const sidebar = (selected = camera) => flushSync(() => ptzRoot.render(createElement(SidebarPtz, {
+        camera:selected,cameras:[camera, { ...camera, id:"second-camera",name:"Garagem" }],onSelect() {},
+      })));
+      sidebar();
+      await waitFor(() => !ptzHost.querySelector(".ptz-btn").disabled);
+      check(connections.includes(camera.id), "A new ONVIF camera must connect without a cached PTZ flag");
+      check(!ptzHost.querySelector("dialog") && ptzHost.querySelector("#sidebar-ptz-camera"), "PTZ controls and selection must be inline in the sidebar");
+      const key = (type) => flushSync(() => ptzHost.querySelector('[aria-label="Direita"]').dispatchEvent(new KeyboardEvent(type, {key:"Enter",bubbles:true,cancelable:true})));
+      key("keydown");
+      await new Promise(resolve => setTimeout(resolve, 600));
+      check(moves.length === 1, "Pending movements must not accumulate in the command queue");
+      check(moves[0].velocity.pan === 0.5, "Short steps must retain the previously working motor speed");
+      check(stops.length === 1, "Short steps must request a stop without waiting for key release or a slow move response");
+      key("keyup");
+      await waitFor(() => stops.length === 1);
+      finishMove({ok:true,value:{started:true}});
+      await new Promise(resolve => setTimeout(resolve, 20));
+      sidebar({...camera,id:"second-camera",name:"Garagem"});
+      await waitFor(() => connections.includes("second-camera") && !ptzHost.querySelector(".ptz-btn").disabled);
+      check(stops.length === 1, "A late move response must not resurrect a stopped movement");
+      stopBlocked = true;
+      key("keydown");
+      finishMove({ok:true,value:{started:true}});
+      await new Promise(resolve => setTimeout(resolve, 20));
+      key("keyup");
+      await waitFor(() => ptzHost.textContent.includes("Tentar parar novamente"));
+      check(ptzHost.querySelector(".ptz-btn").disabled, "Failed stops must block further movement");
+      stopBlocked = false;
+      flushSync(() => [...ptzHost.querySelectorAll("button")].find(button => button.textContent.includes("Tentar parar novamente")).click());
+      await waitFor(() => !ptzHost.querySelector(".ptz-btn").disabled);
+      check(stops.at(-1).id === "second-camera", "Stop retry must target the selected camera");
+      const stopsBeforeExplicitStop = stops.length;
+      flushSync(() => ptzHost.querySelector('[aria-label="Parar movimento"]').click());
+      await waitFor(() => stops.length === stopsBeforeExplicitStop + 1);
+      check(stops.at(-1).id === "second-camera", "The center stop must reach the selected camera even without a locally held direction");
+      for (const [label, pan, tilt] of [["Esquerda", -0.5, 0], ["Cima", 0, 0.5], ["Baixo", 0, -0.5]]) {
+        const direction = ptzHost.querySelector(`[aria-label="${label}"]`);
+        const stopsBeforeStep = stops.length;
+        const movesBeforeStep = moves.length;
+        flushSync(() => direction.dispatchEvent(new KeyboardEvent("keydown", {key:"Enter",bubbles:true,cancelable:true})));
+        check(moves.length === movesBeforeStep + 1, `${label} must send one short step`);
+        check(moves.at(-1).velocity.pan === pan && moves.at(-1).velocity.tilt === tilt, `${label} must use the correct axis and working motor speed`);
+        finishMove({ok:true,value:{started:true}});
+        await waitFor(() => stops.length === stopsBeforeStep + 1);
+        check(stops.at(-1).id === "second-camera", `${label} must stop the selected camera automatically`);
+        flushSync(() => direction.dispatchEvent(new KeyboardEvent("keyup", {key:"Enter",bubbles:true,cancelable:true})));
+      }
+      const mode = ptzHost.querySelector('select[id$="-mode"]');
+      flushSync(() => {
+        mode.value = "continuous";
+        mode.dispatchEvent(new Event("change", {bubbles:true}));
+      });
+      const stopsBeforeContinuous = stops.length;
+      key("keydown");
+      finishMove({ok:true,value:{started:true}});
+      await new Promise(resolve => setTimeout(resolve, 300));
+      check(stops.length === stopsBeforeContinuous, "Continuous mode must not inherit the short-step stop timer");
+      key("keyup");
+      await waitFor(() => stops.length === stopsBeforeContinuous + 1);
     } finally { ptzRoot.unmount(); }
     return {
       passed: true,

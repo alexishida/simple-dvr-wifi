@@ -1,42 +1,198 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PtzControlService } from "../src/main/services/ptz-control.ts";
+import { connectOnvifPtz } from "../src/main/services/ptz-connection.ts";
 import { decideResourceState } from "../src/workers/media/resource-policy.ts";
 import { MotionSubscriptionRegistry } from "../src/main/services/motion-subscriptions.ts";
-import { MotionEventNormalizer, MotionRecordingTimers, MOTION_MISSING_END_TIMEOUT_MS, parseOnvifMotionNotification, parseOnvifMotionNotifications } from "../src/main/services/motion-events.ts";
-import { buildProbeMessage, discoverOnvifDevices, parseProbeMatches } from "../src/main/services/onvif-discovery.ts";
+import {
+  MotionEventNormalizer,
+  MotionRecordingTimers,
+  MOTION_MISSING_END_TIMEOUT_MS,
+  parseOnvifMotionNotification,
+  parseOnvifMotionNotifications,
+} from "../src/main/services/motion-events.ts";
+import {
+  buildProbeMessage,
+  discoverOnvifDevices,
+  parseProbeMatches,
+} from "../src/main/services/onvif-discovery.ts";
+import {
+  discoverActiveNetworkCameras,
+  ipv4Range,
+  mergeNetworkCameraResults,
+} from "../src/main/services/network-camera-discovery.ts";
 import { SdCardAdapterRegistry } from "../src/main/services/sd-card-adapter.ts";
 import { cameraTestCredentials } from "../src/main/services/camera-test-credentials.ts";
+import { discoverOnvifIdentity, probeOnvifDiscovery } from "../src/main/services/onvif-discovery-identity.ts";
+
+test("active discovery requires ONVIF SOAP evidence rather than an HTTP status", async () => {
+  const endpoint = "http://camera/onvif/device_service";
+  for (const status of [200, 401, 403, 404, 405, 500]) {
+    assert.equal(await probeOnvifDiscovery(endpoint, undefined, async () =>
+      new Response("<html><body>Router login</body></html>", { status })), null);
+  }
+  const fault = '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:ter="http://www.onvif.org/ver10/error"><s:Body><s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:NotAuthorized</s:Value></s:Subcode></s:Code></s:Fault></s:Body></s:Envelope>';
+  assert.deepEqual(await probeOnvifDiscovery(endpoint, undefined, async () =>
+    new Response(fault, { status: 400 })), { identity: null });
+  assert.equal(await probeOnvifDiscovery(endpoint, undefined, async () =>
+    new Response(fault.replace("http://www.onvif.org/ver10/error", "http://example.org/errors"), { status: 500 })), null);
+});
+
+test("discovery reads ONVIF identity once without credentials and tolerates protected devices", async () => {
+  let calls = 0;
+  const identity = await discoverOnvifIdentity("http://camera/onvif/device_service", undefined, async (_url, init) => {
+    calls++;
+    assert.equal(init.method, "POST");
+    assert.equal(init.redirect, "manual");
+    assert.equal(init.credentials, "omit");
+    assert.equal(JSON.stringify(init).includes("UsernameToken"), false);
+    assert.equal(JSON.stringify(init.headers).includes("Authorization"), false);
+    assert.ok(init.body.includes("GetDeviceInformation"));
+    return new Response('<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetDeviceInformationResponse><Manufacturer>TP-Link</Manufacturer><Model>Tapo C310</Model></GetDeviceInformationResponse></s:Body></s:Envelope>');
+  });
+  assert.deepEqual(identity, { manufacturer: "TP-Link", model: "Tapo C310" });
+  assert.equal(calls, 1);
+  for (const status of [401, 403, 500]) {
+    assert.equal(await discoverOnvifIdentity("http://camera/onvif/device_service", undefined, async () => new Response("protected", { status })), null);
+  }
+  assert.equal(await discoverOnvifIdentity("http://camera/onvif/device_service", undefined, async () => new Response("x".repeat(65537))), null);
+  assert.equal(await discoverOnvifIdentity("http://camera/onvif/device_service", undefined, async () => new Response("invalid xml")), null);
+});
 
 test("editing a camera tests stored per-service credentials without exposing them to the form", async () => {
-  const camera = { id: "camera", endpoints: [
-    { service: "onvif", url: "http://camera:2020/onvif/device_service" },
-    { service: "rtsp", url: "rtsp://camera:554/stream1" },
-  ] };
+  const camera = {
+    id: "camera",
+    endpoints: [
+      { service: "onvif", url: "http://camera:2020/onvif/device_service" },
+      { service: "rtsp", url: "rtsp://camera:554/stream1" },
+    ],
+  };
   const loads = [];
   const load = async (id, service) => {
     loads.push([id, service]);
     return { username: "user", password: `${service}-saved` };
   };
   for (const endpoint of camera.endpoints) {
-    assert.deepEqual(await cameraTestCredentials({ camera, ...endpoint, username: "user", password: null, load }),
-      { username: "user", password: `${endpoint.service}-saved` });
+    assert.deepEqual(
+      await cameraTestCredentials({
+        camera,
+        ...endpoint,
+        username: "user",
+        password: null,
+        load,
+      }),
+      { username: "user", password: `${endpoint.service}-saved` },
+    );
   }
-  assert.deepEqual(loads, [["camera", "onvif"], ["camera", "rtsp"]]);
-  assert.deepEqual(await cameraTestCredentials({ camera, service: "rtsp", url: "rtsp://other/live", username: "new-user", password: "new-password", load }),
-    { username: "new-user", password: "new-password" });
-  assert.equal(loads.length, 2, "Explicit passwords must not load stored secrets");
-  for (const url of ["rtsp://other:554/stream1", "rtsp://camera:8554/stream1", "rtsp://camera:554/changed"]) {
-    await assert.rejects(cameraTestCredentials({ camera, service: "rtsp", url, username: "user", password: null, load }), /endereço.*mudou/);
+  assert.deepEqual(loads, [
+    ["camera", "onvif"],
+    ["camera", "rtsp"],
+  ]);
+  assert.deepEqual(
+    await cameraTestCredentials({
+      camera,
+      service: "rtsp",
+      url: "rtsp://other/live",
+      username: "new-user",
+      password: "new-password",
+      load,
+    }),
+    { username: "new-user", password: "new-password" },
+  );
+  assert.equal(
+    loads.length,
+    2,
+    "Explicit passwords must not load stored secrets",
+  );
+  for (const url of [
+    "rtsp://other:554/stream1",
+    "rtsp://camera:8554/stream1",
+    "rtsp://camera:554/changed",
+  ]) {
+    await assert.rejects(
+      cameraTestCredentials({
+        camera,
+        service: "rtsp",
+        url,
+        username: "user",
+        password: null,
+        load,
+      }),
+      /endereço.*mudou/,
+    );
   }
-  assert.equal(loads.length, 2, "Unregistered destinations must be rejected before loading secrets");
-  await assert.rejects(cameraTestCredentials({ camera, ...camera.endpoints[0], username: "changed", password: null, load }), /usuário mudou/);
-  await assert.rejects(cameraTestCredentials({ camera, ...camera.endpoints[0], username: "user", password: null, load: async () => null }), /Não há senha salva/);
-  assert.deepEqual(await cameraTestCredentials({ camera: null, ...camera.endpoints[0], username: null, password: null, load }), { username: null, password: null });
+  assert.equal(
+    loads.length,
+    2,
+    "Unregistered destinations must be rejected before loading secrets",
+  );
+  await assert.rejects(
+    cameraTestCredentials({
+      camera,
+      ...camera.endpoints[0],
+      username: "changed",
+      password: null,
+      load,
+    }),
+    /usuário mudou/,
+  );
+  assert.deepEqual(
+    await cameraTestCredentials({
+      camera,
+      ...camera.endpoints[0],
+      username: "user",
+      password: null,
+      load: async () => null,
+    }),
+    { username: "user", password: null },
+  );
+  assert.deepEqual(
+    await cameraTestCredentials({
+      camera: null,
+      ...camera.endpoints[0],
+      username: null,
+      password: null,
+      load,
+    }),
+    { username: null, password: null },
+  );
 });
 import { autoRtspCandidate } from "../src/main/services/camera-auto-config.ts";
+import { onvifEndpointCandidates, autoConfigureCameraHost } from "../src/main/services/camera-host-auto-config.ts";
+
+test("automatic setup preserves explicit ports and authentication failures for retry", async (t) => {
+  assert.equal(onvifEndpointCandidates("192.168.1.10:2020")[0], "http://192.168.1.10:2020/onvif/device_service");
+  const camera = new OnvifSimulator({ username: "admin", password: "secret" });
+  await camera.start();
+  t.after(() => camera.stop());
+  const result = await autoConfigureCameraHost({
+    host: "127.0.0.1", onvifUrl: camera.url, username: "admin", password: "wrong",
+  });
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.onvifUrl, camera.url);
+  assert.equal(result.segments[0].status, "error");
+  await assert.rejects(autoConfigureCameraHost({ host: "192.168.1.10", onvifUrl: camera.url }), /pertencer/);
+});
+
+test("automatic setup bounds the whole detection and stops after a failed identity request", async (t) => {
+  let requests = 0;
+  const server = createHttpServer(() => { requests++; });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const start = Date.now();
+  const result = await autoConfigureCameraHost({
+    host: "127.0.0.1", onvifUrl: `http://127.0.0.1:${server.address().port}/onvif/device_service`, timeoutMs: 100,
+  });
+  assert.equal(result.status, "unavailable");
+  assert.equal(requests, 1, "A dead endpoint must not trigger media/PTZ/profile requests");
+  assert.ok(Date.now() - start < 1500, "The total deadline must bound all requests");
+});
 import { presetForOnvifIdentity } from "../src/shared/camera-presets.ts";
-import { OnvifAdapter, OnvifAuthenticationError, createFetchOnvifTransport } from "../src/workers/camera/onvif-adapter.ts";
+import {
+  OnvifAdapter,
+  OnvifAuthenticationError,
+  createFetchOnvifTransport,
+} from "../src/workers/camera/onvif-adapter.ts";
 import { OnvifSimulator } from "../src/workers/simulators/onvif-simulator.ts";
 import { generateMediaMtxConfig } from "../src/workers/media/mediamtx-config.ts";
 
@@ -53,27 +209,87 @@ test("ONVIF authentication faults on HTTP 400 cannot become an empty PTZ discove
     const requests = [];
     const adapter = new OnvifAdapter({
       deviceServiceUrl: "http://camera/onvif/device_service",
-      username: "user", password: "password",
-      transport: { post: async (_url, body) => {
-        requests.push(body);
-        const fault = body.includes(`<${faultOperation === "GetProfiles" ? "trt" : "tds"}:${faultOperation}`);
-        return { status: fault ? 400 : 200, body: `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>${fault ? '<s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:NotAuthorized</s:Value></s:Subcode></s:Code><s:Reason><s:Text>Authority failure</s:Text></s:Reason></s:Fault>' : ""}</s:Body></s:Envelope>` };
-      } },
+      username: "user",
+      password: "password",
+      transport: {
+        post: async (_url, body) => {
+          requests.push(body);
+          const fault = body.includes(
+            `<${faultOperation === "GetProfiles" ? "trt" : "tds"}:${faultOperation}`,
+          );
+          return {
+            status: fault ? 400 : 200,
+            body: `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>${fault ? "<s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:NotAuthorized</s:Value></s:Subcode></s:Code><s:Reason><s:Text>Authority failure</s:Text></s:Reason></s:Fault>" : ""}</s:Body></s:Envelope>`,
+          };
+        },
+      },
     });
-    await assert.rejects(() => adapter.detect(), error => error instanceof OnvifAuthenticationError && /autenticação ONVIF/.test(error.message));
-    if (faultOperation === "GetDeviceInformation") assert.equal(requests.length, 2, "Discovery must stop when authentication is rejected");
+    await assert.rejects(
+      () => adapter.detect(),
+      (error) =>
+        error instanceof OnvifAuthenticationError &&
+        /autenticação ONVIF/.test(error.message),
+    );
+    if (faultOperation === "GetDeviceInformation")
+      assert.equal(
+        requests.length,
+        2,
+        "Discovery must stop when authentication is rejected",
+      );
   }
 });
 
 test("automatic RTSP prefers the ONVIF URI and keeps credentials out of the URL", () => {
-  const identity = { manufacturer: "TP-Link", model: "Tapo C310", firmwareVersion: "", serialNumber: "" };
-  assert.deepEqual(autoRtspCandidate({ identity, rtspMainUrl: "rtsp://admin:secret@192.168.1.60/live" }, "192.168.1.60", null), {
-    url: "rtsp://192.168.1.60/live", source: "onvif",
-  });
-  assert.deepEqual(autoRtspCandidate({ identity, rtspMainUrl: null }, "192.168.1.60", null), {
-    url: "rtsp://192.168.1.60:554/stream1", source: "reference",
-  });
-  assert.equal(autoRtspCandidate({ identity: { ...identity, manufacturer: "Haiz" }, rtspMainUrl: null }, "192.168.1.60", null), null);
+  const identity = {
+    manufacturer: "TP-Link",
+    model: "Tapo C310",
+    firmwareVersion: "",
+    serialNumber: "",
+  };
+  assert.deepEqual(
+    autoRtspCandidate(
+      { identity, rtspMainUrl: "rtsp://admin:secret@192.168.1.60/live" },
+      "192.168.1.60",
+      null,
+    ),
+    {
+      url: "rtsp://192.168.1.60/live",
+      source: "onvif",
+    },
+  );
+  assert.deepEqual(
+    autoRtspCandidate({ identity, rtspMainUrl: null }, "192.168.1.60", null),
+    {
+      url: "rtsp://192.168.1.60:554/stream1",
+      source: "reference",
+    },
+  );
+  assert.equal(
+    autoRtspCandidate(
+      { identity: { ...identity, manufacturer: "Haiz" }, rtspMainUrl: null },
+      "192.168.1.60",
+      null,
+    ),
+    null,
+  );
+});
+
+test("automatic IP setup tries a small fixed ONVIF list on only the supplied host", () => {
+  assert.deepEqual(onvifEndpointCandidates("192.168.1.60"), [
+    "http://192.168.1.60/onvif/device_service",
+    "http://192.168.1.60:8080/onvif/device_service",
+    "http://192.168.1.60:8899/onvif/device_service",
+    "http://192.168.1.60:2020/onvif/device_service",
+    "https://192.168.1.60/onvif/device_service",
+  ]);
+  assert.deepEqual(onvifEndpointCandidates("camera.local"), [
+    "http://camera.local/onvif/device_service",
+    "http://camera.local:8080/onvif/device_service",
+    "http://camera.local:8899/onvif/device_service",
+    "http://camera.local:2020/onvif/device_service",
+    "https://camera.local/onvif/device_service",
+  ]);
+  assert.deepEqual(onvifEndpointCandidates("camera.local/path"), []);
 });
 
 test("MediaMTX records the original audio track in fMP4 without tying it to player mute", async (t) => {
@@ -89,7 +305,13 @@ test("MediaMTX records the original audio track in fMP4 without tying it to play
     rtspPort: 18_003,
     rtmpPort: 18_004,
     configDir: directory,
-    recordPath: join(directory, "recordings", "%path", "%Y-%m-%d", "%H-%M-%S-%f"),
+    recordPath: join(
+      directory,
+      "recordings",
+      "%path",
+      "%Y-%m-%d",
+      "%H-%M-%S-%f",
+    ),
     recordSegmentDurationMs: 2_000,
   });
   const config = await readFile(result.configPath, "utf8");
@@ -101,7 +323,10 @@ test("MediaMTX records the original audio track in fMP4 without tying it to play
 });
 
 test("ONVIF identity from a simulated camera selects a model-specific RTSP fallback", async (t) => {
-  const camera = new OnvifSimulator({ manufacturer: "TP-Link", model: "Tapo C310" });
+  const camera = new OnvifSimulator({
+    manufacturer: "TP-Link",
+    model: "Tapo C310",
+  });
   await camera.start();
   t.after(() => camera.stop());
   const info = await new OnvifAdapter({
@@ -117,58 +342,142 @@ test("ONVIF identity from a simulated camera selects a model-specific RTSP fallb
   });
 });
 
-test("ONVIF profiles without optional encoders preserve Intelbras PTZ and service URIs", async () => {
+test("Intelbras PTZ preserves profiles and keeps commands working after the discovery deadline", async () => {
   for (const includeVideo of [true, false]) {
     const requests = [];
-    const adapter = new OnvifAdapter({
+    const discovery = new AbortController();
+    const { adapter, info } = await connectOnvifPtz({
       deviceServiceUrl: "http://camera.local/onvif/device_service",
+      timeoutMs: 3_000,
       transport: {
-        post: async (url, body) => {
+        post: async (url, body, options) => {
+          options?.signal?.throwIfAborted();
+          assert.equal(options.timeoutMs, 3_000);
+          if (body.includes("ContinuousMove") || body.includes("<tptz:Stop>")) {
+            assert.equal(options.signal, undefined, "PTZ commands must not inherit the expired discovery deadline");
+          } else {
+            assert.equal(options.signal, discovery.signal);
+          }
           requests.push({ url, body });
           let response = "<Success/>";
-          if (body.includes("GetDeviceInformation")) response = "<GetDeviceInformationResponse><Manufacturer>IntelBras</Manufacturer><Model>iM4-C</Model></GetDeviceInformationResponse>";
+          if (body.includes("GetDeviceInformation"))
+            response =
+              "<GetDeviceInformationResponse><Manufacturer>IntelBras</Manufacturer><Model>iM4-C</Model></GetDeviceInformationResponse>";
           if (body.includes("GetServices")) response = "<GetServicesResponse/>";
-          if (body.includes("GetCapabilities")) response = '<GetCapabilitiesResponse><Capabilities><Media><XAddr>http://camera.local/onvif/media_service</XAddr></Media><PTZ><XAddr>http://camera.local/onvif/ptz_service</XAddr></PTZ></Capabilities></GetCapabilitiesResponse>';
-          if (body.includes("GetProfiles")) response = `<GetProfilesResponse>${[
-            ["MainStream", 1920, 1080, 20], ["SubStream", 640, 480, 15],
-          ].map(([name, width, height, fps], index) => `<Profiles token="MediaProfile${index}"><Name>${name}</Name>${includeVideo ? `<VideoEncoderConfiguration><Encoding>H264</Encoding><Resolution><Width>${width}</Width><Height>${height}</Height></Resolution><RateControl><FrameRateLimit>${fps}</FrameRateLimit></RateControl></VideoEncoderConfiguration>` : ""}<PTZConfiguration token="PTZConfig"/></Profiles>`).join("")}</GetProfilesResponse>`;
-          if (body.includes("GetStreamUri")) response = `<GetStreamUriResponse><MediaUri><Uri>rtsp://camera.local/${body.includes("MediaProfile1") ? "sub" : "main"}</Uri></MediaUri></GetStreamUriResponse>`;
-          if (body.includes("GetSnapshotUri")) response = "<GetSnapshotUriResponse><MediaUri><Uri>http://camera.local/snapshot</Uri></MediaUri></GetSnapshotUriResponse>";
-          return { status: 200, body: `<Envelope><Body>${response}</Body></Envelope>` };
+          if (body.includes("GetCapabilities"))
+            response =
+              "<GetCapabilitiesResponse><Capabilities><Media><XAddr>http://camera.local/onvif/media_service</XAddr></Media><PTZ><XAddr>http://camera.local/onvif/ptz_service</XAddr></PTZ></Capabilities></GetCapabilitiesResponse>";
+          if (body.includes("GetProfiles"))
+            response = `<GetProfilesResponse>${[
+              ["MainStream", 1920, 1080, 20],
+              ["SubStream", 640, 480, 15],
+            ]
+              .map(
+                ([name, width, height, fps], index) =>
+                  `<Profiles token="MediaProfile${index}"><Name>${name}</Name>${includeVideo ? `<VideoEncoderConfiguration><Encoding>H264</Encoding><Resolution><Width>${width}</Width><Height>${height}</Height></Resolution><RateControl><FrameRateLimit>${fps}</FrameRateLimit></RateControl></VideoEncoderConfiguration>` : ""}<PTZConfiguration token="PTZConfig"/></Profiles>`,
+              )
+              .join("")}</GetProfilesResponse>`;
+          if (body.includes("GetStreamUri"))
+            response = `<GetStreamUriResponse><MediaUri><Uri>rtsp://camera.local/${body.includes("MediaProfile1") ? "sub" : "main"}</Uri></MediaUri></GetStreamUriResponse>`;
+          if (body.includes("GetSnapshotUri"))
+            response =
+              "<GetSnapshotUriResponse><MediaUri><Uri>http://camera.local/snapshot</Uri></MediaUri></GetSnapshotUriResponse>";
+          return {
+            status: 200,
+            body: `<Envelope><Body>${response}</Body></Envelope>`,
+          };
         },
       },
-    });
-    const info = await adapter.detect();
-    assert.equal(info.profiles.length, 2, "Missing optional encoders must not discard profiles");
+    }, discovery.signal);
+    // Reproduce a user moving the camera after the connection deadline expires.
+    discovery.abort(new DOMException("Discovery timed out", "TimeoutError"));
+    assert.equal(
+      info.profiles.length,
+      2,
+      "Missing optional encoders must not discard profiles",
+    );
     assert.equal(info.ptzSupported, true);
     assert.equal(info.capabilities.ptz, "supported");
-    assert.deepEqual(info.profiles.map(({ audioCodec }) => audioCodec), [null, null]);
-    assert.deepEqual(info.profiles.map(({ codec, width, height, fps }) => [codec, width, height, fps]),
-      includeVideo ? [["H264", 1920, 1080, 20], ["H264", 640, 480, 15]] : [[null, null, null, null], [null, null, null, null]]);
+    assert.deepEqual(
+      info.profiles.map(({ audioCodec }) => audioCodec),
+      [null, null],
+    );
+    assert.deepEqual(
+      info.profiles.map(({ codec, width, height, fps }) => [
+        codec,
+        width,
+        height,
+        fps,
+      ]),
+      includeVideo
+        ? [
+            ["H264", 1920, 1080, 20],
+            ["H264", 640, 480, 15],
+          ]
+        : [
+            [null, null, null, null],
+            [null, null, null, null],
+          ],
+    );
     assert.equal(info.rtspMainUrl, "rtsp://camera.local/main");
     assert.equal(info.rtspSubUrl, "rtsp://camera.local/sub");
     assert.equal(info.snapshotUri, "http://camera.local/snapshot");
-    await adapter.continuousMove({ profileToken: "main", velocity: { pan: 0.2 } });
-    await adapter.stop({ profileToken: "main", panTilt: true });
+    for (const velocity of [{ pan: 0.5, tilt: 0 }, { pan: -0.5, tilt: 0 }, { pan: 0, tilt: 0.5 }, { pan: 0, tilt: -0.5 }]) {
+      await adapter.continuousMove({ profileToken: "main", velocity });
+      assert.ok(requests.at(-1).body.includes(`<tt:PanTilt x="${velocity.pan}" y="${velocity.tilt}"/>`));
+      await adapter.stop({ profileToken: "main", panTilt: true });
+      assert.match(requests.at(-1).body, /<tptz:PanTilt>true<\/tptz:PanTilt>/);
+      assert.doesNotMatch(requests.at(-1).body, /<tptz:Zoom>/);
+    }
     for (const request of requests.slice(-2)) {
       assert.equal(request.url, "http://camera.local/onvif/ptz_service");
-      assert.match(request.body, /<tptz:ProfileToken>MediaProfile0<\/tptz:ProfileToken>/);
+      assert.match(
+        request.body,
+        /<tptz:ProfileToken>MediaProfile0<\/tptz:ProfileToken>/,
+      );
     }
     assert.match(requests.at(-2).body, /<tptz:ContinuousMove>/);
     assert.match(requests.at(-1).body, /<tptz:Stop>/);
   }
 });
 
+test("PTZ connection still rejects a discovery timeout", async () => {
+  const discovery = new AbortController();
+  let requests = 0;
+  await assert.rejects(connectOnvifPtz({
+    deviceServiceUrl: "http://camera.local/onvif/device_service",
+    transport: {
+      post: async () => {
+        requests++;
+        discovery.abort(new DOMException("Discovery timed out", "TimeoutError"));
+        discovery.signal.throwIfAborted();
+      },
+    },
+  }, discovery.signal), /demorou para responder/);
+  assert.equal(requests, 1, "Expired discovery must not continue contacting the camera");
+});
+
 test("SD-card adapter registry selects only explicit camera support", () => {
-  const adapter = { id: "test", supports: (camera) => camera.host === "supported", detail: () => "Teste", list: async () => [], download: async () => ({ path: "", imported: false }) };
+  const adapter = {
+    id: "test",
+    supports: (camera) => camera.host === "supported",
+    detail: () => "Teste",
+    list: async () => [],
+    download: async () => ({ path: "", imported: false }),
+  };
   const registry = new SdCardAdapterRegistry([adapter]);
   assert.equal(registry.forCamera({ host: "supported" }).id, "test");
-  assert.deepEqual(registry.describe({ host: "unsupported" }), { supported: false, detail: "Consulta do cartão SD indisponível para este modelo." });
+  assert.deepEqual(registry.describe({ host: "unsupported" }), {
+    supported: false,
+    detail: "Consulta do cartão SD indisponível para este modelo.",
+  });
 });
 
 test("WS-Discovery probe and responses keep only bounded HTTP(S) ONVIF endpoints", () => {
   const probe = buildProbeMessage("urn:uuid:camera-test");
   assert.match(probe, /NetworkVideoTransmitter/);
+  assert.match(probe, /xmlns:dn="http:\/\/www.onvif.org\/ver10\/network\/wsdl"/);
+  assert.match(probe, /http:\/\/schemas.xmlsoap.org\/ws\/2005\/04\/discovery\/Probe/);
   assert.match(probe, /urn:uuid:camera-test/);
   const matches = parseProbeMatches(`<?xml version="1.0"?>
     <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><d:ProbeMatches xmlns:d="http://docs.oasis-open.org/ws-dd/ns/discovery">
@@ -176,13 +485,27 @@ test("WS-Discovery probe and responses keep only bounded HTTP(S) ONVIF endpoints
       <d:ProbeMatch><a:EndpointReference xmlns:a="http://www.w3.org/2005/08/addressing"><a:Address>urn:uuid:front-door</a:Address></a:EndpointReference><d:XAddrs>http://192.168.1.30/onvif/device_service</d:XAddrs></d:ProbeMatch>
       <d:ProbeMatch><d:XAddrs>ftp://192.168.1.31/not-onvif</d:XAddrs></d:ProbeMatch>
     </d:ProbeMatches></s:Body></s:Envelope>`);
-  assert.deepEqual(matches, [{ endpointReference: "urn:uuid:front-door", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: ["onvif://www.onvif.org/name/Front%20door", "onvif://www.onvif.org/Profile/Streaming"], types: ["dn:NetworkVideoTransmitter"] }]);
+  assert.deepEqual(matches, [
+    {
+      endpointReference: "urn:uuid:front-door",
+      host: "192.168.1.30",
+      onvifUrl: "http://192.168.1.30/onvif/device_service",
+      scopes: [
+        "onvif://www.onvif.org/name/Front%20door",
+        "onvif://www.onvif.org/Profile/Streaming",
+      ],
+      types: ["dn:NetworkVideoTransmitter"],
+    },
+  ]);
   assert.deepEqual(parseProbeMatches("<!DOCTYPE x><x />"), []);
 });
 
 test("WS-Discovery caps a datagram at one hundred valid devices", () => {
-  const matches = Array.from({ length: 101 }, (_, index) => `
-    <d:ProbeMatch><d:XAddrs>http://192.168.10.${index + 1}/onvif/device_service</d:XAddrs></d:ProbeMatch>`).join("");
+  const matches = Array.from(
+    { length: 101 },
+    (_, index) => `
+    <d:ProbeMatch><d:XAddrs>http://192.168.10.${index + 1}/onvif/device_service</d:XAddrs></d:ProbeMatch>`,
+  ).join("");
   const devices = parseProbeMatches(`<?xml version="1.0"?>
     <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><d:ProbeMatches xmlns:d="http://docs.oasis-open.org/ws-dd/ns/discovery">${matches}</d:ProbeMatches></s:Body></s:Envelope>`);
   assert.equal(devices.length, 100);
@@ -199,17 +522,44 @@ test("WS-Discovery merges multiple interfaces, supports selection, and handles n
   const scanner = async (network) => {
     scans.push(network.address);
     return network.address === "192.168.1.2"
-      ? [{ endpointReference: "urn:uuid:front", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: [] }]
+      ? [
+          {
+            endpointReference: "urn:uuid:front",
+            host: "192.168.1.30",
+            onvifUrl: "http://192.168.1.30/onvif/device_service",
+            scopes: [],
+            types: [],
+          },
+        ]
       : [
-          { endpointReference: "urn:uuid:front", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: [] },
-          { endpointReference: "urn:uuid:garage", host: "10.0.0.10", onvifUrl: "http://10.0.0.10/onvif/device_service", scopes: [], types: [] },
+          {
+            endpointReference: "urn:uuid:front",
+            host: "192.168.1.30",
+            onvifUrl: "http://192.168.1.30/onvif/device_service",
+            scopes: [],
+            types: [],
+          },
+          {
+            endpointReference: "urn:uuid:garage",
+            host: "10.0.0.10",
+            onvifUrl: "http://10.0.0.10/onvif/device_service",
+            scopes: [],
+            types: [],
+          },
         ];
   };
   const devices = await discoverOnvifDevices({ interfaces, scanner });
   assert.deepEqual(scans, ["192.168.1.2", "10.0.0.2"]);
-  assert.deepEqual(devices.map((device) => device.host), ["10.0.0.10", "192.168.1.30"]);
+  assert.deepEqual(
+    devices.map((device) => device.host),
+    ["10.0.0.10", "192.168.1.30"],
+  );
   scans.length = 0;
-  const selected = await discoverOnvifDevices({ address: "10.0.0.2", interfaces, scanner });
+  const selected = await discoverOnvifDevices({
+    address: "10.0.0.2",
+    interfaces,
+    scanner,
+  });
   assert.deepEqual(scans, ["10.0.0.2"]);
   assert.equal(selected.length, 2);
   assert.deepEqual(await discoverOnvifDevices({ interfaces: [], scanner }), []);
@@ -219,20 +569,46 @@ test("WS-Discovery deduplicates by endpoint or identifier and rejects invalid in
   const devices = await discoverOnvifDevices({
     interfaces: [{ name: "Ethernet", address: "192.168.1.2" }],
     scanner: async () => [
-      { endpointReference: "urn:uuid:front", host: "wrong-host", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: [] },
-      { endpointReference: "urn:uuid:front", host: "192.168.1.31", onvifUrl: "http://192.168.1.31/onvif/device_service", scopes: ["onvif://www.onvif.org/name/Front"], types: [] },
-      { endpointReference: "urn:uuid:garage", host: "192.168.1.30", onvifUrl: "http://192.168.1.30/onvif/device_service", scopes: [], types: ["dn:NetworkVideoTransmitter"] },
-      { endpointReference: null, host: "ignored", onvifUrl: "ftp://192.168.1.40/not-onvif", scopes: [], types: [] },
+      {
+        endpointReference: "urn:uuid:front",
+        host: "wrong-host",
+        onvifUrl: "http://192.168.1.30/onvif/device_service",
+        scopes: [],
+        types: [],
+      },
+      {
+        endpointReference: "urn:uuid:front",
+        host: "192.168.1.31",
+        onvifUrl: "http://192.168.1.31/onvif/device_service",
+        scopes: ["onvif://www.onvif.org/name/Front"],
+        types: [],
+      },
+      {
+        endpointReference: "urn:uuid:garage",
+        host: "192.168.1.30",
+        onvifUrl: "http://192.168.1.30/onvif/device_service",
+        scopes: [],
+        types: ["dn:NetworkVideoTransmitter"],
+      },
+      {
+        endpointReference: null,
+        host: "ignored",
+        onvifUrl: "ftp://192.168.1.40/not-onvif",
+        scopes: [],
+        types: [],
+      },
     ],
   });
 
-  assert.deepEqual(devices, [{
-    endpointReference: "urn:uuid:front",
-    host: "192.168.1.30",
-    onvifUrl: "http://192.168.1.30/onvif/device_service",
-    scopes: ["onvif://www.onvif.org/name/Front"],
-    types: ["dn:NetworkVideoTransmitter"],
-  }]);
+  assert.deepEqual(devices, [
+    {
+      endpointReference: "urn:uuid:front",
+      host: "192.168.1.30",
+      onvifUrl: "http://192.168.1.30/onvif/device_service",
+      scopes: ["onvif://www.onvif.org/name/Front"],
+      types: ["dn:NetworkVideoTransmitter"],
+    },
+  ]);
 });
 
 test("WS-Discovery stops an injected scan when cancelled", async () => {
@@ -241,16 +617,105 @@ test("WS-Discovery stops an injected scan when cancelled", async () => {
   const pending = discoverOnvifDevices({
     interfaces: [{ name: "Ethernet", address: "192.168.1.2" }],
     signal: controller.signal,
-    scanner: (_network, _timeout, signal) => new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () => {
-        scannerObservedAbort = true;
-        reject(new Error("cancelled"));
-      }, { once: true });
-    }),
+    scanner: (_network, _timeout, signal) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            scannerObservedAbort = true;
+            reject(new Error("cancelled"));
+          },
+          { once: true },
+        );
+      }),
   });
   controller.abort();
   await assert.rejects(pending, /cancelada/);
   assert.equal(scannerObservedAbort, true);
+});
+
+test("active discovery calculates only bounded IPv4 host ranges", () => {
+  assert.deepEqual(ipv4Range("192.168.10.8", "255.255.255.252"), [
+    "192.168.10.9",
+    "192.168.10.10",
+  ]);
+  assert.throws(() => ipv4Range("192.168.10.8", "255.255.0.0"), /grande/);
+  assert.throws(() => ipv4Range("192.168.10.8", "255.0.255.0"), /máscara/);
+});
+
+test("active discovery finds camera services without requiring an ICMP response", async () => {
+  const portProbes = [];
+  const result = await discoverActiveNetworkCameras({
+    address: "192.168.10.1",
+    netmask: "255.255.255.252",
+    portProbe: async (host, port) => {
+      portProbes.push([host, port]);
+      return port === 554;
+    },
+    fingerprint: async (_host, port) =>
+      port === 554 ? { services: ["rtsp"] } : { services: [] },
+  });
+  assert.equal(portProbes.length, 7);
+  assert.equal(portProbes.every(([host]) => host === "192.168.10.2"), true);
+  assert.deepEqual(result.map((item) => [item.host, item.services]), [
+    ["192.168.10.2", ["rtsp"]],
+  ]);
+});
+
+test("active discovery hides HTTP-only hosts and retains verified camera protocols", async () => {
+  const results = await discoverActiveNetworkCameras({
+    address: "192.168.10.1", netmask: "255.255.255.248",
+    portProbe: async (_host, port) => port === 80,
+    fingerprint: async (host) => host.endsWith(".2") ? { services: ["http"] }
+      : host.endsWith(".3") ? { services: ["https"] }
+      : host.endsWith(".4") ? { services: ["http", "onvif"], onvifUrl: `http://${host}/onvif/device_service` }
+      : host.endsWith(".5") ? { services: ["rtsp"] } : { services: [] },
+  });
+  assert.deepEqual(results.map((device) => device.host), ["192.168.10.4", "192.168.10.5"]);
+});
+
+test("active discovery probes ports concurrently with a bounded global limit", async () => {
+  let active = 0;
+  let peak = 0;
+  const pending = [];
+  const scan = discoverActiveNetworkCameras({
+    address: "192.168.10.1", netmask: "255.255.255.240",
+    portProbe: async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => pending.push(resolve));
+      active--;
+      return false;
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstBatch = pending.length;
+  pending.splice(0).forEach((resolve) => resolve());
+  await new Promise((resolve) => setImmediate(resolve));
+  pending.splice(0).forEach((resolve) => resolve());
+  await scan;
+  assert.equal(firstBatch, 64, "TCP probing must fill the bounded queue");
+  assert.equal(peak, 64, "TCP probes must stay bounded");
+});
+
+test("active discovery cancels pending host probes and merges duplicate hosts", async () => {
+  const controller = new AbortController();
+  const pending = discoverActiveNetworkCameras({
+    address: "192.168.10.1",
+    netmask: "255.255.255.252",
+    signal: controller.signal,
+    portProbe: (_host, _port, signal) => new Promise((_resolve, reject) =>
+      signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }),
+    ),
+  });
+  controller.abort();
+  await assert.rejects(pending, /cancel/);
+  const merged = mergeNetworkCameraResults([
+    { host: "192.168.10.2", endpointReference: null, onvifUrl: null, scopes: [], types: [], services: ["rtsp"], identity: { manufacturer: null, model: null }, origins: ["active-scan"] },
+    { host: "192.168.10.2", endpointReference: null, onvifUrl: "http://192.168.10.2/onvif/device_service", scopes: [], types: [], services: ["onvif"], identity: { manufacturer: null, model: null }, origins: ["onvif-multicast"] },
+  ]);
+  assert.deepEqual(merged[0].services, ["rtsp", "onvif"]);
+  assert.deepEqual(merged[0].origins, ["active-scan", "onvif-multicast"]);
 });
 
 function ptzFixture(t, failures = 1) {
@@ -406,7 +871,16 @@ test("camera presets generate channel and stream conventions without credentials
     assert.equal(url.href.includes("{"), false);
   }
 });
-import { mkdtemp, mkdir, readFile, readdir, rm, statfs, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  statfs,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
 import { createServer } from "node:net";
@@ -441,8 +915,14 @@ import {
 import { parseConfig } from "../src/shared/config.ts";
 import { LocalAlertCenter } from "../src/main/services/alert-center.ts";
 import { selectRetentionCandidates } from "../src/main/services/retention-policy.ts";
-import { isScheduledAt, nextScheduledAt } from "../src/shared/recording-schedule.ts";
-import { RecordingScheduler, shouldScheduleRecording } from "../src/main/services/recording-scheduler.ts";
+import {
+  isScheduledAt,
+  nextScheduledAt,
+} from "../src/shared/recording-schedule.ts";
+import {
+  RecordingScheduler,
+  shouldScheduleRecording,
+} from "../src/main/services/recording-scheduler.ts";
 import { MotionPrebufferService } from "../src/main/services/motion-prebuffer.ts";
 import {
   deleteRecordingPreview,
@@ -479,13 +959,25 @@ test("hardware preference defaults to automatic and persists opt-out across star
 });
 
 test("legacy configuration gains disabled retention defaults", () => {
-  const config = parseConfig(JSON.stringify({
-    theme: "dark", snapshotDir: "", recordingsDir: "",
-    reconnect: { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 10 },
-    streams: { behavior: "sub-first", maxTranscodes: 2, enableHardwareAcceleration: true },
-    log: { level: "info", maxBytes: 4194304, maxFiles: 5 },
-  }));
-  assert.deepEqual(config.retention, { enabled: false, maxAgeDays: 0, maxBytes: 0 });
+  const config = parseConfig(
+    JSON.stringify({
+      theme: "dark",
+      snapshotDir: "",
+      recordingsDir: "",
+      reconnect: { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 10 },
+      streams: {
+        behavior: "sub-first",
+        maxTranscodes: 2,
+        enableHardwareAcceleration: true,
+      },
+      log: { level: "info", maxBytes: 4194304, maxFiles: 5 },
+    }),
+  );
+  assert.deepEqual(config.retention, {
+    enabled: false,
+    maxAgeDays: 0,
+    maxBytes: 0,
+  });
 });
 
 test("local alert centre groups repeated camera failures", () => {
@@ -494,13 +986,20 @@ test("local alert centre groups repeated camera failures", () => {
   alerts.report("camera_disconnected", "Câmera desconectada.", "camera-one");
   alerts.report("storage_low", "Espaço insuficiente.");
   assert.equal(alerts.list().length, 2);
-  assert.equal(alerts.list().find((alert) => alert.cameraId === "camera-one")?.count, 2);
+  assert.equal(
+    alerts.list().find((alert) => alert.cameraId === "camera-one")?.count,
+    2,
+  );
   assert.equal(alerts.dismiss("camera_disconnected:camera-one"), true);
 });
 
 test("diagnostic report sanitizes alert messages", () => {
   const alerts = new LocalAlertCenter();
-  alerts.report("recording_interrupted", "RTSP rtsp://alice:secret@camera.local/live token=top-secret", "camera-one");
+  alerts.report(
+    "recording_interrupted",
+    "RTSP rtsp://alice:secret@camera.local/live token=top-secret",
+    "camera-one",
+  );
   const report = JSON.stringify(alerts.diagnosticReport());
   assert.equal(report.includes("secret"), false);
   assert.equal(report.includes("alice"), false);
@@ -508,29 +1007,62 @@ test("diagnostic report sanitizes alert messages", () => {
 });
 
 test("retention policy preserves protected and active media", () => {
-  const selected = selectRetentionCandidates([
-    { id: "protected", timestamp: 1, bytes: 50, protected: true, active: false },
-    { id: "active", timestamp: 2, bytes: 50, protected: false, active: true },
-    { id: "old", timestamp: 3, bytes: 50, protected: false, active: false },
-  ], { now: 1000, maxAgeDays: 0, maxBytes: 100 });
+  const selected = selectRetentionCandidates(
+    [
+      {
+        id: "protected",
+        timestamp: 1,
+        bytes: 50,
+        protected: true,
+        active: false,
+      },
+      { id: "active", timestamp: 2, bytes: 50, protected: false, active: true },
+      { id: "old", timestamp: 3, bytes: 50, protected: false, active: false },
+    ],
+    { now: 1000, maxAgeDays: 0, maxBytes: 100 },
+  );
   assert.deepEqual(selected, ["old"]);
 });
 
 test("resource policy uses substream in grid, main in fullscreen, and preserves recording", () => {
   assert.deepEqual(
-    decideResourceState({ context: "grid", layoutSize: 4, windowMinimized: false, recording: false }),
+    decideResourceState({
+      context: "grid",
+      layoutSize: 4,
+      windowMinimized: false,
+      recording: false,
+    }),
     { profile: "sub", active: true, reason: "Grid usa substream por padrão." },
   );
   assert.deepEqual(
-    decideResourceState({ context: "fullscreen", layoutSize: 1, windowMinimized: false, recording: false }),
+    decideResourceState({
+      context: "fullscreen",
+      layoutSize: 1,
+      windowMinimized: false,
+      recording: false,
+    }),
     { profile: "main", active: true, reason: "Fullscreen usa main stream." },
   );
   assert.deepEqual(
-    decideResourceState({ context: "hidden", layoutSize: 4, windowMinimized: false, recording: true }),
-    { profile: "sub", active: true, reason: "Item invisível; gravação preservada." },
+    decideResourceState({
+      context: "hidden",
+      layoutSize: 4,
+      windowMinimized: false,
+      recording: true,
+    }),
+    {
+      profile: "sub",
+      active: true,
+      reason: "Item invisível; gravação preservada.",
+    },
   );
   assert.equal(
-    decideResourceState({ context: "hidden", layoutSize: 4, windowMinimized: false, recording: false }).active,
+    decideResourceState({
+      context: "hidden",
+      layoutSize: 4,
+      windowMinimized: false,
+      recording: false,
+    }).active,
     false,
   );
 });
@@ -541,7 +1073,9 @@ test("motion subscription registry cancels the camera subscription", async () =>
     getClient: async () => ({
       subscribe: async () => ({ renewAfterMs: 60_000 }),
       renew: async () => ({ renewAfterMs: 60_000 }),
-      unsubscribe: async () => { unsubscribed = true; },
+      unsubscribe: async () => {
+        unsubscribed = true;
+      },
     }),
   });
   assert.equal(await registry.start("camera-one"), true);
@@ -551,16 +1085,25 @@ test("motion subscription registry cancels the camera subscription", async () =>
 
 test("unsupported cameras do not create or retry a motion subscription", async (t) => {
   let attempts = 0;
-  const registry = new MotionSubscriptionRegistry({ getClient: async (cameraId) => {
-    attempts += 1;
-    if (cameraId === "unsupported") return null;
-    return {
-      subscribe: async () => ({ renewAfterMs: 60_000 }),
-      renew: async () => ({ renewAfterMs: 60_000 }),
-      unsubscribe: async () => undefined,
-      pull: async (signal) => new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
-    };
-  } }, undefined, 5);
+  const registry = new MotionSubscriptionRegistry(
+    {
+      getClient: async (cameraId) => {
+        attempts += 1;
+        if (cameraId === "unsupported") return null;
+        return {
+          subscribe: async () => ({ renewAfterMs: 60_000 }),
+          renew: async () => ({ renewAfterMs: 60_000 }),
+          unsubscribe: async () => undefined,
+          pull: async (signal) =>
+            new Promise((done) =>
+              signal.addEventListener("abort", () => done([]), { once: true }),
+            ),
+        };
+      },
+    },
+    undefined,
+    5,
+  );
   t.after(() => registry.stopAll());
   assert.equal(await registry.start("unsupported"), false);
   assert.equal(await registry.start("supported"), true);
@@ -571,23 +1114,35 @@ test("unsupported cameras do not create or retry a motion subscription", async (
 test("lost PullPoint subscriptions reconnect and stop cancels later retries", async (t) => {
   let attempts = 0;
   let unsubscribed = 0;
-  const registry = new MotionSubscriptionRegistry({
-    getClient: async () => {
-      const attempt = ++attempts;
-      return {
-        subscribe: async () => ({ renewAfterMs: 60_000 }),
-        renew: async () => ({ renewAfterMs: 60_000 }),
-        unsubscribe: async () => { unsubscribed += 1; },
-        pull: async (signal) => attempt === 1
-          ? Promise.reject(new Error("subscription lost"))
-          : new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
-      };
+  const registry = new MotionSubscriptionRegistry(
+    {
+      getClient: async () => {
+        const attempt = ++attempts;
+        return {
+          subscribe: async () => ({ renewAfterMs: 60_000 }),
+          renew: async () => ({ renewAfterMs: 60_000 }),
+          unsubscribe: async () => {
+            unsubscribed += 1;
+          },
+          pull: async (signal) =>
+            attempt === 1
+              ? Promise.reject(new Error("subscription lost"))
+              : new Promise((done) =>
+                  signal.addEventListener("abort", () => done([]), {
+                    once: true,
+                  }),
+                ),
+        };
+      },
     },
-  }, undefined, 10);
+    undefined,
+    10,
+  );
   t.after(() => registry.stopAll());
   assert.equal(await registry.start("camera-one"), true);
   const deadline = Date.now() + 500;
-  while (attempts < 2 && Date.now() < deadline) await new Promise((done) => setTimeout(done, 5));
+  while (attempts < 2 && Date.now() < deadline)
+    await new Promise((done) => setTimeout(done, 5));
   assert.equal(attempts, 2);
   await registry.stop("camera-one");
   await new Promise((done) => setTimeout(done, 30));
@@ -597,17 +1152,27 @@ test("lost PullPoint subscriptions reconnect and stop cancels later retries", as
 
 test("failed renewal reconnects and a removed camera cannot be resurrected", async (t) => {
   let attempts = 0;
-  const registry = new MotionSubscriptionRegistry({
-    getClient: async () => {
-      attempts += 1;
-      return {
-        subscribe: async () => ({ renewAfterMs: 1 }),
-        renew: async () => { throw new Error("renewal lost"); },
-        unsubscribe: async () => undefined,
-        pull: async (signal) => new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
-      };
+  const registry = new MotionSubscriptionRegistry(
+    {
+      getClient: async () => {
+        attempts += 1;
+        return {
+          subscribe: async () => ({ renewAfterMs: 1 }),
+          renew: async () => {
+            throw new Error("renewal lost");
+          },
+          unsubscribe: async () => undefined,
+          pull: async (signal) =>
+            new Promise((done) =>
+              signal.addEventListener("abort", () => done([]), { once: true }),
+            ),
+        };
+      },
     },
-  }, undefined, 50, 1);
+    undefined,
+    50,
+    1,
+  );
   t.after(() => registry.stopAll());
   assert.equal(await registry.start("camera-one"), true);
   await new Promise((done) => setTimeout(done, 10));
@@ -619,14 +1184,24 @@ test("failed renewal reconnects and a removed camera cannot be resurrected", asy
 test("deactivation during a pending subscription prevents late polling", async (t) => {
   let finishSubscribe;
   let polls = 0;
-  const registry = new MotionSubscriptionRegistry({
-    getClient: async () => ({
-      subscribe: async () => new Promise((done) => { finishSubscribe = done; }),
-      renew: async () => ({ renewAfterMs: 60_000 }),
-      unsubscribe: async () => undefined,
-      pull: async () => { polls += 1; return []; },
-    }),
-  }, undefined, 5);
+  const registry = new MotionSubscriptionRegistry(
+    {
+      getClient: async () => ({
+        subscribe: async () =>
+          new Promise((done) => {
+            finishSubscribe = done;
+          }),
+        renew: async () => ({ renewAfterMs: 60_000 }),
+        unsubscribe: async () => undefined,
+        pull: async () => {
+          polls += 1;
+          return [];
+        },
+      }),
+    },
+    undefined,
+    5,
+  );
   t.after(() => registry.stopAll());
   const starting = registry.start("camera-one");
   while (!finishSubscribe) await new Promise((done) => setImmediate(done));
@@ -644,12 +1219,18 @@ test("reactivation can start a new subscription while the old attempt settles", 
     getClient: async () => {
       const attempt = ++attempts;
       return {
-        subscribe: async () => attempt === 1
-          ? new Promise((done) => { finishOld = done; })
-          : { renewAfterMs: 60_000 },
+        subscribe: async () =>
+          attempt === 1
+            ? new Promise((done) => {
+                finishOld = done;
+              })
+            : { renewAfterMs: 60_000 },
         renew: async () => ({ renewAfterMs: 60_000 }),
         unsubscribe: async () => undefined,
-        pull: async (signal) => new Promise((done) => signal.addEventListener("abort", () => done([]), { once: true })),
+        pull: async (signal) =>
+          new Promise((done) =>
+            signal.addEventListener("abort", () => done([]), { once: true }),
+          ),
       };
     },
   });
@@ -666,21 +1247,81 @@ test("reactivation can start a new subscription while the old attempt settles", 
 test("motion events deduplicate repeated states and bound camera clock skew", () => {
   const normalizer = new MotionEventNormalizer();
   const receivedAt = "2026-01-01T12:00:00.000Z";
-  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, occurredAt: receivedAt, receivedAt })?.state, "started");
-  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, occurredAt: receivedAt, receivedAt }), null);
-  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: false, occurredAt: "2025-01-01T00:00:00.000Z", receivedAt })?.occurredAt, receivedAt);
-  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: false, occurredAt: receivedAt, receivedAt }), null);
+  assert.equal(
+    normalizer.normalize({
+      cameraId: "camera-one",
+      active: true,
+      occurredAt: receivedAt,
+      receivedAt,
+    })?.state,
+    "started",
+  );
+  assert.equal(
+    normalizer.normalize({
+      cameraId: "camera-one",
+      active: true,
+      occurredAt: receivedAt,
+      receivedAt,
+    }),
+    null,
+  );
+  assert.equal(
+    normalizer.normalize({
+      cameraId: "camera-one",
+      active: false,
+      occurredAt: "2025-01-01T00:00:00.000Z",
+      receivedAt,
+    })?.occurredAt,
+    receivedAt,
+  );
+  assert.equal(
+    normalizer.normalize({
+      cameraId: "camera-one",
+      active: false,
+      occurredAt: receivedAt,
+      receivedAt,
+    }),
+    null,
+  );
   const later = "2026-01-01T12:00:02.000Z";
-  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, receivedAt: later })?.repeated, false);
-  assert.equal(normalizer.normalize({ cameraId: "camera-one", active: true, receivedAt: "2026-01-01T12:00:04.000Z" })?.repeated, true);
+  assert.equal(
+    normalizer.normalize({
+      cameraId: "camera-one",
+      active: true,
+      receivedAt: later,
+    })?.repeated,
+    false,
+  );
+  assert.equal(
+    normalizer.normalize({
+      cameraId: "camera-one",
+      active: true,
+      receivedAt: "2026-01-01T12:00:04.000Z",
+    })?.repeated,
+    true,
+  );
 });
 
 test("motion notification parser accepts explicit motion states only", () => {
-  assert.deepEqual(parseOnvifMotionNotification('<Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Name="IsMotion" Value="true"/>'), { active: true, occurredAt: null });
-  assert.equal(parseOnvifMotionNotification('<Topic>tns1:Device/Trigger</Topic><SimpleItem Value="true"/>'), null);
-  const messages = '<NotificationMessage><Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Value="true"/></NotificationMessage>'
-    + '<NotificationMessage><Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Value="false"/></NotificationMessage>';
-  assert.deepEqual(parseOnvifMotionNotifications(messages).map((event) => event.active), [true, false]);
+  assert.deepEqual(
+    parseOnvifMotionNotification(
+      '<Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Name="IsMotion" Value="true"/>',
+    ),
+    { active: true, occurredAt: null },
+  );
+  assert.equal(
+    parseOnvifMotionNotification(
+      '<Topic>tns1:Device/Trigger</Topic><SimpleItem Value="true"/>',
+    ),
+    null,
+  );
+  const messages =
+    '<NotificationMessage><Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Value="true"/></NotificationMessage>' +
+    '<NotificationMessage><Topic>tns1:RuleEngine/Motion</Topic><SimpleItem Value="false"/></NotificationMessage>';
+  assert.deepEqual(
+    parseOnvifMotionNotifications(messages).map((event) => event.active),
+    [true, false],
+  );
 });
 
 test("motion timeout bounds a missing end event and can be cancelled", () => {
@@ -688,10 +1329,17 @@ test("motion timeout bounds a missing end event and can be cancelled", () => {
   const fired = [];
   let nextId = 0;
   const clock = {
-    setTimeout: (callback, delay) => { const id = ++nextId; pending.set(id, { callback, delay }); return id; },
+    setTimeout: (callback, delay) => {
+      const id = ++nextId;
+      pending.set(id, { callback, delay });
+      return id;
+    },
     clearTimeout: (id) => pending.delete(id),
   };
-  const timers = new MotionRecordingTimers((cameraId, reason) => fired.push([cameraId, reason]), clock);
+  const timers = new MotionRecordingTimers(
+    (cameraId, reason) => fired.push([cameraId, reason]),
+    clock,
+  );
   timers.arm("camera-one", "missing-end", MOTION_MISSING_END_TIMEOUT_MS);
   assert.equal([...pending.values()][0].delay, 600_000);
   const [id, timer] = [...pending][0];
@@ -709,7 +1357,10 @@ test("reordering a live layout does not alter recording state", () => {
     { id: "camera-b", active: true, recordingStatus: "idle" },
   ];
   const slots = buildCameraSlots(cameras, ["camera-b", "camera-a"], 2);
-  assert.deepEqual(slots.slice(0, 2).map((camera) => camera?.id), ["camera-b", "camera-a"]);
+  assert.deepEqual(
+    slots.slice(0, 2).map((camera) => camera?.id),
+    ["camera-b", "camera-a"],
+  );
   assert.equal(cameras[0].recordingStatus, "recording");
 });
 
@@ -731,12 +1382,24 @@ test("weekly schedule reports the next configured start", () => {
 test("next schedule preserves minute boundaries, overnight periods, and disabled days", () => {
   const monday = new Date(2026, 0, 5, 22, 30, 45);
   const periods = [{ weekday: 1, start: "22:00", end: "02:00", enabled: true }];
-  assert.equal(nextScheduledAt(periods, monday)?.getTime(), new Date(2026, 0, 5, 22, 31).getTime());
+  assert.equal(
+    nextScheduledAt(periods, monday)?.getTime(),
+    new Date(2026, 0, 5, 22, 31).getTime(),
+  );
   assert.equal(monday.getSeconds(), 45);
-  assert.equal(nextScheduledAt(periods, new Date(2026, 0, 5, 23, 59))?.getTime(), new Date(2026, 0, 6).getTime());
-  assert.equal(nextScheduledAt(periods, new Date(2026, 0, 6, 1, 59))?.getTime(), new Date(2026, 0, 12, 22).getTime());
+  assert.equal(
+    nextScheduledAt(periods, new Date(2026, 0, 5, 23, 59))?.getTime(),
+    new Date(2026, 0, 6).getTime(),
+  );
+  assert.equal(
+    nextScheduledAt(periods, new Date(2026, 0, 6, 1, 59))?.getTime(),
+    new Date(2026, 0, 12, 22).getTime(),
+  );
   assert.equal(nextScheduledAt([], monday), null);
-  assert.equal(nextScheduledAt([{ ...periods[0], enabled: false }], monday), null);
+  assert.equal(
+    nextScheduledAt([{ ...periods[0], enabled: false }], monday),
+    null,
+  );
   assert.equal(nextScheduledAt(periods, new Date(NaN)), null);
 });
 
@@ -763,7 +1426,10 @@ test("next schedule agrees with minute-by-minute lookup across weekly and DST bo
       cursor.setMinutes(cursor.getMinutes() + 1);
       let expected = null;
       for (let minute = 0; minute < 8 * 24 * 60; minute++) {
-        if (isScheduledAt(periods, cursor)) { expected = new Date(cursor); break; }
+        if (isScheduledAt(periods, cursor)) {
+          expected = new Date(cursor);
+          break;
+        }
         cursor.setMinutes(cursor.getMinutes() + 1);
       }
       assert.deepEqual(nextScheduledAt(periods, from), expected);
@@ -773,13 +1439,33 @@ test("next schedule agrees with minute-by-minute lookup across weekly and DST bo
 
 test("scheduler never overrides a manual recording", () => {
   const periods = [{ weekday: 1, start: "08:00", end: "10:00", enabled: true }];
-  assert.equal(shouldScheduleRecording({ periods, now: new Date(2026, 0, 5, 9), cameraActive: true, manualRecording: true, scheduledRecording: false }), "none");
-  assert.equal(shouldScheduleRecording({ periods, now: new Date(2026, 0, 5, 9), cameraActive: true, manualRecording: false, scheduledRecording: false }), "start");
+  assert.equal(
+    shouldScheduleRecording({
+      periods,
+      now: new Date(2026, 0, 5, 9),
+      cameraActive: true,
+      manualRecording: true,
+      scheduledRecording: false,
+    }),
+    "none",
+  );
+  assert.equal(
+    shouldScheduleRecording({
+      periods,
+      now: new Date(2026, 0, 5, 9),
+      cameraActive: true,
+      manualRecording: false,
+      scheduledRecording: false,
+    }),
+    "start",
+  );
 });
 
 test("recording scheduler starts only one recurring loop", async () => {
   let calls = 0;
-  const scheduler = new RecordingScheduler(async () => { calls += 1; }, 60_000);
+  const scheduler = new RecordingScheduler(async () => {
+    calls += 1;
+  }, 60_000);
   scheduler.start();
   scheduler.start();
   await new Promise((resolve) => setImmediate(resolve));
@@ -789,12 +1475,37 @@ test("recording scheduler starts only one recurring loop", async () => {
 
 test("synchronized playback identifies gaps and bounds per-camera clock compensation", () => {
   const segments = [
-    { id: "segment-1", recordingId: "123e4567-e89b-42d3-a456-426614174000", path: "a.mp4", startedAt: "2026-01-01T10:00:00.000Z", endedAt: "2026-01-01T10:01:00.000Z", durationMs: 60_000, status: "completed" },
-    { id: "segment-2", recordingId: "123e4567-e89b-42d3-a456-426614174000", path: "b.mp4", startedAt: "2026-01-01T10:02:00.000Z", endedAt: "2026-01-01T10:03:00.000Z", durationMs: 60_000, status: "completed" },
+    {
+      id: "segment-1",
+      recordingId: "123e4567-e89b-42d3-a456-426614174000",
+      path: "a.mp4",
+      startedAt: "2026-01-01T10:00:00.000Z",
+      endedAt: "2026-01-01T10:01:00.000Z",
+      durationMs: 60_000,
+      status: "completed",
+    },
+    {
+      id: "segment-2",
+      recordingId: "123e4567-e89b-42d3-a456-426614174000",
+      path: "b.mp4",
+      startedAt: "2026-01-01T10:02:00.000Z",
+      endedAt: "2026-01-01T10:03:00.000Z",
+      durationMs: 60_000,
+      status: "completed",
+    },
   ];
-  assert.deepEqual(segmentAt(segments, Date.parse("2026-01-01T10:00:30.000Z")), { index: 0, offsetSeconds: 30 });
-  assert.deepEqual(segmentAt(segments, Date.parse("2026-01-01T10:02:10.000Z")), { index: 1, offsetSeconds: 10 });
-  assert.equal(segmentAt(segments, Date.parse("2026-01-01T10:01:30.000Z")), null);
+  assert.deepEqual(
+    segmentAt(segments, Date.parse("2026-01-01T10:00:30.000Z")),
+    { index: 0, offsetSeconds: 30 },
+  );
+  assert.deepEqual(
+    segmentAt(segments, Date.parse("2026-01-01T10:02:10.000Z")),
+    { index: 1, offsetSeconds: 10 },
+  );
+  assert.equal(
+    segmentAt(segments, Date.parse("2026-01-01T10:01:30.000Z")),
+    null,
+  );
   assert.equal(normalizeSynchronizedOffset(67_600), 60_000);
   assert.equal(normalizeSynchronizedOffset(-67_600), -60_000);
   assert.equal(normalizeSynchronizedOffset(Number.NaN), 0);
@@ -804,8 +1515,12 @@ test("synchronized playback identifies gaps and bounds per-camera clock compensa
 test("recording scheduler reconciles changes requested during an active pass", async () => {
   let release;
   let entered;
-  const started = new Promise((resolve) => { entered = resolve; });
-  const blocked = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
   let calls = 0;
   const scheduler = new RecordingScheduler(async () => {
     calls += 1;
@@ -827,10 +1542,14 @@ test("recording scheduler reports background failures and can retry", async (t) 
   const failure = new Error("reconciliation failed");
   const errors = [];
   let calls = 0;
-  const scheduler = new RecordingScheduler(async () => {
-    calls += 1;
-    if (calls === 1) throw failure;
-  }, 60_000, (error) => errors.push(error));
+  const scheduler = new RecordingScheduler(
+    async () => {
+      calls += 1;
+      if (calls === 1) throw failure;
+    },
+    60_000,
+    (error) => errors.push(error),
+  );
   t.after(() => scheduler.stop());
   scheduler.start();
   await new Promise((resolve) => setImmediate(resolve));
@@ -853,9 +1572,14 @@ test("recording scheduler releases its pending pass after synchronous failures",
 
 test("recording scheduler stop discards a queued background pass", async () => {
   let release;
-  const blocked = new Promise((resolve) => { release = resolve; });
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
   let calls = 0;
-  const scheduler = new RecordingScheduler(async () => { calls += 1; await blocked; }, 60_000);
+  const scheduler = new RecordingScheduler(async () => {
+    calls += 1;
+    await blocked;
+  }, 60_000);
   scheduler.start();
   await new Promise((resolve) => setImmediate(resolve));
   const refresh = scheduler.refresh();
@@ -872,15 +1596,25 @@ test("recording previews validate content and size and release the file after fa
   assert.equal(await readRecordingPreview(root, id), null);
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
   await saveRecordingPreview(root, id, jpeg);
-  assert.equal(await readRecordingPreview(root, id), `data:image/jpeg;base64,${jpeg.toString("base64")}`);
+  assert.equal(
+    await readRecordingPreview(root, id),
+    `data:image/jpeg;base64,${jpeg.toString("base64")}`,
+  );
   await writeFile(path, "invalid");
   await assert.rejects(readRecordingPreview(root, id), /JPEG/);
   const oversized = Buffer.alloc(MAX_RECORDING_PREVIEW_BYTES + 1);
   jpeg.copy(oversized);
   await writeFile(path, oversized);
   await assert.rejects(readRecordingPreview(root, id), /limite/);
-  await saveRecordingPreview(root, id, oversized.subarray(0, MAX_RECORDING_PREVIEW_BYTES));
-  assert.equal(await readRecordingPreview(root, id), `data:image/jpeg;base64,${oversized.subarray(0, MAX_RECORDING_PREVIEW_BYTES).toString("base64")}`);
+  await saveRecordingPreview(
+    root,
+    id,
+    oversized.subarray(0, MAX_RECORDING_PREVIEW_BYTES),
+  );
+  assert.equal(
+    await readRecordingPreview(root, id),
+    `data:image/jpeg;base64,${oversized.subarray(0, MAX_RECORDING_PREVIEW_BYTES).toString("base64")}`,
+  );
   await deleteRecordingPreview(root, id);
   assert.equal(await readRecordingPreview(root, id), null);
   await assert.rejects(readRecordingPreview(root, "../outside"), /inválido/);
@@ -985,15 +1719,29 @@ test("motion prebuffer preserves only the requested interval and clears cache on
   const libraryRoot = join(root, "library");
   const calls = [];
   const media = {
-    acquire: async (...args) => { calls.push(["acquire", ...args]); return { state: "running" }; },
-    setRecording: async (...args) => { calls.push(["record", ...args]); return true; },
-    release: async (...args) => { calls.push(["release", ...args]); },
+    acquire: async (...args) => {
+      calls.push(["acquire", ...args]);
+      return { state: "running" };
+    },
+    setRecording: async (...args) => {
+      calls.push(["record", ...args]);
+      return true;
+    },
+    release: async (...args) => {
+      calls.push(["release", ...args]);
+    },
   };
   const service = new MotionPrebufferService(media, cacheRoot, libraryRoot);
   t.after(() => service.stopAll());
-  assert.equal(await service.start(cameraId, "rtsp://camera.local/main", 15), true);
+  assert.equal(
+    await service.start(cameraId, "rtsp://camera.local/main", 15),
+    true,
+  );
   assert.equal(calls[0][6], 2_000);
-  const cacheDir = join(cacheRoot, `camera_${cameraId.replaceAll("-", "")}_prebuffer`);
+  const cacheDir = join(
+    cacheRoot,
+    `camera_${cameraId.replaceAll("-", "")}_prebuffer`,
+  );
   await mkdir(cacheDir, { recursive: true });
   const oldFile = join(cacheDir, "old.mp4");
   const recentFile = join(cacheDir, "recent.mp4");
@@ -1002,11 +1750,22 @@ test("motion prebuffer preserves only the requested interval and clears cache on
   const now = Date.now();
   await utimes(oldFile, new Date(now - 40_000), new Date(now - 40_000));
   await utimes(recentFile, new Date(now - 10_000), new Date(now - 10_000));
-  const segments = await service.capture(cameraId, recordingId, new Date(now).toISOString());
+  const segments = await service.capture(
+    cameraId,
+    recordingId,
+    new Date(now).toISOString(),
+  );
   assert.equal(segments.length, 1);
   assert.equal(await readFile(segments[0].path, "utf8"), "recent segment");
-  assert.ok(segments[0].path.startsWith(join(libraryRoot, "motion-prebuffer", recordingId)));
-  assert.deepEqual(calls.filter((call) => call[0] === "record").map((call) => call[2]), [true, false, true]);
+  assert.ok(
+    segments[0].path.startsWith(
+      join(libraryRoot, "motion-prebuffer", recordingId),
+    ),
+  );
+  assert.deepEqual(
+    calls.filter((call) => call[0] === "record").map((call) => call[2]),
+    [true, false, true],
+  );
   await service.stop(cameraId);
   assert.deepEqual(await readdir(cacheDir), []);
 });
@@ -1096,7 +1855,9 @@ test("storage monitor rejects full, inaccessible, and missing destinations", asy
   const inaccessible = await checkStorageStatus("locked", {
     probe: {
       stat: async () => ({ isDirectory: () => true, size: 0 }),
-      access: async () => { throw new Error("denied"); },
+      access: async () => {
+        throw new Error("denied");
+      },
       diskFree: async () => ({ free: 1000, total: 1000 }),
     },
   });
@@ -1104,9 +1865,13 @@ test("storage monitor rejects full, inaccessible, and missing destinations", asy
   assert.equal(shouldAllowWrite(inaccessible), false);
   const missing = await checkStorageStatus("missing", {
     probe: {
-      stat: async () => { throw new Error("missing"); },
+      stat: async () => {
+        throw new Error("missing");
+      },
       access: async () => undefined,
-      diskFree: async () => { throw new Error("removed"); },
+      diskFree: async () => {
+        throw new Error("removed");
+      },
     },
   });
   assert.equal(missing.exists, false);
@@ -1215,18 +1980,22 @@ test("clip export plans segment boundaries and reports gaps without loading medi
   });
   assert.equal(plan.durationMs, 780000);
   assert.deepEqual(plan.gaps, [
-    { startsAt: "2026-01-10T08:05:00.000Z", endsAt: "2026-01-10T08:12:00.000Z" },
+    {
+      startsAt: "2026-01-10T08:05:00.000Z",
+      endsAt: "2026-01-10T08:12:00.000Z",
+    },
   ]);
   assert.match(buildConcatManifest(plan.segments), /inpoint 60\.000/);
   assert.match(buildConcatManifest(plan.segments), /outpoint 120\.000/);
   assert.throws(
-    () => planClipExport({
-      recordingId: "recording",
-      destinationPath: "C:/exports/clip.mp4",
-      startAt: "2026-01-10T08:00:00.000Z",
-      endAt: "2026-01-10T10:01:00.000Z",
-      segments: [],
-    }),
+    () =>
+      planClipExport({
+        recordingId: "recording",
+        destinationPath: "C:/exports/clip.mp4",
+        startAt: "2026-01-10T08:00:00.000Z",
+        endAt: "2026-01-10T10:01:00.000Z",
+        segments: [],
+      }),
     /duração máxima/,
   );
 });
@@ -1238,7 +2007,9 @@ test("clip export serializes work, reports progress, and cleans temporary files"
   let release;
   let runnerReady;
   let exportArgs;
-  const ready = new Promise((resolveReady) => { runnerReady = resolveReady; });
+  const ready = new Promise((resolveReady) => {
+    runnerReady = resolveReady;
+  });
   const executor = {
     run: ({ args, onProgress }) =>
       new Promise((resolveRun) => {
@@ -1247,7 +2018,13 @@ test("clip export serializes work, reports progress, and cleans temporary files"
         release = async () => {
           onProgress(30_000);
           await writeFile(args.at(-1), "exported-media");
-          resolveRun({ exitCode: 0, killed: false, timedOut: false, output: "", durationMs: 1 });
+          resolveRun({
+            exitCode: 0,
+            killed: false,
+            timedOut: false,
+            output: "",
+            durationMs: 1,
+          });
         };
       }),
   };
@@ -1258,22 +2035,35 @@ test("clip export serializes work, reports progress, and cleans temporary files"
     destinationPath: destination,
     startAt: "2026-01-10T08:00:00.000Z",
     endAt: "2026-01-10T08:01:00.000Z",
-    segments: [{
-      id: "segment",
-      recordingId: "recording",
-      path: "source.m4s",
-      absolutePath: join(directory, "source.m4s"),
-      startedAt: "2026-01-10T08:00:00.000Z",
-      endedAt: "2026-01-10T08:01:00.000Z",
-      durationMs: 60_000,
-      status: "completed",
-    }],
+    segments: [
+      {
+        id: "segment",
+        recordingId: "recording",
+        path: "source.m4s",
+        absolutePath: join(directory, "source.m4s"),
+        startedAt: "2026-01-10T08:00:00.000Z",
+        endedAt: "2026-01-10T08:01:00.000Z",
+        durationMs: 60_000,
+        status: "completed",
+      },
+    ],
   };
   const exporting = service.export(input);
   assert.deepEqual(service.status("job-one"), { active: true, percent: 0 });
-  await assert.rejects(service.export({ ...input, jobId: "job-two", destinationPath: join(directory, "second.mp4") }), /Já existe/);
+  await assert.rejects(
+    service.export({
+      ...input,
+      jobId: "job-two",
+      destinationPath: join(directory, "second.mp4"),
+    }),
+    /Já existe/,
+  );
   await ready;
-  assert.equal(exportArgs.includes("0:a:0?"), true, "Clip export must preserve an optional audio stream");
+  assert.equal(
+    exportArgs.includes("0:a:0?"),
+    true,
+    "Clip export must preserve an optional audio stream",
+  );
   await release();
   const result = await exporting;
   assert.equal(result.destinationPath, destination);
@@ -1286,12 +2076,17 @@ test("clip export cancellation removes its temporary manifest", async (t) => {
   const directory = await temporaryDirectory(t);
   const temporaryRoot = join(directory, "temporary");
   let runnerReady;
-  const ready = new Promise((resolveReady) => { runnerReady = resolveReady; });
+  const ready = new Promise((resolveReady) => {
+    runnerReady = resolveReady;
+  });
   const executor = {
-    run: ({ signal }) => new Promise((_resolveRun, reject) => {
-      runnerReady();
-      signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
-    }),
+    run: ({ signal }) =>
+      new Promise((_resolveRun, reject) => {
+        runnerReady();
+        signal.addEventListener("abort", () => reject(new Error("cancelled")), {
+          once: true,
+        });
+      }),
   };
   const service = new ClipExportService(executor, "fake-ffmpeg", temporaryRoot);
   const exporting = service.export({
@@ -1300,16 +2095,18 @@ test("clip export cancellation removes its temporary manifest", async (t) => {
     destinationPath: join(directory, "clip.mp4"),
     startAt: "2026-01-10T08:00:00.000Z",
     endAt: "2026-01-10T08:01:00.000Z",
-    segments: [{
-      id: "segment",
-      recordingId: "recording",
-      path: "source.m4s",
-      absolutePath: join(directory, "source.m4s"),
-      startedAt: "2026-01-10T08:00:00.000Z",
-      endedAt: "2026-01-10T08:01:00.000Z",
-      durationMs: 60_000,
-      status: "completed",
-    }],
+    segments: [
+      {
+        id: "segment",
+        recordingId: "recording",
+        path: "source.m4s",
+        absolutePath: join(directory, "source.m4s"),
+        startedAt: "2026-01-10T08:00:00.000Z",
+        endedAt: "2026-01-10T08:01:00.000Z",
+        durationMs: 60_000,
+        status: "completed",
+      },
+    ],
   });
   await ready;
   assert.equal(service.cancel("cancel-me"), true);
@@ -1324,7 +2121,13 @@ test("bundled FFmpeg exports a valid MP4 clip", async (t) => {
     return;
   }
   const directory = await temporaryDirectory(t);
-  const binary = join(process.cwd(), "resources", "ffmpeg", "win32", "ffmpeg.exe");
+  const binary = join(
+    process.cwd(),
+    "resources",
+    "ffmpeg",
+    "win32",
+    "ffmpeg.exe",
+  );
   const source = join(directory, "source.mp4");
   const destination = join(directory, "exported.mp4");
   const extractedAudio = join(directory, "exported-audio.m4a");
@@ -1332,44 +2135,84 @@ test("bundled FFmpeg exports a valid MP4 clip", async (t) => {
   const generated = await runner.run({
     binaryPath: binary,
     args: [
-      "-hide_banner", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=10",
-      "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
-      "-t", "1", "-c:v", "mpeg4", "-c:a", "aac", "-shortest", "-y", source,
+      "-hide_banner",
+      "-nostdin",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=black:s=16x16:r=10",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=1000:sample_rate=48000",
+      "-t",
+      "1",
+      "-c:v",
+      "mpeg4",
+      "-c:a",
+      "aac",
+      "-shortest",
+      "-y",
+      source,
     ],
     allowedOutputDirs: [directory],
     timeoutMs: 10_000,
   });
   assert.equal(generated.exitCode, 0);
-  const service = new ClipExportService(runner, binary, join(directory, "temporary"));
+  const service = new ClipExportService(
+    runner,
+    binary,
+    join(directory, "temporary"),
+  );
   const result = await service.export({
     recordingId: "recording",
     jobId: "31c059a2-7b50-47a8-abd3-303b75d1be98",
     destinationPath: destination,
     startAt: "2026-01-10T08:00:00.000Z",
     endAt: "2026-01-10T08:00:01.000Z",
-    segments: [{
-      id: "segment",
-      recordingId: "recording",
-      path: "source.mp4",
-      absolutePath: source,
-      startedAt: "2026-01-10T08:00:00.000Z",
-      endedAt: "2026-01-10T08:00:01.000Z",
-      durationMs: 1_000,
-      status: "completed",
-    }],
+    segments: [
+      {
+        id: "segment",
+        recordingId: "recording",
+        path: "source.mp4",
+        absolutePath: source,
+        startedAt: "2026-01-10T08:00:00.000Z",
+        endedAt: "2026-01-10T08:00:01.000Z",
+        durationMs: 1_000,
+        status: "completed",
+      },
+    ],
   });
   assert.equal(result.gaps.length, 0);
   const header = await readFile(destination);
   assert.equal(header.subarray(4, 8).toString("ascii"), "ftyp");
   const extracted = await runner.run({
     binaryPath: binary,
-    args: ["-hide_banner", "-nostdin", "-i", destination, "-map", "0:a:0", "-c", "copy", "-y", extractedAudio],
+    args: [
+      "-hide_banner",
+      "-nostdin",
+      "-i",
+      destination,
+      "-map",
+      "0:a:0",
+      "-c",
+      "copy",
+      "-y",
+      extractedAudio,
+    ],
     allowedInputDirs: [directory],
     allowedOutputDirs: [directory],
     timeoutMs: 10_000,
   });
-  assert.equal(extracted.exitCode, 0, "Exported clip must retain its audio stream");
-  assert.equal((await readFile(extractedAudio)).subarray(4, 8).toString("ascii"), "ftyp");
+  assert.equal(
+    extracted.exitCode,
+    0,
+    "Exported clip must retain its audio stream",
+  );
+  assert.equal(
+    (await readFile(extractedAudio)).subarray(4, 8).toString("ascii"),
+    "ftyp",
+  );
 });
 
 test("stopping a starting media session never spawns a late process", async (t) => {
@@ -1531,13 +2374,37 @@ test("RTSP probe accepts fragmented status and authentication headers", async (t
   assert.equal(requests, 2);
 });
 
+test("RTSP discovery recognizes a missing root path without validating it as playable", async (t) => {
+  const url = await rtspServer(t, (socket) => socket.on("data", () => {
+    socket.write("RTSP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+  }));
+  assert.equal(await probeRtsp({ url, discoveryOnly: true }), "ok");
+  assert.equal(await probeRtsp({ url }), "unreachable");
+  const httpUrl = await rtspServer(t, (socket) => socket.on("data", () => {
+    socket.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+  }));
+  assert.equal(await probeRtsp({ url: httpUrl, discoveryOnly: true }), "unreachable");
+});
+
 test("RTSP server lock is distinguished from timeouts and does not trigger authentication retries", async (t) => {
   let requests = 0;
-  const url = await rtspServer(t, socket => socket.on("data", () => {
-    requests++;
-    socket.write("RTSP/1.0 400 Server is locked\r\nContent-Length: 0\r\n\r\n");
-  }));
-  assert.equal(await probeRtsp({url,username:"user",password:"pass",timeoutMs:1000}), "locked");
+  const url = await rtspServer(t, (socket) =>
+    socket.on("data", () => {
+      requests++;
+      socket.write(
+        "RTSP/1.0 400 Server is locked\r\nContent-Length: 0\r\n\r\n",
+      );
+    }),
+  );
+  assert.equal(
+    await probeRtsp({
+      url,
+      username: "user",
+      password: "pass",
+      timeoutMs: 1000,
+    }),
+    "locked",
+  );
   assert.equal(requests, 1);
 });
 
@@ -1545,16 +2412,34 @@ test("media connection errors report a source lock without exposing log credenti
   const directory = await temporaryDirectory(t);
   const binary = join(directory, "media.exe");
   await writeFile(binary, "fixture");
-  await writeFile(join(directory, "mediamtx.log"), "old session: Server is locked\n");
+  await writeFile(
+    join(directory, "mediamtx.log"),
+    "old session: Server is locked\n",
+  );
   const session = new MediaSession({
-    cameraId:"camera",rtspUrl:"rtsp://user:secret@camera/live",path:"camera",binaryPath:binary,expectedHash:"",configDir:directory,
-    processFactory:{spawn:()=>({pid:1,kill(){},onExit(){}})},
+    cameraId: "camera",
+    rtspUrl: "rtsp://user:secret@camera/live",
+    path: "camera",
+    binaryPath: binary,
+    expectedHash: "",
+    configDir: directory,
+    processFactory: { spawn: () => ({ pid: 1, kill() {}, onExit() {} }) },
   });
   t.after(() => session.stop());
   await session.start();
-  assert.equal((await session.connectionStatus()).error, null, "A previous session's lock must not affect a new connection");
-  const logName = (await readdir(directory)).find(name=>name.endsWith(".yml")).replace(/\.yml$/, ".log");
-  await writeFile(join(directory,logName), "x".repeat(20_000) + "\nERR rtsp://user:secret@camera/live: bad status code: 400 (Server is locked)\n");
+  assert.equal(
+    (await session.connectionStatus()).error,
+    null,
+    "A previous session's lock must not affect a new connection",
+  );
+  const logName = (await readdir(directory))
+    .find((name) => name.endsWith(".yml"))
+    .replace(/\.yml$/, ".log");
+  await writeFile(
+    join(directory, logName),
+    "x".repeat(20_000) +
+      "\nERR rtsp://user:secret@camera/live: bad status code: 400 (Server is locked)\n",
+  );
   const status = await session.connectionStatus();
   assert.match(status.error, /bloqueou temporariamente/);
   assert.doesNotMatch(status.error, /secret|user|rtsp:/);

@@ -7,8 +7,11 @@ import type {
   Result,
 } from "../shared/contracts.js";
 import type { AppConfig } from "../shared/config.js";
-import type { DashboardGroup, DashboardLayout } from "../shared/dashboard-layout.js";
-import type { SdCardCamera, SdCardRecording } from '../shared/sd-card.js';
+import type {
+  DashboardGroup,
+  DashboardLayout,
+} from "../shared/dashboard-layout.js";
+import type { SdCardCamera, SdCardRecording } from "../shared/sd-card.js";
 import type {
   CameraRecord,
   MediaKind,
@@ -81,17 +84,33 @@ export interface CameraTestResult {
   } | null;
 }
 
+export interface CameraAutoConfigureResult extends CameraTestResult {
+  onvifUrl: string | null;
+}
+
 export interface DiscoveryInterface {
   name: string;
   address: string;
+  netmask: string;
 }
 
 export interface DiscoveredOnvifDevice {
+  identity?: { manufacturer: string | null; model: string | null } | null;
   endpointReference: string | null;
   host: string;
   onvifUrl: string;
   scopes: string[];
   types: string[];
+}
+export interface NetworkCameraResult {
+  endpointReference: string | null;
+  host: string;
+  onvifUrl: string | null;
+  scopes: string[];
+  types: string[];
+  services: Array<"http" | "https" | "rtsp" | "onvif">;
+  identity: { manufacturer: string | null; model: string | null };
+  origins: Array<"active-scan" | "onvif-multicast">;
 }
 
 export interface MediaSessionStatus {
@@ -178,9 +197,18 @@ function subscribe<C extends EventChannel>(
 
 const api = {
   sdCard: {
-    cameras: (): Promise<Result<SdCardCamera[]>> => ipcRenderer.invoke('sdCard:cameras'),
-    list: (cameraId: string, date: string): Promise<Result<SdCardRecording[]>> => ipcRenderer.invoke('sdCard:list', { cameraId, date }),
-    download: (cameraId: string, id: string): Promise<Result<{ path: string; imported: boolean }>> => ipcRenderer.invoke('sdCard:download', { cameraId, id }),
+    cameras: (): Promise<Result<SdCardCamera[]>> =>
+      ipcRenderer.invoke("sdCard:cameras"),
+    list: (
+      cameraId: string,
+      date: string,
+    ): Promise<Result<SdCardRecording[]>> =>
+      ipcRenderer.invoke("sdCard:list", { cameraId, date }),
+    download: (
+      cameraId: string,
+      id: string,
+    ): Promise<Result<{ path: string; imported: boolean }>> =>
+      ipcRenderer.invoke("sdCard:download", { cameraId, id }),
   },
   cameras: {
     list: (): Promise<Result<CameraSummary[]>> =>
@@ -191,9 +219,16 @@ const api = {
       ipcRenderer.invoke("cameras:metrics", { id }),
     discoveryInterfaces: (): Promise<Result<DiscoveryInterface[]>> =>
       ipcRenderer.invoke("cameras:discoveryInterfaces"),
-    discover: (input: { requestId: string; address?: string }): Promise<Result<DiscoveredOnvifDevice[]>> =>
+    discover: (input: {
+      requestId: string;
+      address?: string;
+    }): Promise<Result<DiscoveredOnvifDevice[]>> =>
       ipcRenderer.invoke("cameras:discover", input),
-    cancelDiscovery: (requestId: string): Promise<Result<{ cancelled: boolean }>> =>
+    discoverActive: (input: { requestId: string; address: string }): Promise<Result<NetworkCameraResult[]>> =>
+      ipcRenderer.invoke("cameras:discoverActive", input),
+    cancelDiscovery: (
+      requestId: string,
+    ): Promise<Result<{ cancelled: boolean }>> =>
       ipcRenderer.invoke("cameras:cancelDiscovery", { requestId }),
     onChanged: (listener: EventListener<"cameras:changed">): Unsubscribe =>
       subscribe("cameras:changed", listener),
@@ -215,6 +250,13 @@ const api = {
       password?: string | null;
     }): Promise<Result<CameraTestResult>> =>
       ipcRenderer.invoke("cameras:testConnection", input),
+    autoConfigure: (input: {
+      host: string;
+      onvifUrl?: string | null;
+      username?: string | null;
+      password?: string | null;
+    }): Promise<Result<CameraAutoConfigureResult>> =>
+      ipcRenderer.invoke("cameras:autoConfigure", input),
     update: (input: {
       id: string;
       name: string;
@@ -261,7 +303,10 @@ const api = {
       profile: "main" | "sub",
     ): Promise<Result<{ released: boolean }>> =>
       ipcRenderer.invoke("media:release", { cameraId, profile }),
-    status: (cameraId: string, profile: "main" | "sub" = "main"): Promise<Result<MediaSessionStatus | null>> =>
+    status: (
+      cameraId: string,
+      profile: "main" | "sub" = "main",
+    ): Promise<Result<MediaSessionStatus | null>> =>
       ipcRenderer.invoke("media:status", { cameraId, profile }),
     whepEndpoint: (
       cameraId: string,
@@ -281,10 +326,26 @@ const api = {
       ipcRenderer.invoke("ptz:stop", { cameraId, trigger }),
     status: (cameraId: string): Promise<Result<PtzControlSnapshot | null>> =>
       ipcRenderer.invoke("ptz:status", { cameraId }),
-    listPresets: (cameraId: string): Promise<Result<Array<{ token: string; name: string }>>> => ipcRenderer.invoke("ptz:presets:list", { cameraId }),
-    gotoPreset: (cameraId: string, presetToken: string): Promise<Result<{ moved: boolean }>> => ipcRenderer.invoke("ptz:presets:goto", { cameraId, presetToken }),
-    setPreset: (cameraId: string, name: string, presetToken?: string): Promise<Result<{ token: string | null }>> => ipcRenderer.invoke("ptz:presets:set", { cameraId, name, presetToken }),
-    removePreset: (cameraId: string, presetToken: string): Promise<Result<{ removed: boolean }>> => ipcRenderer.invoke("ptz:presets:remove", { cameraId, presetToken }),
+    listPresets: (
+      cameraId: string,
+    ): Promise<Result<Array<{ token: string; name: string }>>> =>
+      ipcRenderer.invoke("ptz:presets:list", { cameraId }),
+    gotoPreset: (
+      cameraId: string,
+      presetToken: string,
+    ): Promise<Result<{ moved: boolean }>> =>
+      ipcRenderer.invoke("ptz:presets:goto", { cameraId, presetToken }),
+    setPreset: (
+      cameraId: string,
+      name: string,
+      presetToken?: string,
+    ): Promise<Result<{ token: string | null }>> =>
+      ipcRenderer.invoke("ptz:presets:set", { cameraId, name, presetToken }),
+    removePreset: (
+      cameraId: string,
+      presetToken: string,
+    ): Promise<Result<{ removed: boolean }>> =>
+      ipcRenderer.invoke("ptz:presets:remove", { cameraId, presetToken }),
   },
   snapshots: {
     capture: (input: {
@@ -312,13 +373,17 @@ const api = {
       ipcRenderer.invoke("recordings:savePreview", input),
   },
   library: {
-    storageUsage: (): Promise<Result<{
-      freeBytes: number | null;
-      totalBytes: number | null;
-      usedBytes: number;
-      byCamera: Array<{ cameraId: string; bytes: number }>;
-    }>> => ipcRenderer.invoke("library:storageUsage"),
-    snapshots: (filters: LibraryFilter = {}): Promise<Result<SnapshotRecord[]>> =>
+    storageUsage: (): Promise<
+      Result<{
+        freeBytes: number | null;
+        totalBytes: number | null;
+        usedBytes: number;
+        byCamera: Array<{ cameraId: string; bytes: number }>;
+      }>
+    > => ipcRenderer.invoke("library:storageUsage"),
+    snapshots: (
+      filters: LibraryFilter = {},
+    ): Promise<Result<SnapshotRecord[]>> =>
       ipcRenderer.invoke("library:snapshots", filters),
     recordings: (
       filters: LibraryFilter = {},
@@ -326,9 +391,13 @@ const api = {
       ipcRenderer.invoke("library:recordings", filters),
     recordingById: (id: string): Promise<Result<RecordingLibraryItem | null>> =>
       ipcRenderer.invoke("library:recordingById", { id }),
-    motionEvents: (filters: MotionEventFilter): Promise<Result<MotionEventRecord[]>> =>
+    motionEvents: (
+      filters: MotionEventFilter,
+    ): Promise<Result<MotionEventRecord[]>> =>
       ipcRenderer.invoke("library:motionEvents", filters),
-    recordingSegments: (id: string): Promise<Result<RecordingSegmentRecord[]>> =>
+    recordingSegments: (
+      id: string,
+    ): Promise<Result<RecordingSegmentRecord[]>> =>
       ipcRenderer.invoke("library:recordingSegments", { id }),
     metadata: (input: {
       kind: MediaKind;
@@ -366,14 +435,20 @@ const api = {
       jobId: string;
       startAt: string;
       endAt: string;
-    }): Promise<Result<{
-      exported: boolean;
-      jobId: string;
-      gaps: Array<{ startsAt: string; endsAt: string }>;
-    }>> => ipcRenderer.invoke("library:exportClip", input),
-    cancelClipExport: (jobId: string): Promise<Result<{ cancelled: boolean }>> =>
+    }): Promise<
+      Result<{
+        exported: boolean;
+        jobId: string;
+        gaps: Array<{ startsAt: string; endsAt: string }>;
+      }>
+    > => ipcRenderer.invoke("library:exportClip", input),
+    cancelClipExport: (
+      jobId: string,
+    ): Promise<Result<{ cancelled: boolean }>> =>
       ipcRenderer.invoke("library:cancelClipExport", { jobId }),
-    clipExportStatus: (jobId: string): Promise<Result<{ active: boolean; percent: number }>> =>
+    clipExportStatus: (
+      jobId: string,
+    ): Promise<Result<{ active: boolean; percent: number }>> =>
       ipcRenderer.invoke("library:clipExportStatus", { jobId }),
     deleteSnapshot: (id: string): Promise<Result<{ deleted: boolean }>> =>
       ipcRenderer.invoke("library:deleteSnapshot", { id }),
@@ -394,21 +469,36 @@ const api = {
   backup: {
     export: () => ipcRenderer.invoke("backup:export"),
     inspectRestore: () => ipcRenderer.invoke("backup:inspectRestore"),
-    restore: (token: string) => ipcRenderer.invoke("backup:restore", { token, strategy: "replace" }),
+    restore: (token: string) =>
+      ipcRenderer.invoke("backup:restore", { token, strategy: "replace" }),
   },
   retention: {
     status: () => ipcRenderer.invoke("retention:status"),
   },
   schedules: {
-    list: (cameraId: string) => ipcRenderer.invoke("schedules:list", { cameraId }),
-    replace: (input: { cameraId: string; periods: Array<{ weekday: number; start: string; end: string; enabled: boolean }> }) => ipcRenderer.invoke("schedules:replace", input),
-    status: (cameraId: string) => ipcRenderer.invoke("schedules:status", { cameraId }),
+    list: (cameraId: string) =>
+      ipcRenderer.invoke("schedules:list", { cameraId }),
+    replace: (input: {
+      cameraId: string;
+      periods: Array<{
+        weekday: number;
+        start: string;
+        end: string;
+        enabled: boolean;
+      }>;
+    }) => ipcRenderer.invoke("schedules:replace", input),
+    status: (cameraId: string) =>
+      ipcRenderer.invoke("schedules:status", { cameraId }),
   },
   dashboard: {
-    saveGroup: (group: DashboardGroup) => ipcRenderer.invoke("dashboard:saveGroup", group),
-    deleteGroup: (id: string) => ipcRenderer.invoke("dashboard:deleteGroup", { id }),
-    saveLayout: (layout: DashboardLayout) => ipcRenderer.invoke("dashboard:saveLayout", layout),
-    deleteLayout: (id: string) => ipcRenderer.invoke("dashboard:deleteLayout", { id }),
+    saveGroup: (group: DashboardGroup) =>
+      ipcRenderer.invoke("dashboard:saveGroup", group),
+    deleteGroup: (id: string) =>
+      ipcRenderer.invoke("dashboard:deleteGroup", { id }),
+    saveLayout: (layout: DashboardLayout) =>
+      ipcRenderer.invoke("dashboard:saveLayout", layout),
+    deleteLayout: (id: string) =>
+      ipcRenderer.invoke("dashboard:deleteLayout", { id }),
   },
 };
 
