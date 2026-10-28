@@ -5,6 +5,7 @@ import { LiveVideo } from "../src/renderer/components/LiveVideo.tsx";
 import { audioCodecFromSdp } from "../src/renderer/media-codecs.ts";
 import { PtzPanel } from "../src/renderer/components/PtzPanel.tsx";
 import { SidebarPtz } from "../src/renderer/App.tsx";
+import { MonitoringGrid } from "../src/renderer/components/MonitoringGrid.tsx";
 
 export async function run() {
   const check = (condition, message) => {
@@ -271,6 +272,33 @@ export async function run() {
       key("keyup");
       await waitFor(() => stops.length === stopsBeforeContinuous + 1);
     } finally { ptzRoot.unmount(); }
+    const gridHost = document.createElement("div");
+    document.body.append(gridHost);
+    const gridRoot = createRoot(gridHost);
+    let camera = { id: "recording-camera", name: "Entrada", active: true, hasRtsp: false, recordingStatus: "idle" };
+    const renderGrid = () => flushSync(() => gridRoot.render(createElement(MonitoringGrid, {
+      cameras: [camera], layout: 2, savedLayout: null, selectedPtzCameraId: null,
+      onOpenFullscreen() {}, onPtzSelect() {}, onEdit() {}, onSlotsChanged() {},
+    })));
+    window.api.recordings = {
+      start: async () => {
+        camera = { ...camera, recordingStatus: "recording" };
+        renderGrid();
+        return { ok: true, value: { writeAllowed: true } };
+      },
+    };
+    try {
+      renderGrid();
+      flushSync(() => gridHost.querySelector('[title="Gravar"]').click());
+      await waitFor(() => gridHost.querySelector('[title="Parar gravação"]') && !gridHost.querySelector('[title="Parar gravação"]').disabled);
+      camera = { ...camera, recordingStatus: "completed" };
+      renderGrid();
+      check(!gridHost.querySelector(".tile-recording-indicator"), "External recording stop must clear the grid indicator");
+      check(gridHost.querySelector('[title="Gravar"]'), "External recording stop must restore the start action");
+    } finally {
+      flushSync(() => gridRoot.unmount());
+      gridHost.remove();
+    }
     return {
       passed: true,
       acquisitions: acquisitions.length,

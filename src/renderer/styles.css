@@ -1748,6 +1748,13 @@ p {
   color: var(--color-on-accent);
 }
 
+.camera-form-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .monitor-grid {
   display: grid;
   flex: 1;

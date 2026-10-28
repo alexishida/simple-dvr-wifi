@@ -9,6 +9,8 @@ export interface CameraDraft {
   snapshotUrl?: string | null;
   username?: string | null;
   password?: string | null;
+  sdCardUsername?: string | null;
+  sdCardPassword?: string | null;
   manufacturer?: string | null;
   model?: string | null;
   serialNumber?: string | null;
@@ -20,6 +22,7 @@ export interface CameraFormProps {
   editingId?: string | null;
   advancedInitially?: boolean;
   verifiedAutomatically?: boolean;
+  onConfigurationChanged?: () => void;
   onSaved: () => void;
   onCancel: () => void;
   onBack?: (draft: CameraDraft) => void;

@@ -2,7 +2,7 @@ import {
   autoRtspCandidate,
   type AutoRtspCandidate,
 } from "./camera-auto-config.js";
-import { parseRtspUrl } from "../../shared/camera-urls.js";
+import { parseCameraAddress, parseRtspUrl } from "../../shared/camera-urls.js";
 import {
   OnvifAdapter,
   OnvifAuthenticationError,
@@ -39,22 +39,7 @@ export interface CameraAutoConfigResult {
 }
 
 function hostForUrl(raw: string): string | null {
-  try {
-    const url = new URL(`http://${raw.trim()}`);
-    if (
-      !url.hostname ||
-      url.username ||
-      url.password ||
-      url.pathname !== "/" ||
-      url.search ||
-      url.hash
-    ) {
-      return null;
-    }
-    return url.hostname;
-  } catch {
-    return null;
-  }
+  return parseCameraAddress(raw)?.host ?? null;
 }
 
 export function onvifEndpointCandidates(host: string): string[] {
@@ -67,9 +52,9 @@ export function onvifEndpointCandidates(host: string): string[] {
     url.port = port;
     return url.toString();
   });
-  const explicit = new URL(`http://${host.trim()}`);
-  if (explicit.port)
-    candidates.unshift(`${explicit.origin}/onvif/device_service`);
+  const explicit = parseCameraAddress(host)!;
+  if (explicit.port !== null)
+    candidates.unshift(new URL(`http://${hostname}:${explicit.port}/onvif/device_service`).toString());
   return [...new Set(candidates)];
 }
 
@@ -143,7 +128,7 @@ export async function autoConfigureCameraHost(input: {
         rtspUrl: null,
         source: null,
       };
-      const rtspCandidate = autoRtspCandidate(info, input.host.trim(), null);
+      const rtspCandidate = autoRtspCandidate(info, hostForUrl(input.host)!, null);
       const rtsp = rtspCandidate && parseRtspUrl(rtspCandidate.url);
       if (!rtsp) {
         return {
@@ -161,6 +146,9 @@ export async function autoConfigureCameraHost(input: {
         };
       }
 
+      // Preserve the advertised candidate for manual correction even if access fails.
+      identified.rtspUrl = rtsp.sanitizedUrl;
+      identified.source = rtspCandidate.source;
       const rtspResult = await probeRtsp({
         url: rtsp.sanitizedUrl,
         username: input.username?.trim() || undefined,
@@ -169,8 +157,6 @@ export async function autoConfigureCameraHost(input: {
         signal,
       });
       if (rtspResult === "ok") {
-        identified.rtspUrl = rtsp.sanitizedUrl;
-        identified.source = rtspCandidate.source;
         return {
           status: "connected",
           onvifUrl,

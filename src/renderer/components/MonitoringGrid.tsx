@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CameraSummary } from "../../shared/contracts.js";
 import {
   CameraIcon,
@@ -96,13 +96,18 @@ function MonitoringTile({
   onDropCamera,
   selectedPtzCameraId,
 }: MonitoringTileProps): React.JSX.Element {
-  const [localRecording, setLocalRecording] = useState(false);
   const [actionState, setActionState] = useState<
     "idle" | "recording" | "snapshot"
   >("idle");
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const dragPreviewRef = useRef<HTMLElement | null>(null);
   const liveVideoRef = useRef<HTMLVideoElement>(null);
+  const messageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (messageTimer.current !== null) clearTimeout(messageTimer.current);
+    dragPreviewRef.current?.remove();
+  }, []);
 
   const removeDragPreview = (): void => {
     dragPreviewRef.current?.remove();
@@ -136,13 +141,13 @@ function MonitoringTile({
   }
 
   const recording =
-    localRecording ||
     camera.recordingStatus === "recording" ||
     camera.recordingStatus === "starting";
 
   const showActionMessage = (message: string): void => {
+    if (messageTimer.current !== null) clearTimeout(messageTimer.current);
     setActionMessage(message);
-    window.setTimeout(() => setActionMessage(null), 4_000);
+    messageTimer.current = setTimeout(() => setActionMessage(null), 4_000);
   };
 
   const createDisplayedFrame = async (
@@ -192,7 +197,6 @@ function MonitoringTile({
         .stop(camera.id)
         .then((result) => {
           if (result.ok && result.value.stopped) {
-            setLocalRecording(false);
             showActionMessage(
               result.value.saved
                 ? "Gravação finalizada e salva."
@@ -217,7 +221,6 @@ function MonitoringTile({
         .start(camera.id)
         .then(async (result) => {
           if (result.ok && result.value.writeAllowed) {
-            setLocalRecording(true);
             let previewSaved = true;
             if (result.value.recordingId) {
               try {

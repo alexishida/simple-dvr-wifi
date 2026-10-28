@@ -87,6 +87,7 @@ export async function run() {
   const value = (id) => document.getElementById(id).value;
   const edit = (id, value) => {
     const input = document.getElementById(id);
+    check(input, `Missing field: ${id}`);
     const select = input.tagName === "SELECT";
     Object.getOwnPropertyDescriptor(
       select ? HTMLSelectElement.prototype : HTMLInputElement.prototype,
@@ -325,7 +326,7 @@ export async function run() {
   await openIp();
   window.api.cameras.autoConfigure = async () => ({ ok: true, value: {
     status: "unavailable", onvifUrl: "http://192.168.1.80/onvif/device_service",
-    identified: null, segments: [{ name: "rtsp", detail: "Stream indisponível" }],
+    identified: { manufacturer: "Test", model: "Camera", serialNumber: null, rtspUrl: "rtsp://192.168.1.80/live" }, segments: [{ name: "rtsp", detail: "Stream indisponível" }],
   } });
   clickButton("Configurar automaticamente");
   await tick();
@@ -333,9 +334,14 @@ export async function run() {
   check(container.textContent.includes("Stream indisponível"), "Fallback hid the failure details");
   clickButton("Inserir URL manual");
   check(value("cam-onvif") === "http://192.168.1.80/onvif/device_service", "Manual fallback lost the discovered endpoint");
+  check(value("cam-rtsp") === "rtsp://192.168.1.80/live", "Manual fallback must retain the unverified stream for correction");
+  edit("cam-rtsp", "rtsp://192.168.1.80/corrected");
+  edit("cam-sd-user", "sd-user");
+  edit("cam-sd-pass", "sd-password");
   clickButton("Voltar");
   check(value("camera-password") === "local-password", "Back from manual must restore access data");
   clickButton("Inserir URL manual");
+  check(value("cam-rtsp").endsWith("/corrected") && value("cam-sd-user") === "sd-user" && value("cam-sd-pass") === "sd-password", "Back navigation must retain manual stream and SD credentials");
   clickButton("Cancelar");
   check(!document.getElementById("camera-host"), "Cancelling fallback reopened the abandoned setup");
   await openIp();
@@ -393,6 +399,91 @@ export async function run() {
   check(container.textContent.includes("Nenhum serviço de câmera"), "An empty port scan must explain how to continue");
   clickButton("Configurar por IP");
   check(Boolean(document.getElementById("camera-host")), "Empty discovery must allow direct IP setup");
+
+  // IP entry rejects full URLs locally and supports form submission with Enter.
+  await openIp();
+  let automaticCalls = 0;
+  const successfulAutoConfigure = window.api.cameras.autoConfigure;
+  window.api.cameras.autoConfigure = async (input) => {
+    automaticCalls++;
+    check(input.host === "192.168.1.80:2020", "IP setup must preserve the explicit ONVIF port");
+    return { ok: true, value: { status: "connected", segments: [], onvifUrl: "http://192.168.1.80:2020/onvif/device_service",
+      identified: { manufacturer: "Test", model: "Camera", serialNumber: "serial-ip", rtspUrl: "rtsp://192.168.1.80/live" } } };
+  };
+  edit("camera-host", "http://192.168.1.80/onvif/device_service");
+  submit();
+  check(automaticCalls === 0 && container.textContent.includes("Informe apenas"), "IP entry must reject full URLs before IPC");
+  edit("camera-host", "192.168.1.80:2020");
+  submit();
+  await tick();
+  check(automaticCalls === 1 && value("cam-host") === "192.168.1.80", "IP form submission must reach confirmation with a normalized host");
+  check(container.textContent.includes("serial-ip"), "Confirmation must show identified camera details");
+  edit("cam-pass", "changed-password");
+  check(!container.textContent.includes("Conexão RTSP validada") && !container.textContent.includes("A conexão foi validada"), "Editing credentials must invalidate the previous validation message");
+  edit("cam-host", "192.168.1.81");
+  submit();
+  await tick();
+  check(saved.serialNumber === null && saved.manufacturer === null && saved.epr === null, "Changing device address must not persist the old camera identity");
+  window.api.cameras.autoConfigure = successfulAutoConfigure;
+
+  render({ verifiedAutomatically: true, initial: { name: "Verified", host: "camera", rtspUrl: "rtsp://camera/live", epr: "old-device" } });
+  const originalTestConnection = window.api.cameras.testConnection;
+  window.api.cameras.testConnection = async () => ({ ok: false, error: { message: "Camera offline" } });
+  testConnection();
+  await tick();
+  check(!container.textContent.includes("A conexão foi validada") && container.textContent.includes("Camera offline"), "A failed retest must invalidate the earlier automatic validation");
+  edit("cam-host", "another-camera");
+  submit();
+  await tick();
+  check(saved.epr === null, "Changing the target must discard the old discovery identifier");
+  window.api.cameras.testConnection = originalTestConnection;
+
+  // Duplicate confirmation is scoped to the current draft, not all later edits.
+  const originalCreate = window.api.cameras.create;
+  const duplicateRequests = [];
+  window.api.cameras.create = async (input) => {
+    duplicateRequests.push(input);
+    return { ok: true, value: { duplicate: true } };
+  };
+  render({ initial: { name: "Duplicate", host: "camera", rtspUrl: "rtsp://camera/live" } });
+  submit();
+  await tick();
+  edit("cam-name", "Another draft");
+  submit();
+  await tick();
+  check(duplicateRequests.length === 2 && duplicateRequests.every((input) => !input.allowDuplicate), "Editing a duplicate draft must require a new confirmation");
+  let finishSave;
+  window.api.cameras.create = () => new Promise((resolve) => { finishSave = resolve; });
+  submit();
+  check(document.getElementById("cam-host").matches(":disabled"), "Saving must freeze the submitted fields");
+  check([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Cancelar")).matches(":disabled"), "Saving must not allow leaving an in-flight registration");
+  finishSave({ ok: true, value: { duplicate: false } });
+  await tick();
+  window.api.cameras.create = originalCreate;
+
+  // Network changes must discard an interface that no longer exists.
+  const originalInterfaces = window.api.cameras.discoveryInterfaces;
+  const discoveryAddresses = [];
+  window.api.cameras.discover = async (input) => {
+    discoveryAddresses.push(input.address);
+    return originalDiscover(input);
+  };
+  flushSync(() => root.render(createElement(CamerasView, { key: "network-change", cameras: [], onRefresh() {} })));
+  clickButton("Adicionar");
+  clickButton("Detectar automaticamente");
+  await tick();
+  await tick();
+  clickButton("Voltar");
+  let finishInterfaces;
+  window.api.cameras.discoveryInterfaces = () => new Promise((resolve) => { finishInterfaces = resolve; });
+  clickButton("Detectar automaticamente");
+  check([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Buscar por portas")).disabled, "Port scan must wait for network interfaces");
+  finishInterfaces({ ok: true, value: [{ name: "Ethernet", address: "10.0.0.10", netmask: "255.255.255.0" }] });
+  await tick();
+  await tick();
+  check(discoveryAddresses.at(-1) === "10.0.0.10" && value("discovery-interface") === "10.0.0.10", "Discovery reused a stale network interface");
+  window.api.cameras.discoveryInterfaces = originalInterfaces;
+  window.api.cameras.discover = originalDiscover;
 
   previewScreen = async (screen) => {
     flushSync(() => root.render(createElement(CamerasView, {

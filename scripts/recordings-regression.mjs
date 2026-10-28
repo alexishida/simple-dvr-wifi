@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { RecordingsView } from "../src/renderer/views/RecordingsView.tsx";
+import { LibraryView } from "../src/renderer/views/LibraryView.tsx";
 import styles from "../src/renderer/styles.css?inline";
 
 export async function run() {
@@ -9,6 +10,13 @@ export async function run() {
     if (!condition) throw new Error(message);
   };
   const tick = () => new Promise((resolve) => setTimeout(resolve, 40));
+  const waitFor = async (predicate, message) => {
+    const deadline = Date.now() + 3_000;
+    while (!predicate()) {
+      check(Date.now() < deadline, message);
+      await tick();
+    }
+  };
   const style = document.createElement("style");
   style.textContent = styles;
   document.head.append(style);
@@ -244,8 +252,54 @@ export async function run() {
   await tick();
   flushSync(() => document.getElementById("recordings-tab-library").click());
   await tick();
+  // A slow library response must finish before the next automatic refresh.
+  const slowHost = document.createElement("div");
+  document.body.append(slowHost);
+  const slowRoot = createRoot(slowHost);
+  const originalTimeout = window.setTimeout;
+  const originalInterval = window.setInterval;
+  const originalSnapshots = window.api.library.snapshots;
+  let finishSnapshots;
+  let refreshTimers = 0;
+  let refreshSnapshots;
+  const captureTimer = (original) => (callback, delay, ...args) => {
+    if (delay === 10_000) {
+      refreshTimers++;
+      refreshSnapshots = callback;
+    }
+    return original(callback, delay, ...args);
+  };
+  window.setTimeout = captureTimer(originalTimeout);
+  window.setInterval = captureTimer(originalInterval);
+  window.api.library.snapshots = () => new Promise((resolve) => { finishSnapshots = resolve; });
+  try {
+    flushSync(() => slowRoot.render(createElement(LibraryView, { cameras, mode: "snapshots" })));
+    await tick();
+    check(refreshTimers === 0, "Automatic refresh must not race a pending library request");
+    const snapshot = (id, minute) => ({ id, cameraId: "entrance", capturedAt: new Date(2026, 9, 18, 10, minute).toISOString(), path: "fixture.jpg", bytes: 100 });
+    const first = snapshot("first", 30);
+    const last = snapshot("last", 10);
+    finishSnapshots(ok([first, last]));
+    await tick();
+    check(refreshTimers === (document.visibilityState === "visible" ? 1 : 0), "Refresh must resume after completion only while visible");
+    flushSync(() => slowHost.querySelector(".snapshot-preview").click());
+    if (refreshSnapshots) {
+      flushSync(() => refreshSnapshots());
+      finishSnapshots(ok([first, snapshot("middle", 20), last]));
+      await waitFor(() => slowHost.querySelectorAll(".snapshot-preview").length === 3, "Refreshed snapshots must be rendered before navigation");
+      await tick();
+      flushSync(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" })));
+      await waitFor(() => slowHost.querySelector(".snapshot-viewer-images img").getAttribute("src").endsWith("/middle"), "Snapshot keyboard navigation must use the refreshed list");
+    }
+  } finally {
+    flushSync(() => slowRoot.unmount());
+    slowHost.remove();
+    window.setTimeout = originalTimeout;
+    window.setInterval = originalInterval;
+    window.api.library.snapshots = originalSnapshots;
+  }
   return {
     checks:
-      "filters, periods, validation, pagination, selection, empty/error recovery, lazy timeline, playback, SD search/import",
+      "filters, periods, validation, pagination, selection, empty/error recovery, lazy timeline, playback, SD search/import, slow refresh, refreshed snapshot navigation",
   };
 }

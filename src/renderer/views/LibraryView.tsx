@@ -300,6 +300,15 @@ export function LibraryView({
   const [eventStateFilter, setEventStateFilter] = useState<"all" | "started" | "ended">("all");
   const [eventVideoFilter, setEventVideoFilter] = useState<"all" | "with-video" | "without-video">("all");
   const pendingMotionPlaybackAt = useRef<string | null>(null);
+  const sortedSnapshots = useMemo(
+    () =>
+      [...snapshots].sort((a, b) =>
+        sortOrder === "newest"
+          ? b.capturedAt.localeCompare(a.capturedAt)
+          : a.capturedAt.localeCompare(b.capturedAt),
+      ),
+    [snapshots, sortOrder],
+  );
 
   function applySearch(filters: RecordingSearchFilters): void {
     setLoading(true);
@@ -322,6 +331,17 @@ export function LibraryView({
 
   useEffect(() => {
     let active = true;
+    let pending = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      if (!active || pending || document.visibilityState !== "visible") return;
+      timer = setTimeout(() => {
+        setRefreshVersion((version) => version + 1);
+      }, 10_000);
+    };
+    document.addEventListener("visibilitychange", scheduleRefresh);
     if (mode === "snapshots") setLoading(true);
     setLoadError(null);
     const filters = {
@@ -350,9 +370,15 @@ export function LibraryView({
         if (!active) return;
         setLoadError("Não foi possível carregar a biblioteca.");
         setLoading(false);
+      })
+      .finally(() => {
+        pending = false;
+        scheduleRefresh();
       });
     return () => {
       active = false;
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", scheduleRefresh);
     };
   }, [
     mode,
@@ -365,24 +391,6 @@ export function LibraryView({
     refreshVersion,
   ]);
 
-  useEffect(() => {
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const updateSchedule = (): void => {
-      if (timer !== null) clearInterval(timer);
-      timer = null;
-      if (document.visibilityState !== "visible") return;
-      timer = setInterval(() => {
-        setRefreshVersion((version) => version + 1);
-      }, 10_000);
-    };
-
-    updateSchedule();
-    document.addEventListener("visibilitychange", updateSchedule);
-    return () => {
-      if (timer !== null) clearInterval(timer);
-      document.removeEventListener("visibilitychange", updateSchedule);
-    };
-  }, []);
 
   useEffect(() => {
     if (!playingRecording) return;
@@ -450,9 +458,12 @@ export function LibraryView({
       });
       setSnapshotZoom(1);
     };
-    queueMicrotask(() => snapshotCloseRef.current?.focus());
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [viewingSnapshot, sortedSnapshots]);
+
+  useEffect(() => {
+    if (viewingSnapshot) snapshotCloseRef.current?.focus();
   }, [viewingSnapshot]);
 
   useEffect(() => {
@@ -536,15 +547,6 @@ export function LibraryView({
   const layoutId = `library-layout-${mode}`;
   const densityId = `library-density-${mode}`;
   const pageSizeId = `library-page-size-${mode}`;
-  const sortedSnapshots = useMemo(
-    () =>
-      [...snapshots].sort((a, b) =>
-        sortOrder === "newest"
-          ? b.capturedAt.localeCompare(a.capturedAt)
-          : a.capturedAt.localeCompare(b.capturedAt),
-      ),
-    [snapshots, sortOrder],
-  );
   const sortedRecordings = useMemo(
     () =>
       [...recordings].sort((a, b) =>

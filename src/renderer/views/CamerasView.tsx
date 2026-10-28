@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CameraSummary } from "../../shared/contracts.js";
+import { parseCameraAddress } from "../../shared/camera-urls.js";
 import { CameraTable } from "./CameraTable.js";
 import { CameraForm } from "./CameraForm.js";
 import { CameraNotice } from "./CameraNotice.js";
@@ -150,11 +151,11 @@ export function CamerasView({
     setDraft({
       ...fallbackDraft,
       name: fallbackDraft?.name ?? (host.trim() ? `Câmera ${host.trim()}` : ""),
-      host: host.trim(),
+      host: parseCameraAddress(host)?.host ?? host.trim(),
       username: username.trim() || null,
       password: password || null,
       onvifUrl: fallbackDraft?.onvifUrl ?? autoTarget?.onvifUrl ?? null,
-      epr: autoTarget?.endpointReference ?? null,
+      epr: fallbackDraft ? fallbackDraft.epr ?? null : autoTarget?.endpointReference ?? null,
     });
     setCreating(true);
     setOnboarding(null);
@@ -173,6 +174,7 @@ export function CamerasView({
     const revision = ++flowRevision.current;
     setOnboarding("discovery");
     setLoadingInterfaces(true);
+    setInterfaces([]);
     setDiscoveryMessage(null);
     setDiscovered([]);
     setActiveDiscovered([]);
@@ -186,14 +188,12 @@ export function CamerasView({
         }
         setInterfaces(result.value);
         setLoadingInterfaces(false);
-        if (!selectedInterface && result.value.length === 1)
-          setSelectedInterface(result.value[0]!.address);
+        const address = result.value.some((network) => network.address === selectedInterface)
+          ? selectedInterface
+          : result.value.length === 1 ? result.value[0]!.address : "";
+        setSelectedInterface(address);
         if (result.value.length > 0)
-          runDiscovery(
-            "onvif",
-            selectedInterface ||
-              (result.value.length === 1 ? result.value[0]!.address : ""),
-          );
+          runDiscovery("onvif", address);
       })
       .catch(() => {
         if (revision === flowRevision.current)
@@ -284,6 +284,10 @@ export function CamerasView({
   };
   const configure = (): void => {
     if (configuring || !host.trim()) return;
+    if (!parseCameraAddress(host)) {
+      setConfigurationMessage({ kind: "error", text: "Informe apenas o IP ou hostname, com porta opcional (ex.: 192.168.1.80:2020). Para uma URL completa, use Inserir URL manual." });
+      return;
+    }
     const revision = ++flowRevision.current;
     setConfiguring(true);
     setConfigurationMessage({
@@ -336,7 +340,7 @@ export function CamerasView({
           setOnboarding(null);
           setConfigurationMessage({
             kind: "success",
-            text: "Vídeo validado. Confira o nome e confirme o cadastro da câmera.",
+            text: "Conexão RTSP validada. Confira o nome e confirme o cadastro da câmera.",
           });
           return;
         }
@@ -346,6 +350,7 @@ export function CamerasView({
           username: username.trim() || null,
           password: password || null,
           onvifUrl,
+          rtspUrl: identified?.rtspUrl ?? null,
           manufacturer: identified?.manufacturer ?? null,
           model: identified?.model ?? null,
           serialNumber: identified?.serialNumber ?? null,
@@ -428,6 +433,7 @@ export function CamerasView({
           verifiedAutomatically={
             configurationMessage?.kind === "success" && !editing
           }
+          onConfigurationChanged={() => setConfigurationMessage(null)}
           onSaved={handleSaved}
           onBack={
             !editing && !hasPendingDraft
@@ -680,6 +686,7 @@ export function CamerasView({
             <button
               type="button"
               className="btn btn-secondary"
+              disabled={loadingInterfaces || interfaces.length === 0}
               onClick={() => {
                 setDiscoveryMode("active");
                 setDiscovered([]);
@@ -790,9 +797,10 @@ export function CamerasView({
     );
   if (onboarding === "ip" || onboarding === "detected")
     return (
-      <section
+      <form
         className="panel camera-onboarding camera-configure-panel"
         aria-labelledby="configure-camera-title"
+        onSubmit={(event) => { event.preventDefault(); configure(); }}
       >
         <div className="section-heading">
           <div>
@@ -805,8 +813,8 @@ export function CamerasView({
                 : "Configurar câmera detectada"}
             </h2>
             <p className="field-hint">
-              O app identifica o fabricante e valida o streaming antes de
-              liberar o cadastro.
+              O app tenta identificar a câmera via ONVIF e testar o acesso RTSP.
+              Use a conta local da câmera, que pode ser diferente da conta do aplicativo do fabricante.
             </p>
           </div>
           <button
@@ -824,6 +832,8 @@ export function CamerasView({
           <input
             id="camera-host"
             className="field-input"
+            placeholder="192.168.1.80 ou camera.local:2020"
+            maxLength={253}
             disabled={configuring}
             value={host}
             onChange={(event) => {
@@ -880,16 +890,15 @@ export function CamerasView({
             <PlusIcon size={16} /> Inserir URL manual
           </button>
           <button
-            type="button"
+            type="submit"
             className="btn btn-primary"
-            onClick={configure}
             disabled={configuring || !host.trim()}
           >
             <KeyIcon size={16} />{" "}
             {configuring ? "Configurando…" : "Configurar automaticamente"}
           </button>
         </div>
-      </section>
+      </form>
     );
   return (
     <>

@@ -12,6 +12,23 @@ export interface ParsedHttpUrl {
   password: string | null;
 }
 
+/** A camera address is a host with an optional port, never a URL or credentials. */
+export function parseCameraAddress(raw: string): { host: string; port: number | null } | null {
+  const address = raw.trim();
+  if (!address || /[\s/@?#\\]/.test(address)) return null;
+  try {
+    // A non-special scheme preserves an explicitly supplied port 80.
+    const url = new URL(`rtsp://${address}`);
+    if (!url.hostname || url.username || url.password || url.pathname) return null;
+    const port = url.port ? Number(url.port) : null;
+    if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65_535)) return null;
+    const host = new URL(`http://${address}`).hostname;
+    return { host, port };
+  } catch {
+    return null;
+  }
+}
+
 function decodeUrlComponent(value: string): string {
   try {
     return decodeURIComponent(value);

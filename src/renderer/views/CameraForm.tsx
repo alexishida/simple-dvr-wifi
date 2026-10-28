@@ -19,6 +19,7 @@ export function CameraForm({
   editingId,
   advancedInitially = false,
   verifiedAutomatically = false,
+  onConfigurationChanged,
   onSaved,
   onCancel,
   onBack,
@@ -46,11 +47,17 @@ export function CameraForm({
     manufacturer: string | null;
     model: string | null;
     serialNumber: string | null;
-  } | null>(null);
+  } | null>(initial ? {
+    manufacturer: initial.manufacturer ?? null,
+    model: initial.model ?? null,
+    serialNumber: initial.serialNumber ?? null,
+  } : null);
   const configurationRevision = useRef(0);
-  const visibleIdentity = identified ?? (editingId ? initial : null);
-  const [sdCardUsername, setSdCardUsername] = useState("");
-  const [sdCardPassword, setSdCardPassword] = useState("");
+  const [identityChanged, setIdentityChanged] = useState(false);
+  const visibleIdentity = identified;
+  const [connectionVerified, setConnectionVerified] = useState(verifiedAutomatically);
+  const [sdCardUsername, setSdCardUsername] = useState(initial?.sdCardUsername ?? "");
+  const [sdCardPassword, setSdCardPassword] = useState(initial?.sdCardPassword ?? "");
   const [message, setMessage] = useState<{
     kind: "error" | "info" | "success";
     text: string;
@@ -194,13 +201,12 @@ export function CameraForm({
         manufacturer:
           identified?.manufacturer ??
           preset?.manufacturer ??
-          initial?.manufacturer ??
           null,
-        model: identified?.model ?? preset?.model ?? initial?.model ?? null,
-        serialNumber: identified?.serialNumber ?? initial?.serialNumber ?? null,
+        model: identified?.model ?? preset?.model ?? null,
+        serialNumber: identified?.serialNumber ?? null,
         host: host.trim() || parsedRtsp?.host || onvifHost,
         port: port ? Number(port) : (parsedRtsp?.port ?? null),
-        epr: initial?.epr ?? null,
+        epr: identityChanged ? null : initial?.epr ?? null,
         onvifUrl: onvifUrl.trim() || null,
         rtspUrl: parsedRtsp?.sanitizedUrl ?? null,
         username: username.trim() || parsedRtsp?.username || null,
@@ -247,6 +253,8 @@ export function CameraForm({
     }
 
     setTesting(true);
+    setConnectionVerified(false);
+    onConfigurationChanged?.();
     const revision = configurationRevision.current;
     setIdentified(null);
     setMessage({ kind: "info", text: "Testando a conexão informada…" });
@@ -266,6 +274,7 @@ export function CameraForm({
         return;
       }
       const device = result.value.identified;
+      setConnectionVerified(result.value.status === "connected");
       const autoFilled =
         !editingId &&
         !preset &&
@@ -302,8 +311,20 @@ export function CameraForm({
     <form
       className={`camera-form${editingId ? " camera-form-editing" : ""}`}
       onSubmit={(event) => void handleSubmit(event)}
+      onChangeCapture={(event) => {
+        const id = (event.target as HTMLElement).id;
+        setDuplicate(false);
+        setMessage(null);
+        if (id !== "cam-name" && id !== "cam-sd-user" && id !== "cam-sd-pass") {
+          setConnectionVerified(false);
+          onConfigurationChanged?.();
+        }
+        if (["cam-host", "cam-onvif", "cam-rtsp", "cam-model"].includes(id)) {
+          setIdentityChanged(true);
+        }
+      }}
     >
-      <div className="camera-form-columns">
+      <fieldset className="camera-form-columns camera-form-fields" disabled={saving}>
         <section className="camera-form-column" aria-label="Dados da câmera">
           <div className="camera-form-section-heading">
             <h3>Dados e acesso</h3>
@@ -425,7 +446,7 @@ export function CameraForm({
               </p>
             </div>
           </div>
-          {(!verifiedAutomatically || showAdvanced) && (
+          {(!verifiedAutomatically || !connectionVerified || showAdvanced) && (
             <div className="field-row camera-form-credentials">
               <div className="field">
                 <label className="field-label" htmlFor="cam-sd-user">
@@ -468,12 +489,12 @@ export function CameraForm({
           <div className="camera-form-section-heading">
             <h3>Streaming e conexão</h3>
             <p>
-              {verifiedAutomatically
-                ? "O vídeo foi validado. As URLs estão disponíveis na configuração avançada."
+              {connectionVerified
+                ? "A conexão foi validada. As URLs estão disponíveis na configuração avançada."
                 : "Selecione uma família compatível ou informe as URLs."}
             </p>
           </div>
-          {!editingId && !verifiedAutomatically && (
+          {!editingId && (!verifiedAutomatically || !connectionVerified) && (
             <>
               <div className="field">
                 <label className="field-label" htmlFor="cam-model">
@@ -624,7 +645,7 @@ export function CameraForm({
             </>
           )}
         </section>
-      </div>
+      </fieldset>
 
       {message && (
         <CameraNotice
@@ -650,16 +671,19 @@ export function CameraForm({
                 onvifUrl,
                 username,
                 password,
-                manufacturer: identified?.manufacturer ?? initial?.manufacturer,
-                model: identified?.model ?? initial?.model,
-                serialNumber: identified?.serialNumber ?? initial?.serialNumber,
+                epr: identityChanged ? null : initial?.epr ?? null,
+                sdCardUsername,
+                sdCardPassword,
+                manufacturer: identified?.manufacturer ?? preset?.manufacturer ?? null,
+                model: identified?.model ?? preset?.model ?? null,
+                serialNumber: identified?.serialNumber ?? null,
               })
             }
           >
             <ChevronLeftIcon size={16} /> Voltar
           </button>
         )}
-        <button type="button" className="btn btn-secondary" onClick={onCancel}>
+        <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={saving}>
           <CloseIcon size={16} />
           Cancelar
         </button>

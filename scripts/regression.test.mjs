@@ -159,6 +159,29 @@ test("editing a camera tests stored per-service credentials without exposing the
 });
 import { autoRtspCandidate } from "../src/main/services/camera-auto-config.ts";
 import { onvifEndpointCandidates, autoConfigureCameraHost } from "../src/main/services/camera-host-auto-config.ts";
+import { parseCameraAddress } from "../src/shared/camera-urls.ts";
+
+test("camera addresses accept optional ports but reject URLs, credentials and malformed input", () => {
+  assert.deepEqual(parseCameraAddress(" camera.local:2020 "), { host: "camera.local", port: 2020 });
+  assert.deepEqual(parseCameraAddress("192.168.1.80:80"), { host: "192.168.1.80", port: 80 });
+  assert.deepEqual(parseCameraAddress("[::1]:2020"), { host: "[::1]", port: 2020 });
+  for (const address of ["", "http://camera", "rtsp://camera/live", "user:pass@camera", "camera/path", "camera?x", "camera#x", "cam era", "camera:0", "camera:65536", "999.1.1.1", "camera\\path"]) {
+    assert.equal(parseCameraAddress(address), null, address);
+  }
+  assert.equal(onvifEndpointCandidates("camera.local:80").length, 5);
+});
+
+test("IP setup separates the ONVIF port from model RTSP and preserves failed candidates", async (t) => {
+  const camera = new OnvifSimulator({ manufacturer: "TP-Link", model: "Tapo C310", profiles: 0 });
+  await camera.start();
+  t.after(() => camera.stop());
+  const result = await autoConfigureCameraHost({
+    host: new URL(camera.url).host, onvifUrl: camera.url, username: "admin", password: "admin",
+  });
+  assert.equal(result.onvifUrl, camera.url);
+  assert.equal(result.identified?.rtspUrl, "rtsp://127.0.0.1:554/stream1");
+  assert.equal(result.identified?.source, "reference");
+});
 
 test("automatic setup preserves explicit ports and authentication failures for retry", async (t) => {
   assert.equal(onvifEndpointCandidates("192.168.1.10:2020")[0], "http://192.168.1.10:2020/onvif/device_service");
