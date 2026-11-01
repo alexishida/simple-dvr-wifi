@@ -123,6 +123,12 @@ export const MIGRATIONS: Migration[] = [
     destructive: false,
     up: (db) => db.exec('ALTER TABLE camera_profiles ADD COLUMN audio_codec TEXT'),
   },
+  {
+    version: 10,
+    name: 'camera-device-channels',
+    destructive: false,
+    up: (db) => db.exec('ALTER TABLE cameras ADD COLUMN device_id TEXT; ALTER TABLE cameras ADD COLUMN channel_key TEXT'),
+  },
 ]
 
 export interface MigrationResult {

@@ -10,7 +10,7 @@ export interface PtzCapabilities {
 }
 
 export interface PtzServiceInterface {
-  continuousMove(options: { profileToken: string; velocity: Record<string, number> }): Promise<void>
+  continuousMove(options: { profileToken: string; velocity: Record<string, number>; timeoutMs?: number }): Promise<void>
   stop(options: { profileToken: string; panTilt?: boolean; zoom?: boolean }): Promise<void>
   relativeMove(options: { profileToken: string; velocity: Record<string, number> }): Promise<void>
   absoluteMove(options: { profileToken: string; position: Record<string, number> }): Promise<void>
@@ -44,6 +44,7 @@ export class PtzCommandGuard {
   }
 
   async continuousMove(options: {
+    timeoutMs?: number
     profileToken: string
     velocity: Record<string, number>
   }): Promise<void> {

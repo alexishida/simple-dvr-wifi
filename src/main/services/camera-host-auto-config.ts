@@ -1,3 +1,6 @@
+import { buildPresetRtspUrl, presetForOnvifIdentity } from "../../shared/camera-presets.js";
+import { discoverCameraChannels } from "./camera-channel-discovery.js";
+import type { CameraChannel } from "../../shared/camera-channels.js";
 import {
   autoRtspCandidate,
   type AutoRtspCandidate,
@@ -29,6 +32,7 @@ export interface CameraAutoConfigResult {
   status: "connected" | "unavailable";
   segments: CameraAutoConfigSegment[];
   onvifUrl: string | null;
+  channels?: CameraChannel[];
   identified: {
     manufacturer: string | null;
     model: string | null;
@@ -156,9 +160,26 @@ export async function autoConfigureCameraHost(input: {
         timeoutMs: Math.max(1, Math.min(5_000, deadline - Date.now())),
         signal,
       });
-      if (rtspResult === "ok") {
+      const channels = discoverCameraChannels(info);
+      if (!channels.length) channels.push({ key: "default", name: "Canal 1", rtspUrl: rtsp.sanitizedUrl, rtspSubUrl: info.rtspSubUrl ? parseRtspUrl(info.rtspSubUrl)?.sanitizedUrl ?? null : null });
+      if (channels.length === 1 && !channels[0]!.rtspSubUrl && rtspCandidate.source === "reference") {
+        const preset = presetForOnvifIdentity(info.identity.manufacturer, info.identity.model);
+        if (preset?.subPath) channels[0]!.rtspSubUrl = buildPresetRtspUrl(preset, hostForUrl(input.host)!, "554", "1", "sub");
+      }
+      if (channels.length > 16) throw new Error("A camera anunciou mais de 16 canais.");
+      const streamSignal = AbortSignal.timeout(30_000);
+      // Validate each announced stream; never invent lenses or an untested lite URI.
+      let allMainAvailable = rtspResult === "ok";
+      for (const channel of channels) {
+        const probe = async (url: string) => probeRtsp({ url, username: input.username?.trim() || undefined, password: input.password || undefined, timeoutMs: 5000, signal: streamSignal });
+        const mainAvailable = channel.rtspUrl === rtsp.sanitizedUrl ? rtspResult === "ok" : await probe(channel.rtspUrl) === "ok";
+        allMainAvailable &&= mainAvailable;
+        if (channel.rtspSubUrl && await probe(channel.rtspSubUrl) !== "ok") channel.rtspSubUrl = null;
+      }
+      if (allMainAvailable) {
         return {
           status: "connected",
+          channels,
           onvifUrl,
           identified,
           segments: [

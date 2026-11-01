@@ -20,6 +20,7 @@ export interface CameraCapabilities {
 
 export interface CameraProfileInfo {
   token: string
+  videoSourceToken?: string | null
   name: string
   streamType: 'main' | 'sub'
   codec: string | null

@@ -24,11 +24,18 @@ export async function run() {
   container.className = "app-content";
   document.body.append(container);
   const root = createRoot(container);
+  const previewCalls = [];
   let saved;
   let tested;
   let calls = 0;
   window.api = {
     cameras: {
+      async preview(input) {
+        previewCalls.push(input);
+        return input.rtspUrl.includes("/2/")
+          ? { ok: false, error: { message: "No preview" } }
+          : { ok: true, value: { image: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" } };
+      },
       async discover() {
         return { ok: true, value: [{ host: "192.168.1.80", onvifUrl: "http://192.168.1.80:2020/onvif/device_service", endpointReference: "camera-epr", scopes: [], types: [], identity: { manufacturer: "Test", model: "Camera" } }] };
       },
@@ -438,6 +445,22 @@ export async function run() {
   check(saved.epr === null, "Changing the target must discard the old discovery identifier");
   window.api.cameras.testConnection = originalTestConnection;
 
+  render({ verifiedAutomatically: true, advancedInitially: false, initial: {
+    name: "Three lenses", host: "camera", rtspUrl: "rtsp://camera/1/main",
+    channels: [1, 2, 3].map(n => ({ key: `source:${n}`, name: `Canal ${n}`,
+      rtspUrl: `rtsp://camera/${n}/main`, rtspSubUrl: `rtsp://camera/${n}/sub` })),
+  } });
+  await tick();
+  await tick();
+  check(previewCalls.length === 3 && previewCalls.every(input => input.rtspUrl.endsWith("/sub")), "Confirmation must preview every lens using its lite stream");
+  check(container.querySelectorAll(".camera-channel-preview img").length === 2, "Available channel images must render even if another preview fails");
+  check(container.textContent.includes("Previa indisponivel"), "Preview failure must explain that registration can continue");
+  check(document.getElementById("cam-host").readOnly, "Automatic confirmation must preserve the discovered addresses");
+  check(getComputedStyle(document.getElementById("cam-host").parentElement.parentElement).display === "none", "Automatic confirmation must hide technical address fields");
+  submit();
+  await tick();
+  check(saved.channels.length === 3 && saved.channels[2].rtspSubUrl === "rtsp://camera/3/sub", "Registration must send all lenses with lite streams");
+
   // Duplicate confirmation is scoped to the current draft, not all later edits.
   const originalCreate = window.api.cameras.create;
   const duplicateRequests = [];
@@ -498,9 +521,19 @@ export async function run() {
     if (screen === "discovery" || screen === "confirmed") clickButton("Detectar automaticamente");
     await tick();
     if (screen === "confirmed") {
+      const originalConfigure = window.api.cameras.autoConfigure;
+      window.api.cameras.autoConfigure = async (input) => {
+        const result = await originalConfigure(input);
+        return { ...result, value: { ...result.value,
+          channels: [1, 2, 3].map(n => ({ key: `source:${n}`, name: `Canal ${n}`,
+            rtspUrl: `rtsp://192.168.1.80/${n}/main`, rtspSubUrl: n === 3 ? null : `rtsp://192.168.1.80/${n}/sub` })),
+        } };
+      };
       clickButton("Test Camera");
       clickButton("Configurar automaticamente");
       await tick();
+      await tick();
+      window.api.cameras.autoConfigure = originalConfigure;
     }
   };
   return "Preset generation, test/save payloads, validation, manual override and existing-camera editing passed";

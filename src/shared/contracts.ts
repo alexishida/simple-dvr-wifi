@@ -35,6 +35,8 @@ export const StreamProfileSchema = z.enum(["main", "sub"]);
 export const CameraSummarySchema = z
   .object({
     id: CameraIdSchema,
+    deviceId: z.string().uuid().nullable().optional(),
+    channelKey: z.string().max(512).nullable().optional(),
     name: CameraNameSchema,
     host: HostSchema,
     active: z.boolean(),

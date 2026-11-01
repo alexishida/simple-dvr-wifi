@@ -1,3 +1,4 @@
+import { requestWhepAnswer } from "../whep-request.js";
 import { memo, useEffect, useRef, useState } from 'react'
 import { CameraIcon, VolumeIcon, VolumeMutedIcon, WifiIcon } from '../icons.js'
 import { audioCodecFromSdp } from '../media-codecs.js'
@@ -178,18 +179,10 @@ export const LiveVideo = memo(function LiveVideo({
       if (!peer.localDescription?.sdp)
         throw new Error('Não foi possível criar a oferta WebRTC.')
 
-      const response = await fetch(endpoint.value.url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${bearerToken}`,
-          'Content-Type': 'application/sdp',
-          Accept: 'application/sdp',
-        },
-        body: peer.localDescription.sdp,
-        signal: AbortSignal.any([
-          abortController.signal,
-          AbortSignal.timeout(10_000),
-        ]),
+      const response = await requestWhepAnswer(endpoint.value.url, {
+        token: bearerToken,
+        sdp: peer.localDescription.sdp,
+        signal: abortController.signal,
       })
       if (!response.ok)
         throw new Error(`O stream respondeu com HTTP ${response.status}.`)

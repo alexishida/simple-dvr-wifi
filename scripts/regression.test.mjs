@@ -1,3 +1,4 @@
+import { discoverCameraChannels } from "../src/main/services/camera-channel-discovery.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PtzControlService } from "../src/main/services/ptz-control.ts";
@@ -2554,4 +2555,134 @@ test("recording playback rejects invalid ranges and serves HEAD without a body",
   );
   assert.equal(response.headers.get("content-length"), "10");
   assert.equal(response.body, null);
+});
+
+
+test("ONVIF channels keep three lenses separate from their quality profiles", async () => {
+  const profiles = [];
+  for (let lens = 1; lens <= 3; lens++) {
+    for (const streamType of ["main", "sub"]) profiles.push({
+      token: `${lens}-${streamType}`, videoSourceToken: `lens-${lens}`, name: streamType,
+      streamType, width: streamType === "main" ? 1920 : 640, height: streamType === "main" ? 1080 : 360,
+      rtspUrl: `rtsp://camera/lens/${lens}/${streamType}`,
+    });
+  }
+  const channels = discoverCameraChannels({ profiles });
+  assert.equal(channels.length, 3);
+  assert.equal(channels[2].rtspUrl, "rtsp://camera/lens/3/main");
+  assert.equal(channels[2].rtspSubUrl, "rtsp://camera/lens/3/sub");
+  const icsee = profiles.map((p) => ({ ...p, videoSourceToken: null,
+    rtspUrl: `rtsp://camera/user=admin?channel=${p.token[0]}&stream=${p.streamType === "main" ? 0 : 1}` }));
+  assert.equal(discoverCameraChannels({ profiles: icsee }).length, 3);
+  assert.equal(discoverCameraChannels({ profiles: [profiles[0]] })[0].rtspSubUrl, null);
+  assert.equal(discoverCameraChannels({ profiles: profiles.slice(0, 2).map(p => ({ ...p, videoSourceToken: null })) }).length, 1);
+});
+
+
+test("registration preview keeps credentials in main and removes temporary frames", async () => {
+  const { captureRegistrationPreview } = await import("../src/main/services/camera-registration-preview.ts");
+  const { writeFile, access } = await import("node:fs/promises");
+  let output;
+  const runner = { run: async (options) => {
+    assert.equal(options.args[options.args.indexOf("-i") + 1], "rtsp://admin:secret@camera/live");
+    assert.equal(options.timeoutMs, 8000);
+    output = options.args.at(-1);
+    await writeFile(output, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    return { exitCode: 0, timedOut: false };
+  } };
+  const frame = await captureRegistrationPreview({ rtspUrl: "rtsp://camera/live", username: "admin", password: "secret" }, "ffmpeg", runner);
+  assert.equal(frame.image, "data:image/jpeg;base64,/9j/2Q==");
+  assert.equal(JSON.stringify(frame).includes("secret"), false);
+  await assert.rejects(access(output));
+  await assert.rejects(captureRegistrationPreview({ rtspUrl: "file:///secret" }, "ffmpeg", runner));
+  await assert.rejects(captureRegistrationPreview({ rtspUrl: "rtsp://camera/live", username: "admin", password: "secret" }, "ffmpeg", { run: async options => {
+    output = options.args.at(-1);
+    await writeFile(output, "invalid frame");
+    return { exitCode: 0, timedOut: false };
+  } }));
+  await assert.rejects(access(output));
+});
+
+
+test("WHEP waits for the main RTSP source after the gateway listener opens", async () => {
+  const { requestWhepAnswer } = await import("../src/renderer/whep-request.ts");
+  let attempts = 0;
+  const result = await requestWhepAnswer("http://127.0.0.1/video/whep", {
+    token: "viewer:test", sdp: "offer", signal: new AbortController().signal,
+  }, { retryMs: 1, fetchImpl: async (_url, input) => {
+    assert.equal(input.headers.Authorization, "Bearer viewer:test");
+    return ++attempts < 3 ? new Response("no publisher", { status: 404 }) : new Response("answer", { status: 201 });
+  } });
+  assert.equal(attempts, 3);
+  assert.equal(await result.text(), "answer");
+  attempts = 0;
+  const denied = await requestWhepAnswer("http://127.0.0.1/video/whep", {
+    token: "viewer:test", sdp: "offer", signal: new AbortController().signal,
+  }, { retryMs: 1, fetchImpl: async () => { attempts++; return new Response(null, { status: 401 }); } });
+  assert.equal(denied.status, 401);
+  assert.equal(attempts, 1);
+  await assert.rejects(requestWhepAnswer("http://127.0.0.1/video/whep", {
+    token: "viewer:test", sdp: "offer", signal: new AbortController().signal,
+  }, { timeoutMs: 15, retryMs: 1, fetchImpl: async () => new Response(null, { status: 404 }) }), /a tempo/);
+  const controller = new AbortController();
+  await assert.rejects(requestWhepAnswer("http://127.0.0.1/video/whep", {
+    token: "viewer:test", sdp: "offer", signal: controller.signal,
+  }, { retryMs: 1, fetchImpl: async () => { controller.abort(); return new Response(null, { status: 404 }); } }));
+});
+
+
+test("optional ONVIF presets do not disable movement or hide authentication failures", async () => {
+  const { OnvifAdapter, OnvifAuthenticationError } = await import("../src/workers/camera/onvif-adapter.ts");
+  const { OnvifUnsupportedOperationError } = await import("../src/workers/camera/onvif-errors.ts");
+  const { PtzCommandGuard, ptzCapabilitiesFromOnvif } = await import("../src/workers/camera/ptz-adapter.ts");
+  const fault = '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><s:Fault><s:Code><s:Value>s:Receiver</s:Value><s:Subcode><s:Value>ter:ActionNotSupported</s:Value></s:Subcode></s:Code><s:Reason><s:Text>This optional method is not implemented</s:Text></s:Reason></s:Fault></s:Body></s:Envelope>';
+  for (const status of [200, 500]) {
+    const adapter = new OnvifAdapter({ deviceServiceUrl: "http://camera/onvif", transport: { post: async () => ({ status, body: fault }) } });
+    await assert.rejects(adapter.listPresets({ profileToken: "main" }), OnvifUnsupportedOperationError);
+  }
+  let presetRequests = 0;
+  let moveRequests = 0;
+  const guard = new PtzCommandGuard(ptzCapabilitiesFromOnvif({ ptzSupported: true }), {
+    listPresets: async () => { presetRequests++; throw new OnvifUnsupportedOperationError(); },
+    continuousMove: async () => { moveRequests++; }, stop: async () => {},
+  });
+  const controller = new PtzControlService(guard, "main");
+  assert.deepEqual(await controller.listPresets(), []);
+  assert.deepEqual(await controller.listPresets(), []);
+  assert.equal(presetRequests, 1);
+  assert.equal(controller.state.presetsSupported, false);
+  await controller.startMove("camera", { pan: 0.1 });
+  await controller.shutdown();
+  assert.equal(moveRequests, 1);
+  const authentication = new PtzControlService(new PtzCommandGuard(ptzCapabilitiesFromOnvif({ ptzSupported: true }), {
+    listPresets: async () => { throw new OnvifAuthenticationError(); },
+  }), "main");
+  await assert.rejects(authentication.listPresets(), OnvifAuthenticationError);
+  assert.equal(authentication.state.presetsSupported, true);
+});
+
+
+test("short PTZ clicks carry a camera-side timeout and a matching stop lease", async () => {
+  const { OnvifAdapter } = await import("../src/workers/camera/onvif-adapter.ts");
+  const { PtzCommandGuard, ptzCapabilitiesFromOnvif } = await import("../src/workers/camera/ptz-adapter.ts");
+  const requests = [];
+  const adapter = new OnvifAdapter({ deviceServiceUrl: "http://camera/onvif", transport: { post: async (_url, body) => {
+    requests.push(body);
+    return { status: 200, body: '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body/></s:Envelope>' };
+  } } });
+  let duration;
+  const controller = new PtzControlService(new PtzCommandGuard(ptzCapabilitiesFromOnvif({ ptzSupported: true }), adapter), "main", {
+    clock: { setTimeout: (_callback, delay) => { duration = delay; return 1; }, clearTimeout() {} },
+  });
+  await controller.startMove("camera", { pan: 0.1, tilt: 0 }, 120);
+  assert.equal(duration, 120);
+  assert.match(requests[0], /<tptz:Timeout>PT0.12S<\/tptz:Timeout>/);
+  assert.match(requests[0], /x="0.1"/);
+  await controller.stop("pointer_release");
+  assert.match(requests[1], /<tptz:Stop>/);
+  assert.equal(controller.isMoving, false);
+  await controller.startMove("camera", { pan: -0.1 });
+  assert.equal(duration, 1500);
+  assert.doesNotMatch(requests[2], /<tptz:Timeout>/);
+  await controller.shutdown();
 });

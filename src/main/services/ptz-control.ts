@@ -1,3 +1,4 @@
+import { OnvifUnsupportedOperationError } from "../../workers/camera/onvif-errors.js";
 import {
   normalizePtzVelocity,
   type NormalizedVelocity,
@@ -25,6 +26,7 @@ export interface PtzLeaseOptions {
 }
 
 export interface PtzControlState {
+  presetsSupported: boolean
   cameraId: string | null
   moving: boolean
   movingSince: string | null
@@ -63,6 +65,7 @@ function axesFromVelocity(velocity: NormalizedVelocity): PtzAxes {
 }
 
 export class PtzControlService {
+  private presetsAvailable = true
   private leaseTimer: unknown = null
   private cameraId: string | null = null
   private moving = false
@@ -88,6 +91,7 @@ export class PtzControlService {
 
   get state(): PtzControlState {
     return {
+      presetsSupported: this.presetsAvailable,
       cameraId: this.cameraId,
       moving: this.moving,
       movingSince: this.movingSince,
@@ -97,42 +101,44 @@ export class PtzControlService {
     }
   }
 
-  async startMove(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
-    return this.enqueue(() => this.startMoveNow(cameraId, rawVelocity))
+  async startMove(cameraId: string, rawVelocity: PtzVelocity, durationMs?: number): Promise<void> {
+    return this.enqueue(() => this.startMoveNow(cameraId, rawVelocity, durationMs))
   }
 
-  private async startMoveNow(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
+  private async startMoveNow(cameraId: string, rawVelocity: PtzVelocity, durationMs?: number): Promise<void> {
     if (this.stopBlocked) throw new Error('Aguardando confirmação da parada PTZ.')
     const velocity = normalizePtzVelocity(rawVelocity)
     this.cameraId = cameraId
     await this.guard.continuousMove({
       profileToken: this.profileToken,
       velocity: toVelocityRecord(velocity),
+      timeoutMs: durationMs,
     })
 
     this.moving = true
     this.activeAxes = axesFromVelocity(velocity)
     this.movingSince = new Date().toISOString()
     this.stopBlocked = false
-    this.scheduleLease()
+    this.scheduleLease(durationMs)
   }
 
-  async renew(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
-    return this.enqueue(() => this.renewNow(cameraId, rawVelocity))
+  async renew(cameraId: string, rawVelocity: PtzVelocity, durationMs?: number): Promise<void> {
+    return this.enqueue(() => this.renewNow(cameraId, rawVelocity, durationMs))
   }
 
-  private async renewNow(cameraId: string, rawVelocity: PtzVelocity): Promise<void> {
+  private async renewNow(cameraId: string, rawVelocity: PtzVelocity, durationMs?: number): Promise<void> {
     const velocity = normalizePtzVelocity(rawVelocity)
     if (this.stopBlocked) throw new Error('Aguardando confirmação da parada PTZ.')
     await this.guard.continuousMove({
       profileToken: this.profileToken,
       velocity: toVelocityRecord(velocity),
+      timeoutMs: durationMs,
     })
     this.cameraId = cameraId
     this.moving = true
     this.activeAxes = axesFromVelocity(velocity)
     this.movingSince ??= new Date().toISOString()
-    this.scheduleLease()
+    this.scheduleLease(durationMs)
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
@@ -141,12 +147,12 @@ export class PtzControlService {
     return result
   }
 
-  private scheduleLease(): void {
+  private scheduleLease(durationMs?: number): void {
     if (this.leaseTimer !== null) this.clock.clearTimeout(this.leaseTimer)
     this.leaseTimer = this.clock.setTimeout(() => {
       this.leaseTimer = null
       void this.stop('lease_expiry')
-    }, this.leaseMs)
+    }, Math.min(durationMs ?? this.leaseMs, this.leaseMs))
   }
 
   async stop(trigger: PtzControlTrigger): Promise<void> {
@@ -212,7 +218,14 @@ export class PtzControlService {
   }
 
   async listPresets(): Promise<Array<{ token: string; name: string }>> {
-    return this.guard.listPresets({ profileToken: this.profileToken })
+    if (!this.presetsAvailable) return []
+    try {
+      return await this.guard.listPresets({ profileToken: this.profileToken })
+    } catch (error) {
+      if (!(error instanceof OnvifUnsupportedOperationError)) throw error
+      this.presetsAvailable = false
+      return []
+    }
   }
 
   async gotoPreset(presetToken: string): Promise<void> {

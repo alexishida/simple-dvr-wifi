@@ -1,4 +1,6 @@
+import type { CameraChannel } from "../../shared/camera-channels.js";
 export interface CameraDraft {
+  channels?: CameraChannel[];
   name: string;
   host: string;
   port?: number | null;

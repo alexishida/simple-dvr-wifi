@@ -54,6 +54,8 @@ export type CameraEndpoint = z.infer<typeof CameraEndpointSchema>
 
 export const CameraRecordSchema = z.object({
   id: CameraIdSchema,
+  deviceId: z.string().uuid().nullable().optional(),
+  channelKey: z.string().max(512).nullable().optional(),
   name: z.string().trim().min(1).max(120),
   host: z.string().trim().min(1).max(253),
   port: z.number().int().min(1).max(65_535).nullable(),

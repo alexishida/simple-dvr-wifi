@@ -1,3 +1,4 @@
+import { CameraChannelPreviews } from "./CameraChannelPreviews.js";
 import { useRef, useState } from "react";
 import { parseHttpUrl, parseRtspUrl } from "../../shared/camera-urls.js";
 import {
@@ -197,6 +198,8 @@ export function CameraForm({
       }
 
       const result = await window.api.cameras.create({
+        channels: identityChanged ? undefined : initial?.channels,
+        rtspSubUrl: initial?.rtspSubUrl ?? null,
         name: name.trim(),
         manufacturer:
           identified?.manufacturer ??
@@ -371,13 +374,13 @@ export function CameraForm({
               )}
             </div>
           )}
-
-          <div className="field-row camera-form-address">
+          <div className="field-row camera-form-address" style={verifiedAutomatically && !showAdvanced ? { display: "none" } : undefined}>
             <div className="field">
               <label className="field-label" htmlFor="cam-host">
                 Endereço (IP ou hostname)
               </label>
               <input
+                readOnly={Boolean(initial?.channels?.length)}
                 id="cam-host"
                 className="field-input"
                 value={host}
@@ -394,6 +397,7 @@ export function CameraForm({
                 Porta
               </label>
               <input
+                readOnly={Boolean(initial?.channels?.length)}
                 id="cam-port"
                 className="field-input"
                 type="number"
@@ -407,8 +411,7 @@ export function CameraForm({
               />
             </div>
           </div>
-
-          <div className="field-row camera-form-credentials">
+          <div className="field-row camera-form-credentials" style={verifiedAutomatically && !showAdvanced ? { display: "none" } : undefined}>
             <div className="field">
               <label className="field-label" htmlFor="cam-user">
                 Usuário
@@ -577,6 +580,9 @@ export function CameraForm({
               )}
             </>
           )}
+          {initial?.channels && (
+            <CameraChannelPreviews channels={initial.channels} username={username} password={password} />
+          )}
           {!showAdvanced && !editingId && (
             <button
               type="button"
@@ -594,6 +600,7 @@ export function CameraForm({
                   URL RTSP <span className="field-optional">Opcional</span>
                 </label>
                 <input
+                  readOnly={Boolean(initial?.channels?.length)}
                   id="cam-rtsp"
                   className="field-input"
                   placeholder="rtsp://camera/stream"
@@ -630,6 +637,7 @@ export function CameraForm({
                   URL ONVIF <span className="field-optional">Opcional</span>
                 </label>
                 <input
+                  readOnly={Boolean(initial?.channels?.length)}
                   id="cam-onvif"
                   className="field-input"
                   placeholder="http://camera/onvif/device_service"

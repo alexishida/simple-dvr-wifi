@@ -1,3 +1,6 @@
+import { captureRegistrationPreview } from "./services/camera-registration-preview.js";
+import { CameraChannelSchema } from "../shared/camera-channels.js";
+import { discoverCameraChannels, cameraProfileChannelKey } from "./services/camera-channel-discovery.js";
 import {
   app,
   BrowserWindow,
@@ -225,6 +228,8 @@ function mapCameraRecord(
 ): CameraSummary {
   return {
     id: record.id,
+    deviceId: record.deviceId ?? null,
+    channelKey: record.channelKey ?? null,
     name: record.name,
     host: record.host,
     active: record.active,
@@ -1389,6 +1394,8 @@ const SaveConfigRequestSchema = z.object({
 });
 
 const CameraCreateRequestSchema = z.object({
+  channels: z.array(CameraChannelSchema).min(1).max(16).optional(),
+  rtspSubUrl: z.string().max(2048).nullable().optional(),
   name: z.string().min(1).max(120),
   host: z.string().min(1).max(253),
   port: z.number().int().min(1).max(65_535).nullable().optional(),
@@ -1594,6 +1601,7 @@ function registerIpcHandlers(): void {
   });
 
   registry.register("cameras:create", {
+    maxPayloadBytes: 128 * 1024,
     input: CameraCreateRequestSchema,
     handle: async (input) => {
       if (!cameraManagement)
@@ -1607,9 +1615,12 @@ function registerIpcHandlers(): void {
         camera: mapCameraRecord(result.camera, hasCredential),
         duplicate: result.duplicate,
       };
-      if (!result.duplicate) await startMotionPrebuffer(result.camera.id);
-      if (result.camera.active)
-        void motionSubscriptions?.start(result.camera.id);
+      if (!result.duplicate) {
+        for (const camera of result.cameras ?? [result.camera]) {
+          await startMotionPrebuffer(camera.id);
+          if (camera.active) void motionSubscriptions?.start(camera.id);
+        }
+      }
       await emitCameraChanged();
       return response;
     },
@@ -1804,6 +1815,24 @@ function registerIpcHandlers(): void {
     },
   });
 
+  let activeRegistrationPreviews = 0;
+  registry.register("cameras:preview", {
+    input: z.object({
+      rtspUrl: z.string().min(1).max(2048),
+      username: z.string().max(253).nullable().optional(),
+      password: z.string().max(2048).nullable().optional(),
+    }),
+    handle: async (input) => {
+      if (activeRegistrationPreviews >= 2) throw new Error("Aguarde a captura em andamento e tente novamente.");
+      activeRegistrationPreviews++;
+      try {
+        return await captureRegistrationPreview(input, bundledFfmpegPath());
+      } finally {
+        activeRegistrationPreviews--;
+      }
+    },
+  });
+
   registry.register("cameras:autoConfigure", {
     input: CameraAutoConfigureSchema,
     handle: autoConfigureCameraHost,
@@ -1858,6 +1887,9 @@ function registerIpcHandlers(): void {
             mjpeg: info.capabilities.mjpeg === "supported",
             recording: info.capabilities.recording === "supported",
           });
+          if (camera.channelKey) {
+            info.profiles = info.profiles.filter((profile) => cameraProfileChannelKey(profile) === camera.channelKey);
+          }
           if (info.profiles.length > 0) {
             await database.request("profile.replaceAll", {
               cameraId: id,
@@ -1872,6 +1904,13 @@ function registerIpcHandlers(): void {
                 fps: profile.fps,
               })),
             });
+          }
+          // Preserve the selected lens when retesting a multi-channel device.
+          if (camera.channelKey) {
+            const channel = discoverCameraChannels(info).find((item) => item.key === camera.channelKey);
+            info.rtspMainUrl = channel?.rtspUrl ?? null;
+            info.rtspSubUrl = channel?.rtspSubUrl ?? null;
+            info.snapshotUri = null;
           }
           if (info.rtspMainUrl) {
             const parsedRtsp = parseRtspUrl(info.rtspMainUrl);
@@ -2190,13 +2229,14 @@ function registerIpcHandlers(): void {
   registry.register("ptz:move", {
     input: z.object({
       cameraId: z.string().uuid(),
+      durationMs: z.number().int().min(50).max(1500).optional(),
       velocity: z.object({
         pan: z.number().optional(),
         tilt: z.number().optional(),
         zoom: z.number().optional(),
       }),
     }),
-    handle: async ({ cameraId, velocity }) => {
+    handle: async ({ cameraId, velocity, durationMs }) => {
       console.log("[ptz:move]", cameraId, JSON.stringify(velocity));
       if (!ptzRegistry) return { started: false };
       const camera = await getCameraRecord(cameraId);
@@ -2213,6 +2253,7 @@ function registerIpcHandlers(): void {
         cameraId,
         velocity,
         camera.supportsPtz,
+        durationMs,
       );
       console.log("[ptz:move] resultado:", JSON.stringify(result));
       return result;

@@ -1,3 +1,4 @@
+import { OnvifUnsupportedOperationError } from "./onvif-errors.js";
 import { createHash, randomBytes } from "node:crypto";
 import { parseXmlSafe, queryAll, queryText } from "./xml.js";
 import type {
@@ -131,9 +132,13 @@ function successfulSoapBody(body: string, maxBytes: number): string {
       queryText(fault, "Body/Fault/Reason") ??
       queryText(fault, "Body/Fault/faultstring") ??
       queryText(fault, "Body/Fault/Code/Value");
+    const code = queryText(fault, "Body/Fault/Code/Subcode/Value") ?? "";
+    if (/(?:ActionNotSupported|OptionalActionNotImplemented|NotImplemented)/i.test(code) || /(?:optional method is not implemented|action not supported|method not implemented)/i.test(reason ?? "")) {
+      throw new OnvifUnsupportedOperationError();
+    }
     if (reason) throw new Error(`ONVIF retornou uma falha: ${reason}`);
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("ONVIF retornou")) {
+    if (error instanceof OnvifUnsupportedOperationError || (error instanceof Error && error.message.startsWith("ONVIF retornou"))) {
       throw error;
     }
   }
@@ -401,6 +406,7 @@ export class OnvifAdapter implements CameraAdapter {
   }
 
   async continuousMove(options: {
+    timeoutMs?: number;
     profileToken: string;
     velocity: Record<string, number>;
   }): Promise<void> {
@@ -426,13 +432,14 @@ export class OnvifAdapter implements CameraAdapter {
       }
     }
     this.skipNextTapoPanTiltStop = false;
+    const timeout = options.timeoutMs === undefined ? "" : `<tptz:Timeout>PT${Math.min(1500, Math.max(50, Math.round(options.timeoutMs))) / 1000}S</tptz:Timeout>`;
     const velocity = ptzVectorXml(
       options.velocity,
       "Velocity",
       this.useExplicitPtzSpaces,
     );
     await this.call(
-      `<tptz:ContinuousMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${velocity}</tptz:ContinuousMove>`,
+      `<tptz:ContinuousMove><tptz:ProfileToken>${escapeXml(this.actualProfileToken(options.profileToken))}</tptz:ProfileToken>${velocity}${timeout}</tptz:ContinuousMove>`,
       this.ptzServiceUrl ?? this.options.deviceServiceUrl,
     );
   }
@@ -691,6 +698,7 @@ export class OnvifAdapter implements CameraAdapter {
 
     assertSoapAuthentication(lastResponse.body, this.options.maxXmlBytes ?? DEFAULT_OPTIONS.maxXmlBytes);
     if (lastResponse.status === 401 || lastResponse.status === 403) throw new OnvifAuthenticationError();
+    successfulSoapBody(lastResponse.body, this.options.maxXmlBytes ?? DEFAULT_OPTIONS.maxXmlBytes);
     throw new Error(`ONVIF respondeu com status ${lastResponse.status}.`);
   }
 
@@ -838,6 +846,7 @@ export class OnvifAdapter implements CameraAdapter {
         );
         const profileInfo: CameraProfileInfo = {
           token,
+          videoSourceToken: videoSource ? queryText(videoSource, "SourceToken") : null,
           name,
           streamType: guessStreamType(name),
           codec:

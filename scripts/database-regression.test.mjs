@@ -478,7 +478,7 @@ test("media metadata migration upgrades an existing version 1 database", () => {
     runMigrations(db, {}, [MIGRATIONS[0]]);
     assert.throws(() => db.prepare("SELECT * FROM media_metadata"));
     const result = runMigrations(db, {}, MIGRATIONS);
-    assert.deepEqual(result.applied, [2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.deepEqual(result.applied, [2, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert.doesNotThrow(() => db.prepare("SELECT * FROM media_metadata"));
     assert.equal(db.prepare("SELECT recording FROM camera_capabilities LIMIT 1").columns()[0]?.name, "recording");
     assert.equal(db.prepare("SELECT audio_codec FROM camera_profiles LIMIT 1").columns()[0]?.name, "audio_codec");
@@ -663,4 +663,33 @@ test("failed migrations leave the worker uninitialized and allow a subsequent op
   worker.open(":memory:");
   assert.equal(worker.isReady(), true);
   worker.close();
+});
+
+
+test("automatic registration persists three linked channels and rolls back a partial device", async (t) => {
+  const { worker, request } = memoryDatabase(t);
+  const secrets = new Map();
+  const management = new CameraManagementService({
+    request: (op, payload) => worker.dispatch({ id: "channels", op, payload }),
+  }, {
+    setCredential: async (id, input) => secrets.set(`${id}:${input.service}`, input.password),
+    removeCredential: async (id) => { for (const key of secrets.keys()) if (key.startsWith(`${id}:`)) secrets.delete(key); },
+  });
+  const channels = [1, 2, 3].map(n => ({ key: `source:${n}`, name: `Canal ${n}`,
+    rtspUrl: `rtsp://camera/${n}/main`, rtspSubUrl: `rtsp://camera/${n}/sub` }));
+  const input = { name: "iCSee", host: "camera", username: "admin", password: "secret", channels };
+  const result = await management.create(input);
+  assert.equal(result.cameras.length, 3);
+  assert.equal(new Set(result.cameras.map(c => c.deviceId)).size, 1);
+  assert.ok(result.camera.deviceId);
+  for (let i = 0; i < 3; i++) {
+    const camera = await request("camera.get", { id: result.cameras[i].id });
+    assert.equal(camera.channelKey, channels[i].key);
+    assert.equal(camera.endpoints.find(e => e.service === "rtsp_sub").url, channels[i].rtspSubUrl);
+    assert.equal(secrets.get(`${camera.id}:rtsp`), "secret");
+  }
+  assert.equal((await management.create(input)).duplicate, true);
+  await assert.rejects(management.create({ ...input, host: "other", channels: [channels[0], { ...channels[1], rtspUrl: "invalid" }] }));
+  assert.equal((await request("camera.list")).length, 3);
+  assert.equal(secrets.size, 6);
 });

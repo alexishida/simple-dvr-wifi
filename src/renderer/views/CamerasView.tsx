@@ -330,6 +330,8 @@ export function CamerasView({
             host: onvifUrl ? new URL(onvifUrl).hostname : host.trim(),
             onvifUrl,
             rtspUrl: identified.rtspUrl,
+            rtspSubUrl: result.value.channels?.[0]?.rtspSubUrl ?? null,
+            channels: result.value.channels,
             username: username.trim() || null,
             password: password || null,
             manufacturer: identified.manufacturer,

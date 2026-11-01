@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { CameraChannel } from "../../shared/camera-channels.js";
 import type { DatabaseSupervisor } from "../supervisors/database.js";
 import type { CredentialService } from "./credentials.js";
 import type { CameraRecord } from "../../shared/database.js";
@@ -10,6 +12,10 @@ export interface CameraDuplicateCheck {
 }
 
 export interface CameraCreateInput {
+  channels?: CameraChannel[];
+  deviceId?: string;
+  channelKey?: string;
+  rtspSubUrl?: string | null;
   name: string;
   host: string;
   port?: number | null;
@@ -77,7 +83,33 @@ export class CameraManagementService {
 
   async create(
     input: CameraCreateInput,
-  ): Promise<{ camera: CameraRecord; duplicate: boolean }> {
+  ): Promise<{ camera: CameraRecord; cameras?: CameraRecord[]; duplicate: boolean }> {
+    if (input.channels?.length) {
+      const duplicates = await this.checkDuplicates(input);
+      const existing = duplicates.byAddress ?? duplicates.byEpr ?? duplicates.bySerial;
+      if (existing && !input.allowDuplicate) return { camera: existing, duplicate: true };
+      const deviceId = randomUUID();
+      const cameras: CameraRecord[] = [];
+      try {
+        for (const channel of input.channels) {
+          const result = await this.create({
+            ...input, channels: undefined, deviceId, channelKey: channel.key,
+            name: input.channels.length > 1 ? `${input.name.slice(0, 95)} - ${channel.name.slice(0, 20)}` : input.name,
+            rtspUrl: channel.rtspUrl, rtspSubUrl: channel.rtspSubUrl,
+            port: parseRtspUrl(channel.rtspUrl)?.port ?? null,
+            allowDuplicate: true,
+          });
+          cameras.push(result.camera);
+        }
+        return { camera: cameras[0]!, cameras, duplicate: false };
+      } catch (error) {
+        for (const camera of cameras) {
+          await this.credentials.removeCredential(camera.id);
+          await this.database.request("camera.remove", { id: camera.id });
+        }
+        throw error;
+      }
+    }
     const parsedRtsp = input.rtspUrl ? parseRtspUrl(input.rtspUrl) : null;
     if (input.rtspUrl && !parsedRtsp) {
       throw new Error("URL RTSP inválida.");
@@ -89,6 +121,8 @@ export class CameraManagementService {
       : null;
     if (input.snapshotUri && !parsedSnapshot)
       throw new Error("URL de snapshot inválida.");
+    const parsedSub = input.rtspSubUrl ? parseRtspUrl(input.rtspSubUrl) : null;
+    if (input.rtspSubUrl && !parsedSub) throw new Error("URL RTSP lite invalida.");
     const rtspUrl = parsedRtsp?.sanitizedUrl ?? null;
     const credentialUsername =
       input.username ||
@@ -129,10 +163,13 @@ export class CameraManagementService {
     if (parsedOnvif)
       endpoints.push({ service: "onvif", url: parsedOnvif.sanitizedUrl });
     if (rtspUrl) endpoints.push({ service: "rtsp", url: rtspUrl });
+    if (parsedSub) endpoints.push({ service: "rtsp_sub", url: parsedSub.sanitizedUrl });
     if (parsedSnapshot)
       endpoints.push({ service: "snapshot", url: parsedSnapshot.sanitizedUrl });
 
     const response = await this.database.request("camera.create", {
+      deviceId: input.deviceId ?? null,
+      channelKey: input.channelKey ?? null,
       name: input.name,
       host: input.host,
       port: input.port ?? null,
@@ -147,26 +184,26 @@ export class CameraManagementService {
     }
     let camera = response.value as CameraRecord;
 
-    if ((credentialUsername && credentialPassword) || (sdCardUsername && sdCardPassword)) {
+    if (credentialUsername || credentialPassword || (sdCardUsername && sdCardPassword)) {
       try {
-        if (credentialUsername && credentialPassword) {
+        if (credentialUsername || credentialPassword) {
           await this.credentials.setCredential(camera.id, {
             service: "onvif",
             username: credentialUsername,
-            password: credentialPassword,
+            password: credentialPassword ?? "",
           });
           if (rtspUrl) {
             await this.credentials.setCredential(camera.id, {
               service: "rtsp",
               username: credentialUsername,
-              password: credentialPassword,
+              password: credentialPassword ?? "",
             });
           }
           if (parsedSnapshot) {
             await this.credentials.setCredential(camera.id, {
               service: "snapshot",
               username: credentialUsername,
-              password: credentialPassword,
+              password: credentialPassword ?? "",
             });
           }
         }

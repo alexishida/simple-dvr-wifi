@@ -1,3 +1,4 @@
+import type { CameraChannel } from "../shared/camera-channels.js";
 import type {
   CameraEditDetails,
   CameraMetrics,
@@ -35,6 +36,8 @@ export interface MediaSessionStatus {
 }
 
 export interface CameraCreateInput {
+  channels?: CameraChannel[];
+  rtspSubUrl?: string | null;
   name: string;
   host: string;
   port?: number | null;
@@ -75,6 +78,7 @@ export interface CameraTestResult {
 }
 
 export interface CameraAutoConfigureResult extends CameraTestResult {
+  channels?: CameraChannel[];
   onvifUrl: string | null;
 }
 
@@ -104,6 +108,7 @@ export interface NetworkCameraResult {
 }
 
 export interface CameraApi {
+  preview: (input: { rtspUrl: string; username?: string | null; password?: string | null }) => Promise<Result<{ image: string }>>;
   list: () => Promise<Result<CameraSummary[]>>;
   onChanged: (listener: EventListener<"cameras:changed">) => Unsubscribe;
   details: (id: string) => Promise<Result<CameraEditDetails>>;
@@ -211,6 +216,7 @@ export type PtzStopTrigger =
   | "shutdown";
 
 export interface PtzControlSnapshot {
+  presetsSupported?: boolean;
   cameraId: string | null;
   moving: boolean;
   movingSince: string | null;
@@ -224,6 +230,7 @@ export interface PtzApi {
   move: (
     cameraId: string,
     velocity: PtzVelocityInput,
+    durationMs?: number,
   ) => Promise<Result<{ started: boolean }>>;
   stop: (cameraId: string, trigger: PtzStopTrigger) => Promise<Result<void>>;
   status: (cameraId: string) => Promise<Result<PtzControlSnapshot | null>>;

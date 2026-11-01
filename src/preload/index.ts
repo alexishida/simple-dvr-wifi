@@ -1,3 +1,4 @@
+import type { CameraChannel } from "../shared/camera-channels.js";
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import type {
@@ -32,6 +33,8 @@ import {
 } from "../shared/events.js";
 
 export interface CameraCreateInput {
+  channels?: CameraChannel[];
+  rtspSubUrl?: string | null;
   name: string;
   host: string;
   port?: number | null;
@@ -85,6 +88,7 @@ export interface CameraTestResult {
 }
 
 export interface CameraAutoConfigureResult extends CameraTestResult {
+  channels?: CameraChannel[];
   onvifUrl: string | null;
 }
 
@@ -126,6 +130,7 @@ export interface MediaSessionStatus {
 }
 
 export interface PtzControlSnapshot {
+  presetsSupported?: boolean;
   cameraId: string | null;
   moving: boolean;
   movingSince: string | null;
@@ -250,6 +255,8 @@ const api = {
       password?: string | null;
     }): Promise<Result<CameraTestResult>> =>
       ipcRenderer.invoke("cameras:testConnection", input),
+    preview: (input: { rtspUrl: string; username?: string | null; password?: string | null }): Promise<Result<{ image: string }>> =>
+      ipcRenderer.invoke("cameras:preview", input),
     autoConfigure: (input: {
       host: string;
       onvifUrl?: string | null;
@@ -320,8 +327,9 @@ const api = {
     move: (
       cameraId: string,
       velocity: PtzVelocityInput,
+      durationMs?: number,
     ): Promise<Result<{ started: boolean }>> =>
-      ipcRenderer.invoke("ptz:move", { cameraId, velocity }),
+      ipcRenderer.invoke("ptz:move", { cameraId, velocity, durationMs }),
     stop: (cameraId: string, trigger: PtzStopTrigger): Promise<Result<void>> =>
       ipcRenderer.invoke("ptz:stop", { cameraId, trigger }),
     status: (cameraId: string): Promise<Result<PtzControlSnapshot | null>> =>

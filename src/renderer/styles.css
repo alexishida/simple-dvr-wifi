@@ -4746,3 +4746,14 @@ p {
     border-left: 0;
   }
 }
+
+.camera-channel-previews {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: var(--space-4);
+}
+.camera-channel-preview { margin: 0; min-width: 0; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.camera-channel-preview img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: var(--color-bg); }
+.camera-channel-preview-placeholder { min-height: 120px; display: flex; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-4); color: var(--color-text-secondary); }
+.camera-channel-preview figcaption { display: grid; gap: var(--space-1); padding: var(--space-3); }
+.camera-channel-preview figcaption span { color: var(--color-text-secondary); font-size: var(--text-sm); }

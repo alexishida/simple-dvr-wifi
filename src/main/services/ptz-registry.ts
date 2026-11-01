@@ -65,14 +65,15 @@ export class PtzControllerRegistry {
     cameraId: string,
     velocity: PtzVelocity,
     ptzSupported: boolean,
+    durationMs?: number,
   ): Promise<{ started: boolean }> {
     return this.enqueue(cameraId, async () => {
       const controller = await this.getOrCreate(cameraId, ptzSupported)
       if (!controller || controller.isStopBlocked) return { started: false }
       if (controller.isMoving) {
-        await controller.renew(cameraId, velocity)
+        await controller.renew(cameraId, velocity, durationMs)
       } else {
-        await controller.startMove(cameraId, velocity)
+        await controller.startMove(cameraId, velocity, durationMs)
       }
       return { started: true }
     })

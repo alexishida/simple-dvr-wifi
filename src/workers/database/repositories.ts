@@ -22,6 +22,8 @@ function nowIso(): string {
 function mapCamera(row: Row): CameraRecord {
   return {
     id: row.id as string,
+    deviceId: (row.device_id as string) ?? null,
+    channelKey: (row.channel_key as string) ?? null,
     name: row.name as string,
     host: row.host as string,
     port: (row.port as number) ?? null,
@@ -99,6 +101,8 @@ export class CameraRepository {
   constructor(private readonly db: Database.Database) {}
 
   create(input: {
+    deviceId?: string | null
+    channelKey?: string | null
     name: string
     host: string
     port?: number | null
@@ -111,8 +115,8 @@ export class CameraRepository {
     const id = randomUUID()
     const ts = nowIso()
     const insert = this.db.prepare(
-      `INSERT INTO cameras (id, name, host, port, manufacturer, model, serial_number, epr, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO cameras (id, name, host, port, manufacturer, model, serial_number, epr, created_at, updated_at, device_id, channel_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const replaceEndpoints = this.db.prepare(
       `INSERT OR REPLACE INTO camera_endpoints (camera_id, service, url) VALUES (?, ?, ?)`,
@@ -129,6 +133,8 @@ export class CameraRepository {
         input.epr ?? null,
         ts,
         ts,
+        input.deviceId ?? null,
+        input.channelKey ?? null,
       )
       for (const ep of endpoints) replaceEndpoints.run(id, ep.service, ep.url)
     })

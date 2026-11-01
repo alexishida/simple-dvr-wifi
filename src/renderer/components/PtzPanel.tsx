@@ -25,7 +25,7 @@ interface PtzPanelProps {
 
 const SPEED_STEP = 0.05;
 const MAX_SPEED = 1;
-const SHORT_MOVE_MS = 200;
+const SHORT_MOVE_MS = 120;
 
 function clampSpeed(value: number): number {
   return Math.min(MAX_SPEED, Math.max(SPEED_STEP, value));
@@ -38,7 +38,7 @@ export function PtzPanel({
   zoomSupported,
   presetsSupported,
 }: PtzPanelProps): React.JSX.Element {
-  const [speed, setSpeed] = useState(0.5);
+  const [speed, setSpeed] = useState(0.1);
   const [shortMoves, setShortMoves] = useState(true);
   const [blocked, setBlocked] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
@@ -50,6 +50,7 @@ export function PtzPanel({
     Array<{ token: string; name: string }>
   >([]);
   const [newPresetName, setNewPresetName] = useState("");
+  const [presetsAvailable, setPresetsAvailable] = useState(true);
   const [presetsOpen, setPresetsOpen] = useState(false);
   const presetsDialogRef = useRef<HTMLDialogElement>(null);
   const presetsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -74,6 +75,8 @@ export function PtzPanel({
 
   useEffect(() => {
     setPresetsOpen(false);
+    setPresetsAvailable(true);
+    setPresets([]);
   }, [cameraId]);
 
   const clearRepeat = useCallback(() => {
@@ -94,7 +97,7 @@ export function PtzPanel({
       movePending.current = true;
       activeMove.current = true;
       void window.api.ptz
-        .move(cameraId, velocity)
+        .move(cameraId, velocity, shortMoves ? SHORT_MOVE_MS : undefined)
         .then((result) => {
           if (revision !== commandRevision.current) return;
           const started = result.ok && result.value.started;
@@ -119,7 +122,7 @@ export function PtzPanel({
           movePending.current = false;
         });
     },
-    [cameraId, clearRepeat],
+    [cameraId, clearRepeat, shortMoves],
   );
 
   const stopMove = useCallback(
@@ -246,8 +249,11 @@ export function PtzPanel({
       void window.api.ptz
         .status(cameraId)
         .then((result) => {
-          if (!cancelled && result.ok && result.value)
+          if (!cancelled && result.ok && result.value) {
             setBlocked(result.value.stopBlocked);
+            setPresetsAvailable(result.value.presetsSupported !== false);
+            if (result.value.presetsSupported === false) setPresetsOpen(false);
+          }
         })
         .catch(() => {
           /* Command errors remain visible; a failed status poll cannot confirm a stop. */
@@ -469,7 +475,7 @@ export function PtzPanel({
         </select>
         <p className="field-hint">
           {shortMoves
-            ? "Um passo por toque, com parada automática em 0,2 s."
+            ? "Um passo por toque, com parada automática em 0,12 s."
             : "Mantenha pressionado para mover. Solte para parar."}
         </p>
         <label className="field-label" htmlFor="ptz-speed">
@@ -524,6 +530,12 @@ export function PtzPanel({
         </p>
       )}
 
+      {presetsSupported && !presetsAvailable && (
+        <p className="field-hint" role="status">
+          <MoveIcon size={16} /> Esta camera nao disponibiliza presets via ONVIF.
+        </p>
+      )}
+
       {connectionState === "error" && (
         <button
           type="button"
@@ -534,7 +546,7 @@ export function PtzPanel({
         </button>
       )}
 
-      {presetsSupported && (
+      {presetsSupported && presetsAvailable && (
         <button
           type="button"
           className="btn btn-secondary ptz-presets-trigger"
@@ -548,7 +560,7 @@ export function PtzPanel({
         </button>
       )}
 
-      {presetsSupported &&
+      {presetsSupported && presetsAvailable &&
         presetsOpen &&
         createPortal(
           <dialog
